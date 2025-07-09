@@ -1,0 +1,11 @@
+*.crt
+*.key
+*.pem
+
+.env
+*.p12
+*.pfx
+*.ext
+*.csr
+
+*.json
