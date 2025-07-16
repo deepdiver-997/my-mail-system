@@ -31,11 +31,36 @@ public:
     static std::string get_event_name(SmtpsEvent event);
 
     // 数据库操作
+
+    bool auth_user(SmtpsSession* session, const std::string& username, const std::string& password) {
+        auto connection = db_pool_->get_connection();
+        if (connection && connection->is_connected()) {
+            std::string sql = "SELECT * FROM users WHERE username = '" +
+                              connection->escape_string(username) + "' AND password = '" +
+                              connection->escape_string(password) + "'";
+            auto result = connection->query(sql);
+            return result->get_row_count();
+        }
+        return false;
+    }
+
+    void get_mail_data(SmtpsSession* session, std::string& mail_data) {
+        auto connection = db_pool_->get_connection();
+        if (connection && connection->is_connected()) {
+            std::string sql = "SELECT mail_data FROM mails WHERE sender_address = '" +
+                              connection->escape_string(session->context_.sender_address) + "'";
+            auto result = connection->query(sql);
+            if (!result->get_row_count()) {
+                mail_data = result->get_value(0, "mail_data");
+            }
+        }
+    }
+
     void save_mail_data(SmtpsSession* session, const std::string& mail_data) {
         auto connection = db_pool_->get_connection();
         if (connection && connection->is_connected()) {
-            std::string sql = "INSERT INTO mails (session_id, mail_data) VALUES ('" +
-                              connection->escape_string(session->get_session_id()) + "', '" +
+            std::string sql = "INSERT INTO mails (sender_address, mail_data) VALUES ('" +
+                              connection->escape_string(session->context_.sender_address) + "', '" +
                               connection->escape_string(mail_data) + "')";
             connection->execute(sql);
         }

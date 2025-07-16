@@ -15,6 +15,8 @@ enum class SmtpsState {
     GREETING,          // 发送问候语
     WAIT_EHLO,        // 等待EHLO命令
     WAIT_AUTH,        // 等待AUTH命令
+    WAIT_AUTH_USERNAME, // 等待AUTH用户名
+    WAIT_AUTH_PASSWORD, // 等待AUTH密码
     WAIT_MAIL_FROM,   // 等待MAIL FROM命令
     WAIT_RCPT_TO,     // 等待RCPT TO命令
     WAIT_DATA,        // 等待DATA命令
@@ -39,6 +41,7 @@ enum class SmtpsEvent {
 // SMTP会话上下文
 struct SmtpsContext {
     std::string client_hostname;     // 客户端主机名
+    std::string client_username;     // 客户端用户名
     std::string sender_address;      // 发件人地址
     std::vector<std::string> recipient_addresses;  // 收件人地址列表
     std::string message_data;        // 邮件内容
@@ -47,6 +50,7 @@ struct SmtpsContext {
     // 清理上下文数据
     void clear() {
         client_hostname.clear();
+        client_username.clear();
         sender_address.clear();
         recipient_addresses.clear();
         message_data.clear();
@@ -79,9 +83,11 @@ protected:
     
     void process_command(const std::string& command);
 
+public:
+    SmtpsContext context_;           // 会话上下文
+
 private:
     std::shared_ptr<SmtpsFsm> m_fsm;  // 状态机
-    SmtpsContext context_;           // 会话上下文
     SmtpsState current_state_;      // 当前状态
     bool m_receivingData;            // 是否在接收数据模式
     std::string m_mailData;          // 邮件数据缓存

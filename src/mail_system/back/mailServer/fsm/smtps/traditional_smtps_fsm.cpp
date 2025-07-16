@@ -3,7 +3,7 @@
 
 namespace mail_system {
 
-TraditionalSmtpsFsm::TraditionalSmtpsFsm() {
+TraditionalSmtpsFsm::TraditionalSmtpsFsm(std::shared_ptr<DBPool> dbp) : SmtpsFsm(dbp) {
     init_transition_table();
     init_state_handlers();
 }
@@ -45,8 +45,12 @@ void TraditionalSmtpsFsm::process_event(SmtpsSession* session, SmtpsEvent event,
 void TraditionalSmtpsFsm::init_transition_table() {
     // 初始化状态转换表
     transition_table_[std::make_pair(SmtpsState::INIT, SmtpsEvent::CONNECT)] = SmtpsState::GREETING;
-    transition_table_[std::make_pair(SmtpsState::GREETING, SmtpsEvent::EHLO)] = SmtpsState::WAIT_MAIL_FROM;
-    transition_table_[std::make_pair(SmtpsState::WAIT_EHLO, SmtpsEvent::EHLO)] = SmtpsState::WAIT_MAIL_FROM;
+    transition_table_[std::make_pair(SmtpsState::GREETING, SmtpsEvent::EHLO)] = SmtpsState::WAIT_AUTH;
+    transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH)] = SmtpsState::WAIT_AUTH_USERNAME;
+    transition_table_[std::make_pair(SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH)] = SmtpsState::WAIT_AUTH_PASSWORD;
+    transition_table_[std::make_pair(SmtpsState::WAIT_AUTH_PASSWORD, SmtpsEvent::AUTH)] = SmtpsState::WAIT_MAIL_FROM;
+    // 添加可选认证路径 - 允许直接从WAIT_AUTH状态转到WAIT_MAIL_FROM状态
+    transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
     transition_table_[std::make_pair(SmtpsState::WAIT_MAIL_FROM, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
     transition_table_[std::make_pair(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::RCPT_TO)] = SmtpsState::WAIT_DATA;
     transition_table_[std::make_pair(SmtpsState::WAIT_DATA, SmtpsEvent::DATA)] = SmtpsState::IN_MESSAGE;
@@ -86,9 +90,19 @@ void TraditionalSmtpsFsm::init_state_handlers() {
     
     state_handlers_[SmtpsState::GREETING][SmtpsEvent::EHLO] = 
         std::bind(&TraditionalSmtpsFsm::handle_greeting_ehlo, this, std::placeholders::_1, std::placeholders::_2);
+
+    state_handlers_[SmtpsState::WAIT_AUTH][SmtpsEvent::AUTH] = 
+        std::bind(&TraditionalSmtpsFsm::handle_wait_auth_auth, this, std::placeholders::_1, std::placeholders::_2);
+
+    state_handlers_[SmtpsState::WAIT_AUTH_USERNAME][SmtpsEvent::AUTH] = 
+        std::bind(&TraditionalSmtpsFsm::handle_wait_auth_username, this, std::placeholders::_1, std::placeholders::_2);
+
+    state_handlers_[SmtpsState::WAIT_AUTH_PASSWORD][SmtpsEvent::AUTH] = 
+        std::bind(&TraditionalSmtpsFsm::handle_wait_auth_password, this, std::placeholders::_1, std::placeholders::_2);
     
-    state_handlers_[SmtpsState::WAIT_EHLO][SmtpsEvent::EHLO] = 
-        std::bind(&TraditionalSmtpsFsm::handle_wait_ehlo_ehlo, this, std::placeholders::_1, std::placeholders::_2);
+    // 添加可选认证路径的处理函数
+    state_handlers_[SmtpsState::WAIT_AUTH][SmtpsEvent::MAIL_FROM] = 
+        std::bind(&TraditionalSmtpsFsm::handle_wait_auth_mail_from, this, std::placeholders::_1, std::placeholders::_2);
     
     state_handlers_[SmtpsState::WAIT_MAIL_FROM][SmtpsEvent::MAIL_FROM] = 
         std::bind(&TraditionalSmtpsFsm::handle_wait_mail_from_mail_from, this, std::placeholders::_1, std::placeholders::_2);
@@ -138,13 +152,48 @@ void TraditionalSmtpsFsm::handle_wait_auth_auth(SmtpsSession* session, const std
         return;
     }
 
-    // 发送认证成功响应
-    session->async_write("235 Authentication successful\r\n");
+    // 发送认证请求
+    session->async_write("334 VXNlcm5hbWU6\r\n"); // "Username:" in base64
 }
 
-void TraditionalSmtpsFsm::handle_wait_ehlo_ehlo(SmtpsSession* session, const std::string& args) {
-    // 与handle_greeting_ehlo相同
-    handle_greeting_ehlo(session, args);
+void TraditionalSmtpsFsm::handle_wait_auth_username(SmtpsSession* session, const std::string& args) {
+    // 保存用户名
+    session->context_.client_username = args;
+    session->async_write("334 UGFzc3dvcmQ6\r\n"); // "Password:" in base64
+}
+
+void TraditionalSmtpsFsm::handle_wait_auth_password(SmtpsSession* session, const std::string& args) {
+    // 验证用户名和密码
+    if (auth_user(session, session->context_.client_username, args)) {
+        session->context_.is_authenticated = true;
+        session->async_write("235 Authentication successful\r\n");
+    } else {
+        session->async_write("535 Authentication failed\r\n");
+        handle_error(session, "Authentication failed");
+    }
+}
+
+void TraditionalSmtpsFsm::handle_wait_auth_mail_from(SmtpsSession* session, const std::string& args) {
+    // 检查是否需要强制认证（这里可以根据配置或其他条件来决定）
+    bool require_auth = false; // 默认不强制认证
+    
+    // 如果需要强制认证但客户端未认证
+    if (require_auth && !session->context_.is_authenticated) {
+        // 发送认证要求
+        session->async_write("530 Authentication required\r\n");
+        return;
+    }
+    
+    // 处理MAIL FROM命令，与handle_wait_mail_from_mail_from相同
+    std::regex mail_from_regex(R"(FROM:\s*<([^>]*)>)", std::regex_constants::icase);
+    std::smatch matches;
+    if (std::regex_search(args, matches, mail_from_regex) && matches.size() > 1) {
+        // 保存发件人地址
+        session->context_.sender_address = matches[1];
+        session->async_write("250 Ok\r\n");
+    } else {
+        session->async_write("501 Syntax error in parameters or arguments\r\n");
+    }
 }
 
 void TraditionalSmtpsFsm::handle_wait_mail_from_mail_from(SmtpsSession* session, const std::string& args) {
@@ -189,6 +238,8 @@ void TraditionalSmtpsFsm::handle_wait_quit_quit(SmtpsSession* session, const std
     }
 
     session->async_write("221 Bye\r\n");
+    save_mail_data(session, session->context_.message_data);
+    session->context_.clear(); // 清理上下文数据
     session->close();
 }
 

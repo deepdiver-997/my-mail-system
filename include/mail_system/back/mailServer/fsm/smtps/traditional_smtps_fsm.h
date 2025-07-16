@@ -10,7 +10,7 @@ namespace mail_system {
 // 传统的SMTPS状态机实现
 class TraditionalSmtpsFsm : public SmtpsFsm {
 public:
-    TraditionalSmtpsFsm();
+    TraditionalSmtpsFsm(std::shared_ptr<DBPool> dbp);
     ~TraditionalSmtpsFsm() override = default;
 
     // 处理事件
@@ -34,11 +34,16 @@ private:
     // 初始化状态处理函数
     void init_state_handlers();
 
-    // 状态处理函数
+    // 状态处理函数 handle_[state]_[event]
     void handle_init_connect(SmtpsSession* session, const std::string& args);
     void handle_greeting_ehlo(SmtpsSession* session, const std::string& args);
+
     void handle_wait_auth_auth(SmtpsSession* session, const std::string& args);
-    void handle_wait_ehlo_ehlo(SmtpsSession* session, const std::string& args);
+    void handle_wait_auth_username(SmtpsSession* session, const std::string& args);
+    void handle_wait_auth_password(SmtpsSession* session, const std::string& args);
+
+    void handle_wait_auth_mail_from(SmtpsSession* session, const std::string& args);
+
     void handle_wait_mail_from_mail_from(SmtpsSession* session, const std::string& args);
     void handle_wait_rcpt_to_rcpt_to(SmtpsSession* session, const std::string& args);
     void handle_wait_data_data(SmtpsSession* session, const std::string& args);

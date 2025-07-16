@@ -43,6 +43,9 @@ void SmtpsSession::handle_read(const std::string& data) {
                 if (!line.empty() && line[0] == '.') {
                     line = line.substr(1);
                 }
+                if (mail_ == nullptr) {
+                    mail_ = std::make_unique<mail>();
+                }
                 mail_->header = line.substr(0, line.find("\n\n"));
                 mail_->body = line.substr(line.find("\n\n") + 2);
                 
@@ -60,7 +63,7 @@ void SmtpsSession::handle_read(const std::string& data) {
     catch (const std::exception& e) {
         std::cerr << "Error handling SMTPS data: " << e.what() << std::endl;
         m_fsm->process_event(this, SmtpsEvent::ERROR, e.what());
-        handle_error(boost::system::error_code(boost::system::errc::io_error, boost::system::generic_category()));
+        // handle_error(boost::system::error_code(boost::system::errc::io_error, boost::system::generic_category()));
     }
 }
 
