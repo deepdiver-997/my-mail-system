@@ -9,3 +9,9 @@
 *.csr
 
 *.json
+
+.DS_Store
+
+good-example/
+
+.gitignore
