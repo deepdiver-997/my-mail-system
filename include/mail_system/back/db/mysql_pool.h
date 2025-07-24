@@ -60,6 +60,7 @@ private:
 // MySQL连接池工厂实现
 class MySQLPoolFactory : public DBPoolFactory {
 public:
+    ~MySQLPoolFactory() override = default;
     std::shared_ptr<DBPool> create_pool(
         const DBPoolConfig& config,
         std::shared_ptr<DBService> db_service
@@ -73,7 +74,6 @@ private:
     static std::mutex s_mutex;
 
     MySQLPoolFactory() = default;
-    ~MySQLPoolFactory() override = default;
 
     // 禁止复制和赋值
     MySQLPoolFactory(const MySQLPoolFactory&) = delete;

@@ -21,7 +21,8 @@ enum class SmtpsState {
     WAIT_RCPT_TO,     // 等待RCPT TO命令
     WAIT_DATA,        // 等待DATA命令
     IN_MESSAGE,       // 接收邮件内容
-    WAIT_QUIT         // 等待QUIT命令
+    WAIT_QUIT,         // 等待QUIT命令
+    CLOSED
 };
 
 // SMTP事件枚举
@@ -44,7 +45,7 @@ struct SmtpsContext {
     std::string client_username;     // 客户端用户名
     std::string sender_address;      // 发件人地址
     std::vector<std::string> recipient_addresses;  // 收件人地址列表
-    std::string message_data;        // 邮件内容
+    // std::string message_data;        // 邮件内容
     bool is_authenticated;           // 是否已认证
     
     // 清理上下文数据
@@ -53,7 +54,7 @@ struct SmtpsContext {
         client_username.clear();
         sender_address.clear();
         recipient_addresses.clear();
-        message_data.clear();
+        // message_data.clear();
         is_authenticated = false;
     }
 };
@@ -63,7 +64,7 @@ class SmtpsFsm;
 
 class SmtpsSession : public SessionBase {
 public:
-    SmtpsSession(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket&>> &&socket, std::shared_ptr<SmtpsFsm> fsm);
+    SmtpsSession(ServerBase* server, std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> &&socket, std::shared_ptr<SmtpsFsm> fsm);
     ~SmtpsSession() override;
 
     // 启动会话
@@ -75,6 +76,7 @@ public:
 
     void set_current_state(SmtpsState state) {
         current_state_ = state;
+        stay_times = 0;
     }
 
 protected:
@@ -86,11 +88,12 @@ protected:
 public:
     SmtpsContext context_;           // 会话上下文
 
+    int stay_times;
+    int timeout_times;
 private:
     std::shared_ptr<SmtpsFsm> m_fsm;  // 状态机
     SmtpsState current_state_;      // 当前状态
     bool m_receivingData;            // 是否在接收数据模式
-    std::string m_mailData;          // 邮件数据缓存
 };
 
 } // namespace mail_system

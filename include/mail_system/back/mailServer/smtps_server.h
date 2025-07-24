@@ -3,6 +3,7 @@
 
 #include "server_base.h"
 #include "fsm/smtps/smtps_fsm.h"
+#include "fsm/smtps/traditional_smtps_fsm.h"
 #include "mail_system/back/mailServer/session/smtps_session.h"
 
 namespace mail_system {
@@ -14,7 +15,8 @@ namespace mail_system {
 
     protected:
         // 处理新连接
-        void handle_accept(std::unique_ptr<SmtpsSession> session, const boost::system::error_code& error);
+        void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket,
+             const boost::system::error_code& error);
 
         std::shared_ptr<SmtpsFsm> m_fsm;
     };

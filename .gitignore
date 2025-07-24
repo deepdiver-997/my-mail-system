@@ -15,3 +15,5 @@
 good-example/
 
 .gitignore
+
+*.o

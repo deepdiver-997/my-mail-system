@@ -1,5 +1,5 @@
-#include "mail_system/back/mailServer/pop3s/pop3s_server.h"
-#include "mail_system/back/mailServer/pop3s/pop3s_session.h"
+// #include "mail_system/back/mailServer/pop3s/pop3s_server.h"
+#include "mail_system/back/mailServer/session/pop3s_session.h"
 #include <iostream>
 
 namespace mail_system {

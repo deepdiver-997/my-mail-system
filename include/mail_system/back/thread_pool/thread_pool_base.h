@@ -4,6 +4,8 @@
 #include <functional>
 #include <memory>
 #include <future>
+#include <atomic>
+#include <mail_system/back/mailServer/session/session_base.h>
 
 namespace mail_system {
 
@@ -64,6 +66,7 @@ public:
      * @return size_t 线程数量
      */
     virtual size_t thread_count() const = 0;
+    virtual bool is_running() const = 0;
 
 protected:
     /**

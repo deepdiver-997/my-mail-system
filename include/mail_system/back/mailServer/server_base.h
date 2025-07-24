@@ -6,13 +6,21 @@
 #include <memory>
 #include <string>
 #include "server_config.h"
+
 #include "mail_system/back/thread_pool/thread_pool_base.h"
+#include "mail_system/back/thread_pool/io_thread_pool.h"
+#include "mail_system/back/thread_pool/boost_thread_pool.h"
+
 #include "mail_system/back/db/db_pool.h"
+#include "mail_system/back/db/db_service.h"
+#include "mail_system/back/db/mysql_pool.h"
+#include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/mailServer/session/session_base.h"
 
 namespace mail_system {
 
 class ServerBase {
+class SessionBase;
 public:
     ServerBase(const ServerConfig& config);
     virtual ~ServerBase();
@@ -26,11 +34,10 @@ public:
     // 发送异步响应
     void send_async_response(std::weak_ptr<SessionBase> session, const std::string& response);
 
-protected:
     // 创建新会话
     virtual void accept_connection();
     // 处理新连接
-    virtual void handle_accept(std::shared_ptr<SessionBase> session, const boost::system::error_code& error) = 0;
+    virtual void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket >>&& ssl_socket, const boost::system::error_code& error) = 0;
 
     // 获取IO上下文
     std::shared_ptr<boost::asio::io_context> get_io_context();
@@ -39,13 +46,14 @@ protected:
     // 获取接受器
     std::shared_ptr<boost::asio::ip::tcp::acceptor> get_acceptor();
 
+public:
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<DBPool> m_dbPool;
 
 private:
     // 加载SSL证书
-    void load_certificates(const std::string& cert_file, const std::string& key_file);
+    void load_certificates(const std::string& cert_file, const std::string& key_file, const std::string& dh_file = "");
 
     // IO上下文
     std::shared_ptr<boost::asio::io_context> m_ioContext;

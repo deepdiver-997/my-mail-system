@@ -51,6 +51,7 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_running) {
             m_running = true;
+            std::cout << "Starting BoostThreadPool..." << std::endl;
             m_pool = std::make_unique<boost::asio::thread_pool>(m_thread_count);
         }
     }
@@ -74,6 +75,7 @@ public:
                 pool->wait();
             }
             pool->stop();
+            std::cout << "Stopped BoostThreadPool" << std::endl;
             pool->join();
         }
     }
@@ -85,6 +87,16 @@ public:
      */
     size_t thread_count() const override {
         return m_thread_count;
+    }
+
+    /**
+     * @brief 检查线程池是否正在运行
+     * 
+     * @return true 如果线程池正在运行
+     * @return false 如果线程池已停止
+     */
+    bool is_running() const override {
+        return m_running.load();
     }
 
 protected:
@@ -132,7 +144,7 @@ protected:
 private:
     size_t m_thread_count;                          ///< 线程数量
     std::unique_ptr<boost::asio::thread_pool> m_pool; ///< Boost线程池
-    bool m_running;                                 ///< 线程池是否运行中
+    std::atomic<bool> m_running;                                 ///< 线程池是否运行中
     std::mutex m_mutex;                             ///< 互斥锁，保护线程池状态
 };
 

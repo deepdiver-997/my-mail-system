@@ -8,9 +8,23 @@ ServerBase::ServerBase(const ServerConfig& config)
     : m_sslContext(boost::asio::ssl::context::sslv23),
       m_running(false) {
 try {
-        m_ioThreadPool = std::make_shared<ThreadPoolBase>(config.io_thread_count);
-        m_workerThreadPool = std::make_shared<ThreadPoolBase>(config.worker_thread_count);
-        m_dbPool = std::make_shared<DBPool>(config.db_connection_string, config.db_pool_size);
+        if(config.io_thread_count > 0) {
+            m_ioThreadPool = std::make_shared<IOThreadPool>(config.io_thread_count);
+            m_ioThreadPool->start();
+            std::cout << "IOThreadPools started in function ServerBase::ServerBase" << std::endl;
+        }
+        
+        if(config.worker_thread_count > 0) {
+            m_workerThreadPool = std::make_shared<BoostThreadPool>(config.worker_thread_count);
+            m_workerThreadPool->start();
+            std::cout << "WorkerThreadPools started in function ServerBase::ServerBase" << std::endl;
+        }
+
+        if (config.db_pool_config.achieve == "mysql") {
+            m_dbPool = MySQLPoolFactory::get_instance().create_pool(config.db_pool_config, std::make_shared<MySQLService>());
+        } else {
+            m_dbPool = nullptr;
+        }
     
         m_ioContext = std::make_shared<boost::asio::io_context>();
         m_acceptor = std::make_shared<boost::asio::ip::tcp::acceptor>(*m_ioContext);
@@ -23,7 +37,7 @@ try {
         );
 
         // 加载证书
-        load_certificates(config.certFile, config.keyFile);
+        load_certificates(config.certFile, config.keyFile, config.dhFile);
 
         // 创建端点
         boost::asio::ip::tcp::endpoint endpoint(
@@ -56,22 +70,27 @@ ServerBase::~ServerBase() {
 }
 
 void ServerBase::accept_connection() {
-    auto socket = std::make_shared<boost::asio::ip::tcp::socket>(*m_ioContext);
-    auto ssl_socket = std::make_shared<boost::asio::ssl::stream<boost::asio::ip::tcp::socket&>>(*socket, m_sslContext);
+    std::cout << "Waiting for new connection..." << std::endl;
+    // 创建新的TCP socket和SSL流
+    auto socket = std::make_unique<boost::asio::ip::tcp::socket>(*m_ioContext);
+    auto ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(std::move(*socket), m_sslContext);
     // 接受连接
     m_acceptor->async_accept(
-        *socket,
-        [this, socket, ssl_socket](const boost::system::error_code& ec) {
+        ssl_socket->next_layer(),
+        [this, ssl_socket = std::move(ssl_socket)](const boost::system::error_code& ec) mutable {
             if (!ec) {
+                std::cout << "New connection accepted" << std::endl;
+                std::cout << "Start handling connection" << std::endl;
                 // 会话已建立
-                auto session = std::make_shared<SessionBase>(ssl_socket);
-                handle_accept(session, ec);
+                handle_accept(std::move(ssl_socket), ec);
+                // std::this_thread::sleep_for(std::chrono::seconds(5));
             }
             else {
                 std::cerr << "Error accepting connection: " << ec.message() << std::endl;
             }
             
             // 继续接受连接
+            if(m_running)
             accept_connection();
         }
     );
@@ -83,18 +102,18 @@ void ServerBase::send_async_response(std::weak_ptr<SessionBase> session, const s
         if (auto s = session.lock()) {
             try {
                 // 发送响应
-                boost::asio::async_write(
-                    s->get_ssl_socket(),
-                    boost::asio::buffer(response),
-                    [s](const boost::system::error_code& ec, std::size_t /*length*/) {
-                        if (ec) {
-                            std::cerr << "Error sending response: " << ec.message() << std::endl;
-                        }
-                        else {
-                            std::cout << "Response sent successfully" << std::endl;
-                        }
-                    }
-                );
+                // boost::asio::async_write(
+                //     s->get_ssl_socket(),
+                //     boost::asio::buffer(response),
+                //     [s](const boost::system::error_code& ec, std::size_t /*length*/) {
+                //         if (ec) {
+                //             std::cerr << "Error sending response: " << ec.message() << std::endl;
+                //         }
+                //         else {
+                //             std::cout << "Response sent successfully" << std::endl;
+                //         }
+                //     }
+                // );
             }
             catch (const std::exception& e) {
                 std::cerr << "Error sending response: " << e.what() << std::endl;
@@ -110,13 +129,17 @@ void ServerBase::start() {
         try {
             // 开始接受连接
             m_listenerThread = std::thread([this]() {
-                while (m_running) {
-                    // 创建新会话
-                    accept_connection();
-                }
+                // while (m_running) {
+                //     // 创建新会话
+                //     accept_connection();
+                //     m_ioContext->run();
+                // }
+                m_ioContext->run();
+                accept_connection();
             });
             
             std::cout << "Server started" << std::endl;
+            // m_listenerThread.join();
         }
         catch (const std::exception& e) {
             std::cerr << "Error starting server: " << e.what() << std::endl;
@@ -129,7 +152,14 @@ void ServerBase::stop() {
     if (m_running) {
         try {
             m_running = false;
-            
+            if(m_listenerThread.joinable())
+            m_listenerThread.join();
+            std::cout << "Listener thread stopped in function ServerBase::stop" << std::endl;
+            if(m_ioThreadPool)
+            m_ioThreadPool->stop();
+            if(m_workerThreadPool)
+            m_workerThreadPool->stop();
+            std::cout << "ThreadPools stopped in function ServerBase::stop" << std::endl;
             // 关闭接受器
             boost::system::error_code ec;
             m_acceptor->close(ec);
@@ -161,7 +191,7 @@ std::shared_ptr<boost::asio::ip::tcp::acceptor> ServerBase::get_acceptor() {
     return m_acceptor;
 }
 
-void ServerBase::load_certificates(const std::string& cert_file, const std::string& key_file) {
+void ServerBase::load_certificates(const std::string& cert_file, const std::string& key_file, const std::string& dh_file) {
     try {
         // 检查证书文件是否存在
         if (!std::ifstream(cert_file.c_str()).good()) {
@@ -178,7 +208,12 @@ void ServerBase::load_certificates(const std::string& cert_file, const std::stri
         m_sslContext.use_private_key_file(key_file, boost::asio::ssl::context::pem);
         
         // 验证私钥
-        m_sslContext.use_tmp_dh_file(cert_file);
+        if(dh_file != "") {
+            if (!std::ifstream(dh_file.c_str()).good()) {
+                throw std::runtime_error("DH file not found: " + dh_file);
+            }
+            m_sslContext.use_tmp_dh_file(dh_file);
+        }
 
         std::cout << "SSL certificates loaded successfully" << std::endl;
     }

@@ -10,15 +10,16 @@
 #include <boost/asio/strand.hpp>
 #include <mail_system/back/entities/mail.h>
 #include <mail_system/back/entities/usr.h>
+#include <mail_system/back/mailServer/server_base.h>
 
+// #define _LIBCPP_STD_VER 17
 
 namespace mail_system {
 class ServerBase;
-
 class SessionBase : public std::enable_shared_from_this<SessionBase> {
 public:
     // 构造函数
-    SessionBase(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket&>> &&);
+    SessionBase(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> &&, ServerBase*);
 
     // 虚析构函数
     virtual ~SessionBase();
@@ -32,20 +33,22 @@ public:
     // 获取客户端地址
     std::string get_client_ip() const;
 
-    boost::asio::ssl::stream<boost::asio::ip::tcp::socket&>& get_ssl_socket();
+    boost::asio::ssl::stream<boost::asio::ip::tcp::socket>& get_ssl_socket();
+
+    mail* get_mail();
     
     // 设置服务器引用
     void set_server(ServerBase* server);
 
     // 执行SSL握手
-    void do_handshake();
+    void do_handshake(std::function<void(std::weak_ptr<SessionBase> session, const boost::system::error_code&)> callback);
 
 
     // 异步读取数据
-    void async_read();
+    void async_read(std::function<void(const boost::system::error_code&, std::size_t)> callback = nullptr);
 
     // 异步写入数据
-    void async_write(const std::string& data);
+    void async_write(const std::string& data, std::function<void(const boost::system::error_code&)> callback = nullptr);
 
     // 处理接收到的数据（由派生类实现）
     virtual void handle_read(const std::string& data) = 0;
@@ -65,13 +68,10 @@ protected:
     // boost::asio::ssl::context& m_ssl_context;
     
     // SSL流
-    std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket&>> m_socket;
-
-    // 执行器
-    boost::asio::strand<boost::asio::io_context::executor_type> strand_;
+    std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> m_socket;
 
     // 读取缓冲区
-    std::vector<char> read_buffer_;
+    std::vector<char> read_buffer_, use_buffer_;
 
     // 客户端地址
     mutable std::string client_address_;
@@ -82,7 +82,7 @@ protected:
 
     // 会话是否已关闭
     bool closed_;
-    
+    public:
     // 指向服务器的指针，用于访问IO线程池
     ServerBase* m_server;
 };

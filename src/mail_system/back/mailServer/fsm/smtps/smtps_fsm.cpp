@@ -8,11 +8,15 @@ std::string SmtpsFsm::get_state_name(SmtpsState state) {
         {SmtpsState::INIT, "INIT"},
         {SmtpsState::GREETING, "GREETING"},
         {SmtpsState::WAIT_EHLO, "WAIT_EHLO"},
+        {SmtpsState::WAIT_AUTH, "WAIT_AUTH"},
+        {SmtpsState::WAIT_AUTH_USERNAME, "WAIT_AUTH_USERNAME"},
+        {SmtpsState::WAIT_AUTH_PASSWORD, "<PASSWORD>"},
         {SmtpsState::WAIT_MAIL_FROM, "WAIT_MAIL_FROM"},
         {SmtpsState::WAIT_RCPT_TO, "WAIT_RCPT_TO"},
         {SmtpsState::WAIT_DATA, "WAIT_DATA"},
         {SmtpsState::IN_MESSAGE, "IN_MESSAGE"},
-        {SmtpsState::WAIT_QUIT, "WAIT_QUIT"}
+        {SmtpsState::WAIT_QUIT, "WAIT_QUIT"},
+        {SmtpsState::CLOSED, "CLOSED"}
     };
 
     auto it = state_names.find(state);
@@ -26,6 +30,7 @@ std::string SmtpsFsm::get_event_name(SmtpsEvent event) {
     static const std::unordered_map<SmtpsEvent, std::string> event_names = {
         {SmtpsEvent::CONNECT, "CONNECT"},
         {SmtpsEvent::EHLO, "EHLO"},
+        {SmtpsEvent::AUTH, "AUTH"},
         {SmtpsEvent::MAIL_FROM, "MAIL_FROM"},
         {SmtpsEvent::RCPT_TO, "RCPT_TO"},
         {SmtpsEvent::DATA, "DATA"},

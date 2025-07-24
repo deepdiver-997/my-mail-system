@@ -2,6 +2,10 @@
 #define MAIL_SYSTEM_DB_POOL_H
 
 #include "mail_system/back/db/db_service.h"
+#include <nlohmann/json.hpp> // JSON库
+#include <fstream>
+#include <iostream>
+#include <string>
 #include <memory>
 #include <vector>
 #include <mutex>
@@ -41,6 +45,7 @@ protected:
 
 // 数据库连接池配置
 struct DBPoolConfig {
+    std::string achieve;
     std::string host;
     std::string user;
     std::string password;
@@ -57,6 +62,46 @@ struct DBPoolConfig {
           max_pool_size(10),
           connection_timeout(5),
           idle_timeout(60) {}
+    void show() const {
+        std::cout << "DBPoolConfig: "
+                  << "\n\tachieve = " << achieve
+                  << "\n\thost = " << host
+                  << "\n\tuser = " << user
+                  << "\n\tdatabase = " << database
+                  << "\n\tport = " << port
+                  << "\n\tinitial_pool_size = " << initial_pool_size
+                  << "\n\tmax_pool_size = " << max_pool_size
+                  << "\n\tconnection_timeout = " << connection_timeout
+                  << "\n\tidle_timeout = " << idle_timeout
+                  << std::endl;
+    }
+
+    // 从JSON对象加载配置
+    bool loadFromJson(const std::string& filename) {
+        std::ifstream config_file(filename.c_str());
+        if (!config_file.is_open()) {
+            std::cerr << "Failed to open config file: " << filename << std::endl;
+            return false;
+        }
+        nlohmann::json json;
+        config_file >> json;
+        config_file.close();
+        if (json.is_discarded()) {
+            std::cerr << "Failed to parse config file: " << filename << std::endl;
+            return false;
+        }
+        achieve = json.value("achieve", achieve);
+        host = json.value("host", host);
+        user = json.value("user", user);
+        password = json.value("password", password);
+        database = json.value("database", database);
+        port = json.value("port", port);
+        initial_pool_size = json.value("initial_pool_size", initial_pool_size);
+        max_pool_size = json.value("max_pool_size", max_pool_size);
+        connection_timeout = json.value("connection_timeout", connection_timeout);
+        idle_timeout = json.value("idle_timeout", idle_timeout);
+        return true;
+    }
 };
 
 // 数据库连接池工厂接口
