@@ -33,7 +33,7 @@ void SmtpsSession::start() {
         return; // 已经关闭
     }
     // std::cout << "ready to call process event\n";
-    // m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(shared_from_this()), SmtpsEvent::CONNECT, nullptr);
+    // m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(shared_from_this()), SmtpsEvent::CONNECT, std::string());
     // std::cout << "start event CONNECT called in SmtpsSession::start" << std::endl;
     auto self = shared_from_this();
     // 执行SSL握手
@@ -41,19 +41,16 @@ void SmtpsSession::start() {
         if(error)
             return;
         // if (auto s = std::dynamic_pointer_cast<SmtpsSession>(session.lock())) {
-        //     s->m_fsm->process_event(s, SmtpsEvent::CONNECT, nullptr);
+        //     s->m_fsm->process_event(s, SmtpsEvent::CONNECT, std::string());
         // }
         self->async_write("220 SMTPS Server\r\n", [self](const boost::system::error_code& error) {
             if (error) {
                 std::cerr << "Error in SmtpsSession::start: " << error.message() << std::endl;
                 return;
             }
-            std::dynamic_pointer_cast<SmtpsSession>(self)->set_current_state(SmtpsState::WAIT_DATA);
-            std::cout << "220 hello callback end\n";
+            std::dynamic_pointer_cast<SmtpsSession>(self)->set_current_state(SmtpsState::WAIT_EHLO);
         });
-        std::cout << "handshake callback end\n";
     });
-    std::cout << "async handshake called in SmtpsSession::start" << std::endl;
 }
 
 void SmtpsSession::handle_read(const std::string& data) {
@@ -79,13 +76,9 @@ void SmtpsSession::handle_read(const std::string& data) {
         std::string line = data;
         boost::algorithm::trim_right_if(line, boost::algorithm::is_any_of("\r\n"));
         
-        if (m_receivingData) {
-            std::cout << "enter handle_read in SmtpsSession, m_receivingData is true" << std::endl;
+        if (current_state_ == SmtpsState::IN_MESSAGE) {
             // 检查是否为数据结束标记
             if (line == ".") {
-                m_receivingData = false;
-                std::cout << "data end" << std::endl;
-                
                 // 处理邮件数据结束事件
                 m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(self), SmtpsEvent::DATA_END, std::string());
                 // self->async_write("250 OK\r\n", [self](const boost::system::error_code& error) {
@@ -97,8 +90,6 @@ void SmtpsSession::handle_read(const std::string& data) {
                 //     std::dynamic_pointer_cast<SmtpsSession>(self)->set_current_state(SmtpsState::WAIT_QUIT);
                 //     self->async_read();
                 // });
-                std::cout << "process data end up" << std::endl;
-                
                 return;
             }
             else {
@@ -106,25 +97,21 @@ void SmtpsSession::handle_read(const std::string& data) {
                 if (!line.empty() && line[0] == '.') {
                     line = line.substr(1);
                 }
-                // if (mail_ == nullptr) {
-                //     mail_ = std::make_unique<mail>();
-                // }
-                // mail_->header = line.substr(0, line.find("\n\n"));
-                // mail_->body = line.substr(line.find("\n\n") + 2);
-                std::cout << "line(" << line.length() << "): " << line << std::endl;
-
-                std::cout << "ready to enter process event IN_MESSAGE DATA" << std::endl << self.use_count() << std::endl;
+                if (mail_ == nullptr) {
+                    mail_ = std::make_unique<mail>();
+                }
+                mail_->header = line.substr(0, line.find("\n\n"));
+                mail_->body = line.substr(line.find("\n\n") + 2);
                 
                 // 处理数据事件（可选，取决于状态机是否需要处理每一行数据）
                 // // 调试信息
-                std::cout << "[DEBUG] Object address: " << this << std::endl;
-                std::cout << "[DEBUG] FSM vtable: " << typeid(*m_fsm).name() << std::endl;
-                // 调用栈回溯
-                std::cout << "[DEBUG] Call stack trace: " << std::endl;
+                // std::cout << "[DEBUG] Object address: " << this << std::endl;
+                // std::cout << "[DEBUG] FSM vtable: " << typeid(*m_fsm).name() << std::endl;
+                // // 调用栈回溯
+                // std::cout << "[DEBUG] Call stack trace: " << std::endl;
                 // 实际调用
                 m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(self), SmtpsEvent::DATA, std::string());
                 // self->async_read();
-                std::cout << "process event IN_MESSAGE DATA end\n";
             }
         }
         else {
@@ -178,7 +165,6 @@ void SmtpsSession::process_command(const std::string& command) {
             event = SmtpsEvent::RCPT_TO;
         } else if (cmd == "DATA") {
             event = SmtpsEvent::DATA;
-            m_receivingData = true;
         } else if (cmd == "QUIT") {
             event = SmtpsEvent::QUIT;
             // 强制关闭会话

@@ -1,6 +1,8 @@
 #include <mail_system/back/mailServer/smtps_server.h>
+#include <limits>
 using namespace mail_system;
 int main() {
+    std::cin.tie(nullptr);
     try
     {
         ServerConfig config;
@@ -35,12 +37,22 @@ int main() {
         char cmd[256];
         while(true){
             memset(cmd,0,256);
-            std::cin.getline(cmd,256);
+            std::cout << "waiting for command:\n";
+            std::cin.ignore(256, '\n');
+            std::cin.getline(cmd,255);
             if(cmd[0] == 'q' || cmd[0] == 'Q') {
                 server.stop();
-                std::cout << "Server stopped.\n";
+                std::cout << "Server quit.\n";
                 break;
             }
+        //     if(memcpy(cmd, "pause", 5) == 0) {
+        //         server.start();
+        //         std::cout << "Server pause.\n";
+        //     }
+        //     if(memcpy(cmd, "start", 5) == 0) {
+        //         server.start();
+        //         std::cout << "Server start.\n";
+        //     }
         }
     }
     catch (const boost::system::system_error& e) {

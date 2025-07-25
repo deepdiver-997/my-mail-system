@@ -197,6 +197,7 @@ private:
     std::vector<std::thread> m_threads;             ///< 线程列表
     std::atomic<bool> m_running;                                 ///< 线程池是否运行中
     std::mutex m_mutex;                             ///< 互斥锁，保护线程池状态
+    std::atomic<int> m_id_counter{0};                            ///< 任务ID计数器
 };
 
 } // namespace mail_system
