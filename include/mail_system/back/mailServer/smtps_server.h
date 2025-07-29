@@ -10,8 +10,11 @@ namespace mail_system {
 
     class SmtpsServer : public ServerBase {
     public:
-        SmtpsServer(const ServerConfig& config);
-        ~SmtpsServer() override;
+        SmtpsServer(const ServerConfig& config,
+         std::shared_ptr<ThreadPoolBase> ioThreadPool = nullptr,
+         std::shared_ptr<ThreadPoolBase> workerThreadPool = nullptr,
+         std::shared_ptr<DBPool> dbPool = nullptr);
+        virtual ~SmtpsServer() override;
 
     protected:
         // 处理新连接

@@ -28,6 +28,7 @@ struct ServerConfig {
     // 线程池配置
     size_t io_thread_count;           // IO线程池大小
     size_t worker_thread_count;       // 工作线程池大小
+    bool ssl_in_worker;
     
     // 数据库配置
     bool use_database;                // 是否使用数据库

@@ -32,25 +32,44 @@ void SmtpsSession::start() {
         std::cout << "Session already closed in SmtpsSession::start." << std::endl;
         return; // 已经关闭
     }
-    // std::cout << "ready to call process event\n";
-    // m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(shared_from_this()), SmtpsEvent::CONNECT, std::string());
-    // std::cout << "start event CONNECT called in SmtpsSession::start" << std::endl;
-    auto self = shared_from_this();
-    // 执行SSL握手
-    do_handshake([self](std::weak_ptr<SessionBase> session, const boost::system::error_code& error) {
-        if(error)
-            return;
-        // if (auto s = std::dynamic_pointer_cast<SmtpsSession>(session.lock())) {
-        //     s->m_fsm->process_event(s, SmtpsEvent::CONNECT, std::string());
-        // }
-        self->async_write("220 SMTPS Server\r\n", [self](const boost::system::error_code& error) {
-            if (error) {
-                std::cerr << "Error in SmtpsSession::start: " << error.message() << std::endl;
-                return;
-            }
-            std::dynamic_pointer_cast<SmtpsSession>(self)->set_current_state(SmtpsState::WAIT_EHLO);
-        });
-    });
+    std::cout << "ready to call process event\n";
+    m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(shared_from_this()), SmtpsEvent::CONNECT, std::string());
+    std::cout << "start event CONNECT called in SmtpsSession::start" << std::endl;
+    return;
+    // auto self = shared_from_this();
+    // // 执行SSL握手
+    // if(m_server->ssl_in_worker) {
+    //     m_server->m_workerThreadPool->post([self, this](){
+    //         m_socket->handshake(boost::asio::ssl::stream_base::server, [self](const boost::system::error_code& error){
+    //             if(error) {
+    //                 std::cerr << "Error in SmtpsSession::start: " << error.message() << std::endl;
+    //                 std::dynamic_pointer_cast<SmtpsSession>(self)->m_fsm->process_event(std::dynamic_pointer_cast<SmtpsSession>(self), SmtpsEvent::ERROR, error.message());
+    //             }
+    //         });
+    //             self->async_write("220 SMTPS Server\r\n", [self](const boost::system::error_code& error) {
+    //             if (error) {
+    //                 std::cerr << "Error in SmtpsSession::start: " << error.message() << std::endl;
+    //                 return;
+    //             }
+    //             std::dynamic_pointer_cast<SmtpsSession>(self)->set_current_state(SmtpsState::WAIT_EHLO);
+    //         });
+    //     });
+    // }
+    // else
+    // do_handshake([self](std::weak_ptr<SessionBase> session, const boost::system::error_code& error) {
+    //     if(error)
+    //         return;
+    //     // if (auto s = std::dynamic_pointer_cast<SmtpsSession>(session.lock())) {
+    //     //     s->m_fsm->process_event(s, SmtpsEvent::CONNECT, std::string());
+    //     // }
+    //     self->async_write("220 SMTPS Server\r\n", [self](const boost::system::error_code& error) {
+    //         if (error) {
+    //             std::cerr << "Error in SmtpsSession::start: " << error.message() << std::endl;
+    //             return;
+    //         }
+    //         std::dynamic_pointer_cast<SmtpsSession>(self)->set_current_state(SmtpsState::WAIT_EHLO);
+    //     });
+    // });
 }
 
 void SmtpsSession::handle_read(const std::string& data) {

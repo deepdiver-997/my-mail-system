@@ -1,6 +1,6 @@
 #include <iostream>
 using namespace std;
-
+#define forr(i, _begin, _end) for(int i = _begin; i < _end; i++)
 int main(){
     try{
         // string s = "Hello, World!\n\nThis is a test.";

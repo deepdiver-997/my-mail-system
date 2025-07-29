@@ -30,7 +30,10 @@ enum class ServerState {
 class ServerBase {
 class SessionBase;
 public:
-    ServerBase(const ServerConfig& config);
+    ServerBase(const ServerConfig& config,
+         std::shared_ptr<ThreadPoolBase> ioThreadPool = nullptr,
+         std::shared_ptr<ThreadPoolBase> workerThreadPool = nullptr,
+         std::shared_ptr<DBPool> dbPool = nullptr); //allowing sharing pool with other servers
     virtual ~ServerBase();
 
     // 启动服务器
@@ -58,6 +61,7 @@ public:
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<DBPool> m_dbPool;
+    bool ssl_in_worker;
 
 private:
     // 加载SSL证书

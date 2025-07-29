@@ -3,7 +3,11 @@
 
 namespace mail_system {
 
-SmtpsServer::SmtpsServer(const ServerConfig& config) :ServerBase(config){
+SmtpsServer::SmtpsServer(const ServerConfig& config,
+     std::shared_ptr<ThreadPoolBase> ioThreadPool,
+      std::shared_ptr<ThreadPoolBase> wokerThreadPool,
+       std::shared_ptr<DBPool> dbPool)
+        : ServerBase(config, ioThreadPool, wokerThreadPool, dbPool) {
     m_fsm = std::make_shared<TraditionalSmtpsFsm>(m_ioThreadPool, m_workerThreadPool, m_dbPool);
 }
 

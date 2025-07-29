@@ -153,7 +153,13 @@ void TraditionalSmtpsFsm::handle_init_connect(std::weak_ptr<SmtpsSession> sessio
             return;
         }
         s->set_current_state(SmtpsState::GREETING);
-        s->async_write("220 SMTPS Server\r\n");
+        s->async_write("220 SMTPS Server\r\n", [s](const boost::system::error_code &e){
+            if (e) {
+                std::cerr << "An error occurred when sending greeting: " << e.message() << std::endl;
+                return;
+            }
+            s->set_current_state(SmtpsState::WAIT_EHLO);
+        });
     });
     else {
         std::cerr << "Session is expired in handle_init_connect" << std::endl;

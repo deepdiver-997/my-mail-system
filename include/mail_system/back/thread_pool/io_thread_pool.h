@@ -141,11 +141,11 @@ public:
      * 
      * @return std::shared_ptr<boost::asio::io_context> io_context的共享指针
      */
-    std::shared_ptr<boost::asio::io_context> get_io_context() const {
-        int min = 0;
-        for(auto& ctx : m_io_contexts)
-        min = ctx->run() < min ? ctx->run() : min;
-        return m_io_contexts[min];
+    boost::asio::io_context& get_io_context() {
+        static int min = 0;
+        ++min;
+        min %= m_thread_count;
+        return *m_io_contexts[min];
     }
 
 protected:

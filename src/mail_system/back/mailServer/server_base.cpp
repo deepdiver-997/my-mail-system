@@ -4,26 +4,34 @@
 
 namespace mail_system {
 
-ServerBase::ServerBase(const ServerConfig& config)
+ServerBase::ServerBase(const ServerConfig& config,
+     std::shared_ptr<ThreadPoolBase> ioThreadPool,
+      std::shared_ptr<ThreadPoolBase> wokerThreadPool,
+       std::shared_ptr<DBPool> dbPool) 
     : m_sslContext(boost::asio::ssl::context::sslv23),
       m_endpoint(boost::asio::ip::make_address(config.address), config.port),
       m_state(ServerState::Stopped),
+      ssl_in_worker(config.ssl_in_worker),
+      m_ioThreadPool(ioThreadPool),
+      m_workerThreadPool(wokerThreadPool),
+      m_dbPool(dbPool),
       has_listener_thread(false) {
 try {
-        if(config.io_thread_count > 0) {
+        if(config.io_thread_count > 0 && m_ioThreadPool == nullptr) {
             m_ioThreadPool = std::make_shared<IOThreadPool>(config.io_thread_count);
             m_ioThreadPool->start();
             std::cout << "IOThreadPools started in function ServerBase::ServerBase" << std::endl;
         }
         
-        if(config.worker_thread_count > 0) {
+        if(config.worker_thread_count > 0 && m_workerThreadPool == nullptr) {
             m_workerThreadPool = std::make_shared<BoostThreadPool>(config.worker_thread_count);
             m_workerThreadPool->start();
             std::cout << "WorkerThreadPools started in function ServerBase::ServerBase" << std::endl;
         }
 
-        if (config.db_pool_config.achieve == "mysql") {
+        if (config.db_pool_config.achieve == "mysql" && m_dbPool == nullptr) {
             m_dbPool = MySQLPoolFactory::get_instance().create_pool(config.db_pool_config, std::make_shared<MySQLService>());
+            std::cout << "dbPool created in function ServerBase::ServerBase" << std::endl;
         } else {
             m_dbPool = nullptr;
         }
@@ -71,7 +79,7 @@ ServerBase::~ServerBase() {
 void ServerBase::accept_connection() {
     std::cout << "Waiting for new connection..." << std::endl;
     // 创建新的TCP socket和SSL流
-    auto socket = std::make_unique<boost::asio::ip::tcp::socket>(*m_ioContext);
+    auto socket = std::make_unique<boost::asio::ip::tcp::socket>(std::static_pointer_cast<IOThreadPool>(m_ioThreadPool)->get_io_context());
     auto ssl_socket = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(std::move(*socket), m_sslContext);
     // 接受连接
     m_acceptor->async_accept(
