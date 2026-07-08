@@ -84,6 +84,7 @@ private:
     static std::string build_fetch_body_response(
         const std::string& body_content,
         size_t octets);
+    static std::string build_bodystructure(const std::string& raw);
 
 public:
     // 通用的 IMAP 响应写回（session 需要访问）

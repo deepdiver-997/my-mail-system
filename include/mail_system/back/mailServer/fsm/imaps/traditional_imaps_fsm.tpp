@@ -343,6 +343,147 @@ std::string TraditionalImapsFsm<ConnectionType>::build_fetch_body_response(
 }
 
 // ====================================================================
+// BODYSTRUCTURE 构建（RFC 3501 §7.4.2）
+// ====================================================================
+template <typename ConnectionType>
+std::string TraditionalImapsFsm<ConnectionType>::build_bodystructure(const std::string& raw) {
+    // 分隔 headers / body
+    size_t sep = raw.find("\r\n\r\n");
+    std::string body_part = (sep != std::string::npos) ? raw.substr(sep + 4) : raw;
+    std::string headers = (sep != std::string::npos) ? raw.substr(0, sep) : "";
+
+    // 解析 Content-Type
+    std::string ct = "text/plain", charset, boundary;
+    {
+        auto hdr_lower = headers;
+        std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
+        size_t ct_pos = hdr_lower.find("content-type:");
+        if (ct_pos != std::string::npos) {
+            size_t ct_end = hdr_lower.find("\r\n", ct_pos);
+            std::string ct_line = (ct_end != std::string::npos)
+                ? hdr_lower.substr(ct_pos + 13, ct_end - ct_pos - 13)
+                : hdr_lower.substr(ct_pos + 13);
+            // 去掉前后空白
+            ct_line.erase(0, ct_line.find_first_not_of(" \t"));
+            ct_line.erase(ct_line.find_last_not_of(" \t") + 1);
+
+            // 解析 type/subtype
+            auto semi = ct_line.find(';');
+            if (semi != std::string::npos) {
+                ct = ct_line.substr(0, semi);
+                // 去掉 type/subtype 尾空白
+                ct.erase(ct.find_last_not_of(" \t") + 1);
+                // 解析参数
+                std::string params = ct_line.substr(semi + 1);
+                auto bp = params.find("boundary=\"");
+                if (bp != std::string::npos) {
+                    bp += 10;
+                    auto be = params.find('"', bp);
+                    if (be != std::string::npos) boundary = params.substr(bp, be - bp);
+                }
+                auto cp = params.find("charset=\"");
+                if (cp != std::string::npos) {
+                    cp += 9;
+                    auto ce = params.find('"', cp);
+                    if (ce != std::string::npos) charset = params.substr(cp, ce - cp);
+                }
+            } else {
+                ct = ct_line;
+            }
+        }
+    }
+
+    // 解析 Content-Transfer-Encoding
+    std::string encoding = "7bit";
+    {
+        auto hdr_lower = headers;
+        std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
+        size_t cte = hdr_lower.find("content-transfer-encoding:");
+        if (cte != std::string::npos) {
+            size_t cte_end = hdr_lower.find("\r\n", cte);
+            encoding = (cte_end != std::string::npos)
+                ? hdr_lower.substr(cte + 27, cte_end - cte - 27)
+                : hdr_lower.substr(cte + 27);
+            encoding.erase(0, encoding.find_first_not_of(" \t"));
+            encoding.erase(encoding.find_last_not_of(" \t") + 1);
+            std::transform(encoding.begin(), encoding.end(), encoding.begin(), ::tolower);
+        }
+    }
+
+    size_t body_size = body_part.size();
+
+    // 处理 multipart（简单版：递归解析 boundary 分隔的子 part）
+    if (ct.find("multipart/") == 0 && !boundary.empty()) {
+        std::string bdr = "--" + boundary;
+        std::string result = "(\"" + ct.substr(0, ct.find('/')) + "\" \""
+                           + ct.substr(ct.find('/') + 1) + "\"";
+        // boundary 参数
+        result += " (\"BOUNDARY\" \"" + boundary + "\")";
+        result += " NIL NIL NIL";
+
+        // 找子 part
+        size_t pos = body_part.find(bdr + "\r\n");
+        if (pos == std::string::npos) pos = body_part.find(bdr + "\n");
+        if (pos != std::string::npos) {
+            pos = body_part.find("\r\n", pos + bdr.size());
+            if (pos == std::string::npos) pos = body_part.find('\n', pos);
+            if (pos != std::string::npos) {
+                pos += (body_part[pos] == '\r') ? 2 : 1;
+                std::string subparts;
+                while (pos < body_part.size()) {
+                    size_t next = body_part.find(bdr, pos);
+                    if (next == std::string::npos) break;
+                    // 确保是边界行（前面有 \r\n 或 \n）
+                    bool proper_bnd = (next == 0 || body_part[next-1] == '\n');
+                    if (proper_bnd) {
+                        // 提取子 part 的原始内容（含子 headers + body）
+                        std::string sub_raw = body_part.substr(pos, next - pos);
+                        // 去掉尾部 \r\n
+                        while (!sub_raw.empty() && (sub_raw.back() == '\r' || sub_raw.back() == '\n'))
+                            sub_raw.pop_back();
+                        subparts += build_bodystructure(sub_raw);
+                        pos = next + bdr.size();
+                        if (pos < body_part.size() && body_part[pos] == '\r') pos++;
+                        if (pos < body_part.size() && body_part[pos] == '\n') pos++;
+                        if (pos < body_part.size() && body_part[pos] == '-') break;
+                        continue;
+                    }
+                    pos++;
+                }
+                result += " " + subparts;
+            }
+        }
+        result += ")";
+        return result;
+    }
+
+    // 单 part：("type" "subtype" NIL NIL NIL "encoding" size NIL NIL NIL NIL)
+    std::string type, subtype;
+    auto slash = ct.find('/');
+    if (slash != std::string::npos) {
+        type = ct.substr(0, slash);
+        subtype = ct.substr(slash + 1);
+    } else {
+        type = ct;
+        subtype = "";
+    }
+
+    std::string result = "(\"" + type + "\" \"" + subtype + "\"";
+    // 参数 (charset)
+    if (!charset.empty())
+        result += " (\"CHARSET\" \"" + charset + "\")";
+    else
+        result += " NIL";
+    result += " NIL NIL \"" + encoding + "\" " + std::to_string(body_size);
+    // lines count (approximate)
+    size_t lines = 1;
+    for (char c : body_part) if (c == '\n') lines++;
+    result += " " + std::to_string(lines);
+    result += " NIL NIL NIL NIL)";
+    return result;
+}
+
+// ====================================================================
 // 发送 IMAP 响应
 // ====================================================================
 
@@ -1147,7 +1288,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     bool want_body_header = attrs.find("BODY.PEEK[HEADER]") != std::string::npos || attrs.find("BODY[HEADER]") != std::string::npos;
     if (!want_body && !want_body_header && attrs.find("BODY") != std::string::npos)
         want_body = true; // fallback: generic BODY request
-    [[maybe_unused]] bool want_body_struct = attrs.find("BODYSTRUCTURE") != std::string::npos;
+    bool want_body_struct = attrs.find("BODYSTRUCTURE") != std::string::npos;
 
     // Determine sequence range
     uint64_t seq_start = 1;
@@ -1261,6 +1402,10 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             std::string body_content = this->read_mail_body(mail_info.body_path);
             response += "BODY[] " + build_fetch_body_response(body_content, body_content.size()) + " ";
         }
+        if (want_body_struct) {
+            std::string body_content = this->read_mail_body(mail_info.body_path);
+            response += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
+        }
         // Remove trailing space
         if (response.back() == ' ') response.pop_back();
         response += ")\r\n";
@@ -1268,7 +1413,10 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
 
     response += tag + " OK FETCH completed\r\n";
 
-    session->do_async_write(response, nullptr);
+    session->do_async_write(response,
+        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
+            if (!ec) s->do_async_read();
+        });
 }
 
 // ---------- STORE ----------
