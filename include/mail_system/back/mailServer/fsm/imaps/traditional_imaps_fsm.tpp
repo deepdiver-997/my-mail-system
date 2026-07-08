@@ -1027,7 +1027,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
     response += ctx->read_only ? "READ-ONLY" : "READ-WRITE";
     response += "] SELECT completed\r\n";
 
-    session->do_async_write(response, nullptr);
+    session->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
 }
 
 // ---------- EXAMINE ----------
@@ -1084,7 +1084,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_examine(
     response += "* OK [READ-ONLY]\r\n";
     response += tag + " OK EXAMINE completed\r\n";
 
-    session->do_async_write(response, nullptr);
+    session->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
 }
 
 // ---------- LIST ----------
@@ -1128,7 +1128,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_list(
     }
     response += tag + " OK LIST completed\r\n";
 
-    session->do_async_write(response, nullptr);
+    session->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
 }
 
 // ---------- LSUB ----------
@@ -1162,7 +1162,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_lsub(
     }
     response += tag + " OK LSUB completed\r\n";
 
-    session->do_async_write(response, nullptr);
+    session->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
 }
 
 // ---------- STATUS ----------
@@ -1234,7 +1234,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_status(
     response += ")\r\n";
     response += tag + " OK STATUS completed\r\n";
 
-    session->do_async_write(response, nullptr);
+    session->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
 }
 
 // ---------- FETCH ----------
@@ -1286,8 +1286,25 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     bool want_envelope = attrs.find("ENVELOPE") != std::string::npos || attrs.find("ALL") != std::string::npos;
     bool want_body = attrs.find("BODY[]") != std::string::npos || attrs.find("BODY.PEEK[]") != std::string::npos;
     bool want_body_header = attrs.find("BODY.PEEK[HEADER]") != std::string::npos || attrs.find("BODY[HEADER]") != std::string::npos;
-    if (!want_body && !want_body_header && attrs.find("BODY") != std::string::npos)
-        want_body = true; // fallback: generic BODY request
+    // BODY[n] 或 BODY.PEEK[n] — 客户端请求特定 MIME part
+    // BODY[n] 或 BODY.PEEK[n] — 客户端请求特定 MIME part。
+    // 从 attrs 中提取 part 编号（如 "BODY.PEEK[1]" → 1）
+    int body_part_num = 0;
+    {
+        auto bracket = attrs.find('[');
+        if (bracket != std::string::npos) {
+            auto close = attrs.find(']', bracket);
+            if (close != std::string::npos) {
+                std::string num_str = attrs.substr(bracket + 1, close - bracket - 1);
+                // 只处理数字 section（忽略 HEADER、MIME 等）
+                bool all_digits = !num_str.empty();
+                for (char c : num_str) if (c < '0' || c > '9') { all_digits = false; break; }
+                if (all_digits) body_part_num = std::stoi(num_str);
+            }
+        }
+    }
+    bool want_body_part = (body_part_num > 0);
+    if (want_body_part) want_body = true; // fallback: 返回指定 part
     bool want_body_struct = attrs.find("BODYSTRUCTURE") != std::string::npos;
 
     // Determine sequence range
@@ -1400,6 +1417,88 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
         }
         if (want_body) {
             std::string body_content = this->read_mail_body(mail_info.body_path);
+            if (want_body_part && body_part_num > 0) {
+                // 提取第 body_part_num 个 MIME sub-part
+                // 1. 找 boundary
+                std::string boundary;
+                {
+                    size_t sep = body_content.find("\r\n\r\n");
+                    std::string hdrs = (sep != std::string::npos) ? body_content.substr(0, sep) : "";
+                    std::string body_only = (sep != std::string::npos) ? body_content.substr(sep + 4) : body_content;
+                    auto hdr_lower = hdrs;
+                    std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
+                    size_t ct = hdr_lower.find("content-type:");
+                    if (ct != std::string::npos) {
+                        // 从原始 hdrs 提取 boundary（保持大小写，body 中是 case-sensitive 的）
+                        std::string raw_ct_line;
+                        {
+                            size_t pos = ct + 13; // skip "content-type:"
+                            while (pos < hdrs.size()) {
+                                size_t next_nl = hdrs.find("\r\n", pos);
+                                std::string part = (next_nl != std::string::npos)
+                                    ? hdrs.substr(pos, next_nl - pos)
+                                    : hdrs.substr(pos);
+                                part.erase(0, part.find_first_not_of(" \t"));
+                                part.erase(part.find_last_not_of(" \t") + 1);
+                                raw_ct_line += (raw_ct_line.empty() ? "" : ";") + part;
+                                if (next_nl == std::string::npos) break;
+                                pos = next_nl + 2;
+                                if (pos >= hdrs.size() || (hdrs[pos] != ' ' && hdrs[pos] != '\t'))
+                                    break;
+                            }
+                        }
+                        auto bp = raw_ct_line.find("boundary=\"");
+                        if (bp != std::string::npos) {
+                            bp += 10;
+                            auto be = raw_ct_line.find('"', bp);
+                            if (be != std::string::npos) boundary = raw_ct_line.substr(bp, be - bp);
+                        }
+                    }
+                }
+                if (!boundary.empty()) {
+                    std::string bdr = "--" + boundary;
+                    // 2. 切分 sub-parts
+                    std::vector<std::string> parts;
+                    size_t pos = 0;
+                    // 跳过 preamble（第一个 boundary 之前的内容）
+                    size_t first_bdr = body_content.find(bdr + "\r\n", body_content.find("\r\n\r\n"));
+                    if (first_bdr == std::string::npos) first_bdr = body_content.find(bdr + "\n", body_content.find("\r\n\r\n"));
+                    if (first_bdr != std::string::npos) pos = first_bdr;
+                    while (pos < body_content.size()) {
+                        size_t bpos = body_content.find(bdr, pos);
+                        if (bpos == std::string::npos) break;
+                        // 确保是行首或前面有 \n
+                        if (bpos > 0 && body_content[bpos-1] != '\n') { pos = bpos + bdr.size(); continue; }
+                        size_t part_start = body_content.find("\r\n", bpos);
+                        if (part_start == std::string::npos) part_start = body_content.find('\n', bpos);
+                        if (part_start == std::string::npos) break;
+                        part_start += (body_content[part_start] == '\r') ? 2 : 1;
+                        // 找下一个 boundary
+                        size_t next_bdr = body_content.find(bdr, part_start);
+                        if (next_bdr == std::string::npos) {
+                            // 最后一段到结尾
+                            parts.push_back(body_content.substr(part_start));
+                            break;
+                        }
+                        // 确保下一个 boundary 在行首
+                        if (next_bdr > 0 && body_content[next_bdr-1] != '\n') {
+                            pos = next_bdr + bdr.size();
+                            continue;
+                        }
+                        // 提取 sub-part（去掉尾部 \r\n）
+                        std::string part = body_content.substr(part_start, next_bdr - part_start);
+                        while (!part.empty() && (part.back() == '\r' || part.back() == '\n'))
+                            part.pop_back();
+                        parts.push_back(part);
+                        pos = next_bdr + bdr.size();
+                        // 跳过 "--"（结束标记）
+                        if (pos < body_content.size() && body_content[pos] == '-') break;
+                    }
+                    if (body_part_num <= (int)parts.size()) {
+                        body_content = parts[body_part_num - 1];
+                    }
+                }
+            }
             response += "BODY[] " + build_fetch_body_response(body_content, body_content.size()) + " ";
         }
         if (want_body_struct) {
@@ -1539,7 +1638,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
     }
 
     response += tag + " OK STORE completed\r\n";
-    session->do_async_write(response, nullptr);
+    session->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
 }
 
 // ---------- EXPUNGE ----------
@@ -1577,7 +1676,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_expunge(
     }
     response += tag + " OK EXPUNGE completed\r\n";
 
-    session->do_async_write(response, nullptr);
+    session->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
 }
 
 // ---------- CLOSE ----------
@@ -1952,7 +2051,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
     uint64_t uidvalidity = target_mbox_id;
     std::string response = tag + " OK [APPENDUID " + std::to_string(uidvalidity)
                           + " " + std::to_string(mail_id) + "] APPEND completed\r\n";
-    session->do_async_write(response, nullptr);
+    session->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
 
     LOG_IMAP_INFO("APPEND: mail_id={}, mailbox={}, user={}", mail_id, mailbox_name, ctx->username);
 }
@@ -2002,7 +2101,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
     response += "\r\n";
     response += tag + " OK SEARCH completed\r\n";
 
-    session->do_async_write(response, nullptr);
+    session->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
 }
 
 // ---------- UID ----------
@@ -2185,7 +2284,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
 
     std::string cmd_name = is_move ? "MOVE" : "COPY";
     std::string response = tag + " OK " + cmd_name + " completed (" + std::to_string(copied) + " messages)\r\n";
-    session->do_async_write(response, nullptr);
+    session->do_async_write(response, [](auto s, auto& ec) { if (!ec) s->do_async_read(); });
 }
 
 template <typename ConnectionType>
