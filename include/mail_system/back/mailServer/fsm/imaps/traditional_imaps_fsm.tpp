@@ -352,7 +352,9 @@ void TraditionalImapsFsm<ConnectionType>::send_untagged(
     const std::string& data)
 {
     session->do_async_write("* " + data + "\r\n",
-        nullptr // callback nullptr → 会自动继续读取
+        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
+            if (!ec) s->do_async_read();
+        }
     );
 }
 
@@ -364,7 +366,9 @@ void TraditionalImapsFsm<ConnectionType>::send_tagged(
     const std::string& message)
 {
     session->do_async_write(tag + " " + status + " " + message + "\r\n",
-        nullptr
+        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
+            if (!ec) s->do_async_read();
+        }
     );
 }
 
