@@ -1,0 +1,187 @@
+# ==================== 编译产物 ====================
+# CMake 构建目录
+build/
+build_nohdfs/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+test/*.o
+
+# 编译输出
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+*.app
+
+# 可执行文件
+test/smtpsServer
+test/register_user
+test/*Server
+smtpsServer
+
+# ==================== 日志文件 ====================
+logs/
+*.log
+*.log.*
+*.pcapng
+
+# ==================== 数据和运行时文件 ====================
+# 邮件存储
+mail/
+mail/*.txt
+mail/*.eml
+
+# 附件存储
+attachments/
+attachments/*.*
+
+# 临时文件
+*.tmp
+*.temp
+*.cache
+.gitignore
+.dockerignore
+dump.md
+
+# ==================== 敏感配置文件 ====================
+# 数据库配置（包含密码）
+config/db_config.json
+config/db_config_mail2.json
+config/db_config_local.json
+config/*_local.json
+smtps_test.sh
+
+# SSL 证书和私钥
+config/crt/*.key
+config/crt/*.pem
+config/crt/*.crt
+config/certificates/
+config/ssl/
+config/dkim/**
+
+# 保留示例配置文件
+!config/db_config_example.json
+!config/server_example.json
+!config/generic_server_config.json
+
+# ==================== IDE 和编辑器 ====================
+# VS Code
+.vscode/
+*.code-workspace
+.vscode/settings.json.local
+
+# CLion
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Xcode
+*.xcworkspace
+xcuserdata/
+DerivedData/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+
+# Vim
+*.swp
+*.swo
+*~
+.*.swp
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# ==================== 操作系统 ====================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.nfs*
+
+# ==================== 测试和临时脚本 ====================
+# 测试脚本
+*.sh
+smtps_test.sh  # 保留这个测试脚本
+!./test/cl.py
+!scripts/generate_dkim_keys.sh
+!scripts/clear_mysql_mail_data.sh
+!build.sh
+.gitignore
+.dockerignore
+
+# 临时压缩包
+*.tar.gz
+*.zip
+*.rar
+*.mov
+
+# 临时 SQL 文件
+test_*.sql
+temp_*.sql
+
+# ==================== 文档草稿 ====================
+docs/*_draft.md
+docs/*_wip.md
+docs/byte-ads-second-round-project-script.md
+docs/dev-summary.md
+docs/operations.md
+# ==================== 性能分析 ====================
+*.prof
+*.gcov
+*.gcda
+*.gcno
+coverage/
+
+# ==================== Docker ====================
+docker-compose.override.yml
+
+# ==================== 备份文件 ====================
+*.bak
+*.backup
+*.old
+
+# ==================== 包管理器 ====================
+# npm
+node_modules/
+package-lock.json
+
+# Python
+__pycache__/
+*.py[cod]
+.Python
+venv/
+env/
+.venv/
+
+# ==================== 其他 ====================
+# C++ 头文件依赖
+*.d
+*.dep
+
+# 静态分析工具
+cppcheck-results.xml
+clang-tidy-results.txt
+
+# 代码覆盖率
+coverage/
+lcov.info
+spam-detector/
+test/sql_queries_test
