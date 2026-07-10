@@ -1216,6 +1216,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_status(
     uint64_t uidnext = stats.uidnext;
     uint64_t uidvalidity = mailbox_id;
 
+    std::transform(status_attrs.begin(), status_attrs.end(), status_attrs.begin(), ::toupper);
+
     std::string response = "* STATUS " + quote_string(encode_mailbox_name(mailbox_name)) + " (";
     if (status_attrs.find("MESSAGES") != std::string::npos || status_attrs.empty()) {
         response += "MESSAGES " + std::to_string(messages) + " ";
@@ -1277,6 +1279,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
         send_tagged(session, tag, "OK", "FETCH completed (empty)");
         return;
     }
+
+    // RFC 3501: 属性名大小写不敏感
+    std::transform(attrs.begin(), attrs.end(), attrs.begin(), ::toupper);
 
     // RFC 3501: UID FETCH 响应必须无条件包含 UID
     bool want_uid = is_uid || attrs.find("UID") != std::string::npos;
