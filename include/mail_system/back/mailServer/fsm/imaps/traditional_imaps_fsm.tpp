@@ -1502,6 +1502,12 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
                     if (body_part_num <= (int)parts.size()) {
                         body_content = parts[body_part_num - 1];
                     }
+                } else if (body_part_num == 1) {
+                    // 非 multipart 消息：BODY[1] 返回消息体（\r\n\r\n 之后的内容）
+                    size_t hdr_end = body_content.find("\r\n\r\n");
+                    if (hdr_end != std::string::npos) {
+                        body_content = body_content.substr(hdr_end + 4);
+                    }
                 }
             }
             response += "BODY[] " + build_fetch_body_response(body_content, body_content.size()) + " ";
