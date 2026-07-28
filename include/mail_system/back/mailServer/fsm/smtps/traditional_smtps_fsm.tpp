@@ -24,7 +24,7 @@ void TraditionalSmtpsFsm<ConnectionType>::cleanup_mail_files(mail* m) {
 // ========== 持久化函数实现 ==========
 template <typename ConnectionType>
 bool TraditionalSmtpsFsm<ConnectionType>::persist_mails_sync(
-    SessionBase<ConnectionType>* session, std::string& error)
+    SmtpsSession<ConnectionType>* session, std::string& error)
 {
     if (!session->mail_) { LOG_SMTP_DETAIL_WARN("No mail to persist"); return true; }
     LOG_SMTP_DETAIL_DEBUG("Starting to persist 1 mail");
@@ -50,8 +50,9 @@ bool TraditionalSmtpsFsm<ConnectionType>::persist_mails_sync(
 
 template <typename ConnectionType>
 bool TraditionalSmtpsFsm<ConnectionType>::persist_and_reply(std::shared_ptr<SessionBase<ConnectionType>> session) {
+    auto* smtp_session = static_cast<SmtpsSession<ConnectionType>*>(session.get());
     std::string error;
-    bool ok = persist_mails_sync(session.get(), error);
+    bool ok = persist_mails_sync(smtp_session, error);
     std::string reply = ok ? "221 Bye\r\n" : ("451 " + error + "\r\n");
     session->do_async_write(reply,
         [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
@@ -596,8 +597,8 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         std::string helo = ctx->ehlo_domain;
         std::string headers = ctx->header_buffer;
         std::string raw_body;
-        if (session->get_mail() && !session->get_mail()->body_path.empty()) {
-            std::ifstream body_file(session->get_mail()->body_path, std::ios::binary);
+        if (smtp_session->get_mail() && !smtp_session->get_mail()->body_path.empty()) {
+            std::ifstream body_file(smtp_session->get_mail()->body_path, std::ios::binary);
             if (body_file.is_open()) {
                 std::ostringstream ss; ss << body_file.rdbuf();
                 std::string full = ss.str();

@@ -26,6 +26,9 @@
 namespace mail_system {
 
 template <typename ConnectionType>
+class SmtpsSession;  // 前向声明
+
+template <typename ConnectionType>
 class TraditionalSmtpsFsm : public SmtpsFsm<ConnectionType> {
 private:
     using StateTransitionTable = std::map<std::pair<SmtpsState, SmtpsEvent>, SmtpsState>;
@@ -50,7 +53,7 @@ private:
     static void cleanup_streamed_attachments(SmtpsContext* ctx);
     static void cleanup_mail_files(mail* mail);
 
-    bool persist_mails_sync(SessionBase<ConnectionType>* session, std::string& error);
+    bool persist_mails_sync(SmtpsSession<ConnectionType>* session, std::string& error);
     bool persist_and_reply(std::shared_ptr<SessionBase<ConnectionType>> session);
 
     void init_transition_table();

@@ -5,6 +5,8 @@
 #include "mail_system/back/mailServer/connection/tcp_connection.h"
 #include "mail_system/back/mailServer/connection/ssl_connection.h"
 #include "mail_system/back/mailServer/session/session_base.h"
+#include "mail_system/back/entities/mail.h"
+#include "mail_system/back/entities/usr.h"
 #include "mail_system/back/mailServer/fsm/smtps/smtps_fsm.hpp"
 #include "mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
@@ -58,6 +60,11 @@ public:
     int get_current_state() const override;
     int get_next_event() const override;
     std::string get_last_command_args() const override;
+
+    // ── Mail 实体管理（已从 SessionBase 下放到此）──────────────
+    mail* get_mail() { return mail_.get(); }
+    std::unique_ptr<mail> get_mail_ptr() { return std::move(mail_); }
+    usr* get_usr() { return usr_.get(); }
 
     void create_mail_on_data_command();
     persist_storage::SubmitOwnedMailResult submit_mail_to_queue();
@@ -135,6 +142,9 @@ private:
     std::vector<std::future<bool>> async_write_futures_;
     std::shared_ptr<persist_storage::PersistentQueue> persistent_queue_;
     persist_storage::PersistSubmissionTicket pending_submission_;
+
+    std::unique_ptr<mail> mail_;
+    std::unique_ptr<usr> usr_;
 };
 
 using TcpSmtpsSession = SmtpsSession<TcpConnection>;
