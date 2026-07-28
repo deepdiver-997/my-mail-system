@@ -2,6 +2,7 @@
 #define TRADITIONAL_IMAPS_FSM_H
 
 #include "mail_system/back/mailServer/session/session_base.h"
+#include "mail_system/back/mailServer/fsm/fsm_base.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include "mail_system/back/mailServer/fsm/imaps/imaps_fsm.hpp"
@@ -28,14 +29,7 @@
 namespace mail_system {
 
 template <typename ConnectionType>
-class TraditionalImapsFsm : public ImapsFsm<ConnectionType> {
-private:
-    using StateTransitionTable = std::map<std::pair<ImapState, ImapEvent>, ImapState>;
-    using StateHandlerMap = std::map<ImapState, std::map<ImapEvent, ImapStateHandler<ConnectionType>>>;
-
-    StateTransitionTable transition_table_;
-    StateHandlerMap state_handlers_;
-
+class TraditionalImapsFsm : public ImapsFsm<ConnectionType>, public FsmBase<ConnectionType, ImapState, ImapEvent> {
 public:
     TraditionalImapsFsm(
         std::shared_ptr<ThreadPoolBase> io_thread_pool,
@@ -63,6 +57,20 @@ private:
     // 初始化
     void init_transition_table();
     void init_state_handlers();
+
+    // FsmBase hooks
+    using BaseFsm = FsmBase<ConnectionType, ImapState, ImapEvent>;
+    using Handler = typename BaseFsm::Handler;
+    bool is_terminal_state(ImapState s) const override;
+    void on_invalid_transition(ImapState s, ImapEvent e,
+        std::shared_ptr<SessionBase<ConnectionType>> session,
+        const std::string& args) override;
+    void on_handler_not_found(ImapState s, ImapEvent e,
+        std::shared_ptr<SessionBase<ConnectionType>> session,
+        const std::string& args) override;
+    void invoke_handler(Handler& h,
+        std::shared_ptr<SessionBase<ConnectionType>> session,
+        const std::string& args) override;
 
     // ========== 工具方法 ==========
     static std::string imap_timestamp(time_t t);

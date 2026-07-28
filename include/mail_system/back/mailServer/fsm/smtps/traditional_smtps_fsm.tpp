@@ -70,84 +70,85 @@ bool TraditionalSmtpsFsm<ConnectionType>::persist_and_reply(std::shared_ptr<Sess
 // ========== 初始化 ==========
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::init_transition_table() {
-    transition_table_[std::make_pair(SmtpsState::INIT, SmtpsEvent::CONNECT)] = SmtpsState::GREETING;
-    transition_table_[std::make_pair(SmtpsState::WAIT_EHLO, SmtpsEvent::EHLO)] = SmtpsState::WAIT_AUTH;
-    transition_table_[std::make_pair(SmtpsState::GREETING, SmtpsEvent::EHLO)] = SmtpsState::WAIT_AUTH;
+    this->add_transition(SmtpsState::INIT, SmtpsEvent::CONNECT, SmtpsState::GREETING);
+    this->add_transition(SmtpsState::WAIT_EHLO, SmtpsEvent::EHLO, SmtpsState::WAIT_AUTH);
+    this->add_transition(SmtpsState::GREETING, SmtpsEvent::EHLO, SmtpsState::WAIT_AUTH);
     if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
-        transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::STARTTLS)] = SmtpsState::INIT;
-    transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH)] = SmtpsState::WAIT_AUTH_USERNAME;
-    transition_table_[std::make_pair(SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH)] = SmtpsState::WAIT_AUTH_PASSWORD;
-    transition_table_[std::make_pair(SmtpsState::WAIT_AUTH_PASSWORD, SmtpsEvent::AUTH)] = SmtpsState::WAIT_MAIL_FROM;
-    transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::EHLO)] = SmtpsState::WAIT_AUTH;
-    transition_table_[std::make_pair(SmtpsState::WAIT_AUTH, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
-    transition_table_[std::make_pair(SmtpsState::WAIT_MAIL_FROM, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
-    transition_table_[std::make_pair(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
-    transition_table_[std::make_pair(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::RCPT_TO)] = SmtpsState::WAIT_RCPT_TO;
-    transition_table_[std::make_pair(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::DATA)] = SmtpsState::IN_MESSAGE;
-    transition_table_[std::make_pair(SmtpsState::WAIT_DATA, SmtpsEvent::DATA)] = SmtpsState::IN_MESSAGE;
-    transition_table_[std::make_pair(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA)] = SmtpsState::IN_MESSAGE;
-    transition_table_[std::make_pair(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA_END)] = SmtpsState::WAIT_QUIT;
-    transition_table_[std::make_pair(SmtpsState::WAIT_QUIT, SmtpsEvent::MAIL_FROM)] = SmtpsState::WAIT_RCPT_TO;
+        this->add_transition(SmtpsState::WAIT_AUTH, SmtpsEvent::STARTTLS, SmtpsState::INIT);
+    this->add_transition(SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH, SmtpsState::WAIT_AUTH_USERNAME);
+    this->add_transition(SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH, SmtpsState::WAIT_AUTH_PASSWORD);
+    this->add_transition(SmtpsState::WAIT_AUTH_PASSWORD, SmtpsEvent::AUTH, SmtpsState::WAIT_MAIL_FROM);
+    this->add_transition(SmtpsState::WAIT_AUTH, SmtpsEvent::EHLO, SmtpsState::WAIT_AUTH);
+    this->add_transition(SmtpsState::WAIT_AUTH, SmtpsEvent::MAIL_FROM, SmtpsState::WAIT_RCPT_TO);
+    this->add_transition(SmtpsState::WAIT_MAIL_FROM, SmtpsEvent::MAIL_FROM, SmtpsState::WAIT_RCPT_TO);
+    this->add_transition(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::MAIL_FROM, SmtpsState::WAIT_RCPT_TO);
+    this->add_transition(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::RCPT_TO, SmtpsState::WAIT_RCPT_TO);
+    this->add_transition(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::DATA, SmtpsState::IN_MESSAGE);
+    this->add_transition(SmtpsState::WAIT_DATA, SmtpsEvent::DATA, SmtpsState::IN_MESSAGE);
+    this->add_transition(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA, SmtpsState::IN_MESSAGE);
+    this->add_transition(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA_END, SmtpsState::WAIT_QUIT);
+    this->add_transition(SmtpsState::WAIT_QUIT, SmtpsEvent::MAIL_FROM, SmtpsState::WAIT_RCPT_TO);
 
     for (int i = 0; i < static_cast<int>(SmtpsState::CLOSED); ++i) {
-        transition_table_[std::make_pair(static_cast<SmtpsState>(i), SmtpsEvent::QUIT)] = SmtpsState::CLOSED;
+        this->add_transition(static_cast<SmtpsState>(i), SmtpsEvent::QUIT, SmtpsState::CLOSED);
     }
     for (int i = 0; i < static_cast<int>(SmtpsState::CLOSED); ++i) {
-        transition_table_[std::make_pair(static_cast<SmtpsState>(i), SmtpsEvent::ERROR)] = static_cast<SmtpsState>(i);
-        transition_table_[std::make_pair(static_cast<SmtpsState>(i), SmtpsEvent::TIMEOUT)] = static_cast<SmtpsState>(i);
+        this->add_transition(static_cast<SmtpsState>(i), SmtpsEvent::ERROR, static_cast<SmtpsState>(i));
+        this->add_transition(static_cast<SmtpsState>(i), SmtpsEvent::TIMEOUT, static_cast<SmtpsState>(i));
     }
 }
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::init_state_handlers() {
-    state_handlers_[SmtpsState::INIT][SmtpsEvent::CONNECT] =
-        std::bind(&TraditionalSmtpsFsm::handle_init_connect, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::WAIT_EHLO][SmtpsEvent::EHLO] =
-        std::bind(&TraditionalSmtpsFsm::handle_greeting_ehlo, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::GREETING][SmtpsEvent::EHLO] =
-        std::bind(&TraditionalSmtpsFsm::handle_greeting_ehlo, this, std::placeholders::_1, std::placeholders::_2);
+    using H = typename FsmBase<ConnectionType, SmtpsState, SmtpsEvent>::Handler;
+    this->add_handler(SmtpsState::INIT, SmtpsEvent::CONNECT,
+        H(std::bind(&TraditionalSmtpsFsm::handle_init_connect, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::WAIT_EHLO, SmtpsEvent::EHLO,
+        H(std::bind(&TraditionalSmtpsFsm::handle_greeting_ehlo, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::GREETING, SmtpsEvent::EHLO,
+        H(std::bind(&TraditionalSmtpsFsm::handle_greeting_ehlo, this, std::placeholders::_1, std::placeholders::_2)));
 
     if constexpr (!std::is_same_v<ConnectionType, boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>)
-        state_handlers_[SmtpsState::WAIT_AUTH][SmtpsEvent::STARTTLS] =
-            std::bind(&TraditionalSmtpsFsm::handle_wait_auth_starttls, this, std::placeholders::_1, std::placeholders::_2);
+        this->add_handler(SmtpsState::WAIT_AUTH, SmtpsEvent::STARTTLS,
+            H(std::bind(&TraditionalSmtpsFsm::handle_wait_auth_starttls, this, std::placeholders::_1, std::placeholders::_2)));
 
-    state_handlers_[SmtpsState::WAIT_AUTH][SmtpsEvent::AUTH] =
-        std::bind(&TraditionalSmtpsFsm::handle_wait_auth_auth, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::WAIT_AUTH][SmtpsEvent::EHLO] =
-        std::bind(&TraditionalSmtpsFsm::handle_greeting_ehlo, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::WAIT_AUTH_USERNAME][SmtpsEvent::AUTH] =
-        std::bind(&TraditionalSmtpsFsm::handle_wait_auth_username, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::WAIT_AUTH_PASSWORD][SmtpsEvent::AUTH] =
-        std::bind(&TraditionalSmtpsFsm::handle_wait_auth_password, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::WAIT_AUTH][SmtpsEvent::MAIL_FROM] =
-        std::bind(&TraditionalSmtpsFsm::handle_wait_auth_mail_from, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::WAIT_MAIL_FROM][SmtpsEvent::MAIL_FROM] =
-        std::bind(&TraditionalSmtpsFsm::handle_wait_mail_from_mail_from, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::WAIT_RCPT_TO][SmtpsEvent::RCPT_TO] =
-        std::bind(&TraditionalSmtpsFsm::handle_wait_rcpt_to_rcpt_to, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::WAIT_RCPT_TO][SmtpsEvent::DATA] =
-        std::bind(&TraditionalSmtpsFsm::handle_wait_data_data, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::WAIT_RCPT_TO][SmtpsEvent::MAIL_FROM] =
-        std::bind(&TraditionalSmtpsFsm::handle_wait_auth_mail_from, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::WAIT_DATA][SmtpsEvent::DATA] =
-        std::bind(&TraditionalSmtpsFsm::handle_wait_data_data, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::IN_MESSAGE][SmtpsEvent::DATA] =
-        std::bind(&TraditionalSmtpsFsm::handle_in_message_data, this, std::placeholders::_1, std::placeholders::_2);
-    state_handlers_[SmtpsState::IN_MESSAGE][SmtpsEvent::DATA_END] =
-        std::bind(&TraditionalSmtpsFsm::handle_in_message_data_end, this, std::placeholders::_1, std::placeholders::_2);
+    this->add_handler(SmtpsState::WAIT_AUTH, SmtpsEvent::AUTH,
+        H(std::bind(&TraditionalSmtpsFsm::handle_wait_auth_auth, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::WAIT_AUTH, SmtpsEvent::EHLO,
+        H(std::bind(&TraditionalSmtpsFsm::handle_greeting_ehlo, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::WAIT_AUTH_USERNAME, SmtpsEvent::AUTH,
+        H(std::bind(&TraditionalSmtpsFsm::handle_wait_auth_username, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::WAIT_AUTH_PASSWORD, SmtpsEvent::AUTH,
+        H(std::bind(&TraditionalSmtpsFsm::handle_wait_auth_password, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::WAIT_AUTH, SmtpsEvent::MAIL_FROM,
+        H(std::bind(&TraditionalSmtpsFsm::handle_wait_auth_mail_from, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::WAIT_MAIL_FROM, SmtpsEvent::MAIL_FROM,
+        H(std::bind(&TraditionalSmtpsFsm::handle_wait_mail_from_mail_from, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::RCPT_TO,
+        H(std::bind(&TraditionalSmtpsFsm::handle_wait_rcpt_to_rcpt_to, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::DATA,
+        H(std::bind(&TraditionalSmtpsFsm::handle_wait_data_data, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::WAIT_RCPT_TO, SmtpsEvent::MAIL_FROM,
+        H(std::bind(&TraditionalSmtpsFsm::handle_wait_auth_mail_from, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::WAIT_DATA, SmtpsEvent::DATA,
+        H(std::bind(&TraditionalSmtpsFsm::handle_wait_data_data, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA,
+        H(std::bind(&TraditionalSmtpsFsm::handle_in_message_data, this, std::placeholders::_1, std::placeholders::_2)));
+    this->add_handler(SmtpsState::IN_MESSAGE, SmtpsEvent::DATA_END,
+        H(std::bind(&TraditionalSmtpsFsm::handle_in_message_data_end, this, std::placeholders::_1, std::placeholders::_2)));
 
     for (int i = 1; i < static_cast<int>(SmtpsState::WAIT_QUIT) + 1; ++i) {
-        state_handlers_[static_cast<SmtpsState>(i)][SmtpsEvent::QUIT] =
-            std::bind(&TraditionalSmtpsFsm::handle_wait_quit_quit, this, std::placeholders::_1, std::placeholders::_2);
+        this->add_handler(static_cast<SmtpsState>(i), SmtpsEvent::QUIT,
+            H(std::bind(&TraditionalSmtpsFsm::handle_wait_quit_quit, this, std::placeholders::_1, std::placeholders::_2)));
     }
-    state_handlers_[SmtpsState::WAIT_QUIT][SmtpsEvent::MAIL_FROM] =
-        std::bind(&TraditionalSmtpsFsm::handle_wait_auth_mail_from, this, std::placeholders::_1, std::placeholders::_2);
+    this->add_handler(SmtpsState::WAIT_QUIT, SmtpsEvent::MAIL_FROM,
+        H(std::bind(&TraditionalSmtpsFsm::handle_wait_auth_mail_from, this, std::placeholders::_1, std::placeholders::_2)));
 
     for (int i = 0; i < static_cast<int>(SmtpsState::WAIT_QUIT) + 1; ++i) {
-        state_handlers_[static_cast<SmtpsState>(i)][SmtpsEvent::ERROR] =
-            std::bind(&TraditionalSmtpsFsm::handle_error, this, std::placeholders::_1, std::placeholders::_2);
-        state_handlers_[static_cast<SmtpsState>(i)][SmtpsEvent::TIMEOUT] =
-            std::bind(&TraditionalSmtpsFsm::handle_timeout, this, std::placeholders::_1, std::placeholders::_2);
+        this->add_handler(static_cast<SmtpsState>(i), SmtpsEvent::ERROR,
+            H(std::bind(&TraditionalSmtpsFsm::handle_error, this, std::placeholders::_1, std::placeholders::_2)));
+        this->add_handler(static_cast<SmtpsState>(i), SmtpsEvent::TIMEOUT,
+            H(std::bind(&TraditionalSmtpsFsm::handle_timeout, this, std::placeholders::_1, std::placeholders::_2)));
     }
 }
 
@@ -161,23 +162,20 @@ void TraditionalSmtpsFsm<ConnectionType>::process_event(
             SmtpsFsm<ConnectionType>::get_state_name(static_cast<SmtpsState>(session->get_current_state())),
             SmtpsFsm<ConnectionType>::get_event_name(event));
     }
-    if (static_cast<SmtpsState>(session->get_current_state()) == SmtpsState::CLOSED) {
-        session->close(); return;
-    }
-    auto key = std::make_pair(static_cast<SmtpsState>(session->get_current_state()), event);
-    auto it = transition_table_.find(key);
-    if (it != transition_table_.end()) {
-        auto sh = state_handlers_.find(static_cast<SmtpsState>(session->get_current_state()));
-        if (sh != state_handlers_.end()) {
-            auto eh = sh->second.find(event);
-            if (eh != sh->second.end()) {
-                eh->second(session, args);
-                return;
-            }
-        }
-    } else {
-        handle_error(session, "Invalid command sequence");
-    }
+    this->dispatch(session, static_cast<SmtpsState>(session->get_current_state()), event, args);
+}
+
+template <typename ConnectionType>
+bool TraditionalSmtpsFsm<ConnectionType>::is_terminal_state(SmtpsState s) const {
+    return s == SmtpsState::CLOSED;
+}
+
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::on_invalid_transition(
+    SmtpsState, SmtpsEvent,
+    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string&)
+{
+    handle_error(session, "Invalid command sequence");
 }
 
 template <typename ConnectionType>

@@ -530,158 +530,114 @@ void TraditionalImapsFsm<ConnectionType>::send_continuation(
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
     // INIT → NOT_AUTHENTICATED (on CONNECT)
-    transition_table_[{ImapState::INIT, ImapEvent::CONNECT}] = ImapState::NOT_AUTHENTICATED;
+    this->add_transition(ImapState::INIT, ImapEvent::CONNECT, ImapState::NOT_AUTHENTICATED);
 
     // NOT_AUTHENTICATED: stay on same state for most commands
-    transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::CAPABILITY}] = ImapState::NOT_AUTHENTICATED;
-    transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::LOGIN}] = ImapState::NOT_AUTHENTICATED; // may transition in handler
-    transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::AUTHENTICATE}] = ImapState::NOT_AUTHENTICATED;
-    transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::NOOP}] = ImapState::NOT_AUTHENTICATED;
-    transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::LOGOUT}] = ImapState::LOGOUT;
+    this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::CAPABILITY, ImapState::NOT_AUTHENTICATED);
+    this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGIN, ImapState::NOT_AUTHENTICATED); // may transition in handler
+    this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::AUTHENTICATE, ImapState::NOT_AUTHENTICATED);
+    this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::NOOP, ImapState::NOT_AUTHENTICATED);
+    this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGOUT, ImapState::LOGOUT);
     if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
-        transition_table_[{ImapState::NOT_AUTHENTICATED, ImapEvent::STARTTLS}] = ImapState::NOT_AUTHENTICATED;
+        this->add_transition(ImapState::NOT_AUTHENTICATED, ImapEvent::STARTTLS, ImapState::NOT_AUTHENTICATED);
 
     // AUTHENTICATED
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::SELECT}] = ImapState::SELECTED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::EXAMINE}] = ImapState::SELECTED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::CAPABILITY}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::LIST}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::LSUB}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::IMAP_STATUS}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::CREATE}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::DELETE}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::RENAME}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::SUBSCRIBE}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::UNSUBSCRIBE}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::APPEND}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::CHECK}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::CLOSE}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::NOOP}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::IDLE}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::AUTHENTICATED, ImapEvent::LOGOUT}] = ImapState::LOGOUT;
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::SELECT, ImapState::SELECTED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::EXAMINE, ImapState::SELECTED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::CAPABILITY, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::LIST, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::LSUB, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::IMAP_STATUS, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::CREATE, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::DELETE, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::RENAME, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::SUBSCRIBE, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::UNSUBSCRIBE, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::APPEND, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::CHECK, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::CLOSE, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::NOOP, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::IDLE, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::AUTHENTICATED, ImapEvent::LOGOUT, ImapState::LOGOUT);
 
     // SELECTED
-    transition_table_[{ImapState::SELECTED, ImapEvent::FETCH}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::STORE}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::SEARCH}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::COPY}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::MOVE}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::UID}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::EXPUNGE}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::CLOSE}] = ImapState::AUTHENTICATED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::CHECK}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::CAPABILITY}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::NOOP}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::APPEND}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::IDLE}] = ImapState::SELECTED;
-    transition_table_[{ImapState::SELECTED, ImapEvent::LOGOUT}] = ImapState::LOGOUT;
+    this->add_transition(ImapState::SELECTED, ImapEvent::FETCH, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::STORE, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::SEARCH, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::COPY, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::MOVE, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::UID, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::EXPUNGE, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::CLOSE, ImapState::AUTHENTICATED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::CHECK, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::CAPABILITY, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::NOOP, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::APPEND, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::IDLE, ImapState::SELECTED);
+    this->add_transition(ImapState::SELECTED, ImapEvent::LOGOUT, ImapState::LOGOUT);
 
     // ERROR / TIMEOUT everywhere (remain in current state)
     for (int i = 0; i <= static_cast<int>(ImapState::SELECTED); ++i) {
         auto s = static_cast<ImapState>(i);
-        transition_table_[{s, ImapEvent::ERROR}] = s;
-        transition_table_[{s, ImapEvent::TIMEOUT}] = s;
+        this->add_transition(s, ImapEvent::ERROR, s);
+        this->add_transition(s, ImapEvent::TIMEOUT, s);
     }
 }
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
     // INIT
-    state_handlers_[ImapState::INIT][ImapEvent::CONNECT] =
-        [this](auto session, auto args) { handle_init_connect(session, args); };
+    this->add_handler(ImapState::INIT, ImapEvent::CONNECT, [this](auto session, auto args) { handle_init_connect(session, args); });
 
     // NOT_AUTHENTICATED
-    state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::CAPABILITY] =
-        [this](auto session, auto args) { handle_capability(session, args); };
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::CAPABILITY, [this](auto session, auto args) { handle_capability(session, args); });
     if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
-        state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::STARTTLS] =
-            [this](auto session, auto args) { handle_starttls(session, args); };
-    state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::LOGIN] =
-        [this](auto session, auto args) { handle_login(session, args); };
-    state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::AUTHENTICATE] =
-        [this](auto session, auto args) { handle_authenticate(session, args); };
-    state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::NOOP] =
-        [this](auto session, auto args) { handle_noop(session, args); };
-    state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::LOGOUT] =
-        [this](auto session, auto args) { handle_logout(session, args); };
-    state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::ERROR] =
-        [this](auto session, auto args) { handle_error(session, args); };
-    state_handlers_[ImapState::NOT_AUTHENTICATED][ImapEvent::TIMEOUT] =
-        [this](auto session, auto args) { handle_timeout(session, args); };
+        this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::STARTTLS, [this](auto session, auto args) { handle_starttls(session, args); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGIN, [this](auto session, auto args) { handle_login(session, args); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::AUTHENTICATE, [this](auto session, auto args) { handle_authenticate(session, args); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::NOOP, [this](auto session, auto args) { handle_noop(session, args); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGOUT, [this](auto session, auto args) { handle_logout(session, args); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::ERROR, [this](auto session, auto args) { handle_error(session, args); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::TIMEOUT, [this](auto session, auto args) { handle_timeout(session, args); });
 
     // AUTHENTICATED
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::CAPABILITY] =
-        [this](auto session, auto args) { handle_capability(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::SELECT] =
-        [this](auto session, auto args) { handle_select(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::EXAMINE] =
-        [this](auto session, auto args) { handle_examine(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::LIST] =
-        [this](auto session, auto args) { handle_list(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::LSUB] =
-        [this](auto session, auto args) { handle_lsub(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::IMAP_STATUS] =
-        [this](auto session, auto args) { handle_status(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::CREATE] =
-        [this](auto session, auto args) { handle_create(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::DELETE] =
-        [this](auto session, auto args) { handle_delete(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::RENAME] =
-        [this](auto session, auto args) { handle_rename(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::SUBSCRIBE] =
-        [this](auto session, auto args) { handle_subscribe(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::UNSUBSCRIBE] =
-        [this](auto session, auto args) { handle_unsubscribe(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::APPEND] =
-        [this](auto session, auto args) { handle_append(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::CHECK] =
-        [this](auto session, auto args) { handle_check(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::CLOSE] =
-        [this](auto session, auto args) { handle_close(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::NOOP] =
-        [this](auto session, auto args) { handle_noop(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::IDLE] =
-        [this](auto session, auto args) { handle_idle(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::LOGOUT] =
-        [this](auto session, auto args) { handle_logout(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::ERROR] =
-        [this](auto session, auto args) { handle_error(session, args); };
-    state_handlers_[ImapState::AUTHENTICATED][ImapEvent::TIMEOUT] =
-        [this](auto session, auto args) { handle_timeout(session, args); };
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CAPABILITY, [this](auto session, auto args) { handle_capability(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::SELECT, [this](auto session, auto args) { handle_select(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::EXAMINE, [this](auto session, auto args) { handle_examine(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LIST, [this](auto session, auto args) { handle_list(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LSUB, [this](auto session, auto args) { handle_lsub(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::IMAP_STATUS, [this](auto session, auto args) { handle_status(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CREATE, [this](auto session, auto args) { handle_create(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::DELETE, [this](auto session, auto args) { handle_delete(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::RENAME, [this](auto session, auto args) { handle_rename(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::SUBSCRIBE, [this](auto session, auto args) { handle_subscribe(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::UNSUBSCRIBE, [this](auto session, auto args) { handle_unsubscribe(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::APPEND, [this](auto session, auto args) { handle_append(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CHECK, [this](auto session, auto args) { handle_check(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CLOSE, [this](auto session, auto args) { handle_close(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::NOOP, [this](auto session, auto args) { handle_noop(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::IDLE, [this](auto session, auto args) { handle_idle(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LOGOUT, [this](auto session, auto args) { handle_logout(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::ERROR, [this](auto session, auto args) { handle_error(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::TIMEOUT, [this](auto session, auto args) { handle_timeout(session, args); });
 
     // SELECTED
-    state_handlers_[ImapState::SELECTED][ImapEvent::FETCH] =
-        [this](auto session, auto args) { handle_fetch(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::STORE] =
-        [this](auto session, auto args) { handle_store(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::SEARCH] =
-        [this](auto session, auto args) { handle_search(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::COPY] =
-        [this](auto session, auto args) { handle_copy(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::MOVE] =
-        [this](auto session, auto args) { handle_move(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::UID] =
-        [this](auto session, auto args) { handle_uid(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::EXPUNGE] =
-        [this](auto session, auto args) { handle_expunge(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::CLOSE] =
-        [this](auto session, auto args) { handle_close(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::CHECK] =
-        [this](auto session, auto args) { handle_check(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::APPEND] =
-        [this](auto session, auto args) { handle_append(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::CAPABILITY] =
-        [this](auto session, auto args) { handle_capability(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::NOOP] =
-        [this](auto session, auto args) { handle_noop(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::IDLE] =
-        [this](auto session, auto args) { handle_idle(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::LOGOUT] =
-        [this](auto session, auto args) { handle_logout(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::ERROR] =
-        [this](auto session, auto args) { handle_error(session, args); };
-    state_handlers_[ImapState::SELECTED][ImapEvent::TIMEOUT] =
-        [this](auto session, auto args) { handle_timeout(session, args); };
+    this->add_handler(ImapState::SELECTED, ImapEvent::FETCH, [this](auto session, auto args) { handle_fetch(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::STORE, [this](auto session, auto args) { handle_store(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::SEARCH, [this](auto session, auto args) { handle_search(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::COPY, [this](auto session, auto args) { handle_copy(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::MOVE, [this](auto session, auto args) { handle_move(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::UID, [this](auto session, auto args) { handle_uid(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::EXPUNGE, [this](auto session, auto args) { handle_expunge(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::CLOSE, [this](auto session, auto args) { handle_close(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::CHECK, [this](auto session, auto args) { handle_check(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::APPEND, [this](auto session, auto args) { handle_append(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::CAPABILITY, [this](auto session, auto args) { handle_capability(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::NOOP, [this](auto session, auto args) { handle_noop(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::IDLE, [this](auto session, auto args) { handle_idle(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::LOGOUT, [this](auto session, auto args) { handle_logout(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::ERROR, [this](auto session, auto args) { handle_error(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::TIMEOUT, [this](auto session, auto args) { handle_timeout(session, args); });
 }
 
 // ====================================================================
@@ -709,45 +665,52 @@ void TraditionalImapsFsm<ConnectionType>::process_event(
         ctx->current_tag = tag;
     }
 
-    if (static_cast<ImapState>(session->get_current_state()) == ImapState::LOGOUT ||
-        static_cast<ImapState>(session->get_current_state()) == ImapState::CLOSED) {
-        session->close();
-        return;
-    }
+    this->dispatch(session, static_cast<ImapState>(session->get_current_state()), event, args);
+}
+template <typename ConnectionType>
+bool TraditionalImapsFsm<ConnectionType>::is_terminal_state(ImapState s) const {
+    return s == ImapState::LOGOUT || s == ImapState::CLOSED;
+}
 
-    auto transition_key = std::make_pair(
-        static_cast<ImapState>(session->get_current_state()), event);
-    auto transition_it = transition_table_.find(transition_key);
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::on_invalid_transition(
+    ImapState, ImapEvent,
+    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string&)
+{
+    auto* ctx = static_cast<ImapContext*>(session->get_context());
+    send_tagged(session, ctx ? ctx->current_tag : "*", "BAD", "Invalid command sequence");
+}
 
-    if (transition_it != transition_table_.end()) {
-        auto state_handler_it = state_handlers_.find(
-            static_cast<ImapState>(session->get_current_state()));
-        if (state_handler_it != state_handlers_.end()) {
-            auto event_handler_it = state_handler_it->second.find(event);
-            if (event_handler_it != state_handler_it->second.end()) {
-                LOG_IMAP_INFO("IMAP handler: state={} event={} tag={}",
-                    static_cast<int>(session->get_current_state()),
-                    static_cast<int>(event), tag);
-                try {
-                    event_handler_it->second(session, args);
-                } catch (const std::exception& e) {
-                    LOG_IMAP_ERROR("IMAP handler exception: {} tag={}", e.what(), tag);
-                    send_tagged(session, tag, "NO", "Internal server error");
-                } catch (...) {
-                    LOG_IMAP_ERROR("IMAP handler unknown exception tag={}", tag);
-                    send_tagged(session, tag, "NO", "Internal server error");
-                }
-                LOG_IMAP_INFO("IMAP handler done: tag={}", tag);
-                return;
-            }
-        }
-        // Handler not found — send BAD
-        send_tagged(session, tag, "BAD", "Unsupported command in current state");
-    } else {
-        // Invalid transition
-        send_tagged(session, tag, "BAD", "Invalid command sequence");
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::on_handler_not_found(
+    ImapState, ImapEvent,
+    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string&)
+{
+    auto* ctx = static_cast<ImapContext*>(session->get_context());
+    send_tagged(session, ctx ? ctx->current_tag : "*", "BAD", "Unsupported command in current state");
+}
+
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::invoke_handler(
+    typename FsmBase<ConnectionType, ImapState, ImapEvent>::Handler& h,
+    std::shared_ptr<SessionBase<ConnectionType>> session,
+    const std::string& args)
+{
+    try {
+        h(session, args);
+    } catch (const std::exception& e) {
+        auto* ctx = static_cast<ImapContext*>(session->get_context());
+        LOG_IMAP_ERROR("IMAP handler exception: {} tag={}", e.what(),
+                       ctx ? ctx->current_tag : "?");
+        send_tagged(session, ctx ? ctx->current_tag : "*", "NO", "Internal server error");
+    } catch (...) {
+        auto* ctx = static_cast<ImapContext*>(session->get_context());
+        LOG_IMAP_ERROR("IMAP handler unknown exception tag={}",
+                       ctx ? ctx->current_tag : "?");
+        send_tagged(session, ctx ? ctx->current_tag : "*", "NO", "Internal server error");
     }
 }
+
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::auto_process_event(

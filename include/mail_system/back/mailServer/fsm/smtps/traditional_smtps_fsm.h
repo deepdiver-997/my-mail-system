@@ -2,6 +2,7 @@
 #define TRADITIONAL_SMTPS_FSM_H
 
 #include "mail_system/back/mailServer/session/session_base.h"
+#include "mail_system/back/mailServer/fsm/fsm_base.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/thread_pool/thread_pool_base.h"
 #include "mail_system/back/mailServer/fsm/smtps/smtps_fsm.hpp"
@@ -29,13 +30,7 @@ template <typename ConnectionType>
 class SmtpsSession;  // 前向声明
 
 template <typename ConnectionType>
-class TraditionalSmtpsFsm : public SmtpsFsm<ConnectionType> {
-private:
-    using StateTransitionTable = std::map<std::pair<SmtpsState, SmtpsEvent>, SmtpsState>;
-
-    StateTransitionTable transition_table_;
-    std::map<SmtpsState, std::map<SmtpsEvent, StateHandler<ConnectionType>>> state_handlers_;
-
+class TraditionalSmtpsFsm : public SmtpsFsm<ConnectionType>, public FsmBase<ConnectionType, SmtpsState, SmtpsEvent> {
 public:
     TraditionalSmtpsFsm(
         std::shared_ptr<ThreadPoolBase> io_thread_pool,
@@ -58,6 +53,11 @@ private:
 
     void init_transition_table();
     void init_state_handlers();
+
+    bool is_terminal_state(SmtpsState s) const override;
+    void on_invalid_transition(SmtpsState s, SmtpsEvent e,
+        std::shared_ptr<SessionBase<ConnectionType>> session,
+        const std::string& args) override;
 
 public:
     void process_event(std::shared_ptr<SessionBase<ConnectionType>> session, SmtpsEvent event, const std::string& args) override;
