@@ -12,7 +12,7 @@ template <typename ConnectionType, typename State, typename Event>
 class FsmBase {
 public:
     using Handler = std::function<void(
-        std::shared_ptr<SessionBase<ConnectionType>>, const std::string&)>;
+        std::shared_ptr<SessionBase<ConnectionType>>)>;
 
     virtual ~FsmBase() = default;
 
@@ -31,8 +31,7 @@ protected:
     }
 
     bool dispatch(std::shared_ptr<SessionBase<ConnectionType>> session,
-                  State current_state, Event event,
-                  const std::string& args)
+                  State current_state, Event event)
     {
         if (is_terminal_state(current_state)) {
             session->close();
@@ -40,39 +39,35 @@ protected:
         }
         auto trans_it = transition_table_.find({current_state, event});
         if (trans_it == transition_table_.end()) {
-            on_invalid_transition(current_state, event, session, args);
+            on_invalid_transition(current_state, event, session);
             return true;
         }
         auto state_it = state_handlers_.find(current_state);
         if (state_it == state_handlers_.end()) {
-            on_handler_not_found(current_state, event, session, args);
+            on_handler_not_found(current_state, event, session);
             return true;
         }
         auto ev_it = state_it->second.find(event);
         if (ev_it == state_it->second.end()) {
-            on_handler_not_found(current_state, event, session, args);
+            on_handler_not_found(current_state, event, session);
             return true;
         }
-        pre_dispatch(current_state, event, session, args);
-        invoke_handler(ev_it->second, session, args);
+        pre_dispatch(current_state, event, session);
+        invoke_handler(ev_it->second, session);
         return true;
     }
 
     virtual bool is_terminal_state(State s) const = 0;
     virtual void on_invalid_transition(State s, Event e,
-        std::shared_ptr<SessionBase<ConnectionType>> session,
-        const std::string& args) = 0;
+        std::shared_ptr<SessionBase<ConnectionType>> session) = 0;
     virtual void on_handler_not_found(State s, Event e,
-        std::shared_ptr<SessionBase<ConnectionType>> session,
-        const std::string& args) {}
+        std::shared_ptr<SessionBase<ConnectionType>> session) {}
     virtual void pre_dispatch(State s, Event e,
-        std::shared_ptr<SessionBase<ConnectionType>> session,
-        const std::string& args) {}
+        std::shared_ptr<SessionBase<ConnectionType>> session) {}
     virtual void invoke_handler(Handler& h,
-        std::shared_ptr<SessionBase<ConnectionType>> session,
-        const std::string& args)
+        std::shared_ptr<SessionBase<ConnectionType>> session)
     {
-        h(session, args);
+        h(session);
     }
 };
 

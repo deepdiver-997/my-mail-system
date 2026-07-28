@@ -56,30 +56,29 @@ private:
 
     bool is_terminal_state(SmtpsState s) const override;
     void on_invalid_transition(SmtpsState s, SmtpsEvent e,
-        std::shared_ptr<SessionBase<ConnectionType>> session,
-        const std::string& args) override;
+        std::shared_ptr<SessionBase<ConnectionType>> session) override;
 
 public:
-    void process_event(std::shared_ptr<SessionBase<ConnectionType>> session, SmtpsEvent event, const std::string& args) override;
+    void process_event(std::shared_ptr<SessionBase<ConnectionType>> session, SmtpsEvent event) override;
     void auto_process_event(std::shared_ptr<SessionBase<ConnectionType>> session);
 
 private:
-    void handle_init_connect(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_greeting_ehlo(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_wait_auth_starttls(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_wait_auth_auth(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_init_connect(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_greeting_ehlo(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_wait_auth_starttls(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_wait_auth_auth(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_wait_auth_auth_login(std::shared_ptr<SessionBase<ConnectionType>> session);
-    void handle_wait_auth_username(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_wait_auth_password(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_wait_auth_mail_from(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_wait_mail_from_mail_from(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_wait_rcpt_to_rcpt_to(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_wait_data_data(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_in_message_data(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_in_message_data_end(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_wait_quit_quit(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_timeout(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
-    void handle_error(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args);
+    void handle_wait_auth_username(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_wait_auth_password(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_wait_auth_mail_from(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_wait_mail_from_mail_from(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_wait_rcpt_to_rcpt_to(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_wait_data_data(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_in_message_data(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_in_message_data_end(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_wait_quit_quit(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_timeout(std::shared_ptr<SessionBase<ConnectionType>> session);
+    void handle_error(std::shared_ptr<SessionBase<ConnectionType>> session);
 };
 
 } // namespace mail_system

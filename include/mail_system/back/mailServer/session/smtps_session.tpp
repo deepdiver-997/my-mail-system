@@ -27,7 +27,7 @@ void SmtpsSession<ConnectionType>::start(std::shared_ptr<SmtpsSession> self) {
         [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) { LOG_SESSION_ERROR("Handshake failed: {}", ec.message()); return; }
             auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(s->get_fsm());
-            fsm->process_event(s, SmtpsEvent::CONNECT, "");
+            fsm->process_event(s, SmtpsEvent::CONNECT);
         }
     );
 }

@@ -71,7 +71,7 @@ void ImapsSession<ConnectionType>::start(std::shared_ptr<ImapsSession> self) {
                 return;
             }
             auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(s->get_fsm());
-            fsm->process_event(s, ImapEvent::CONNECT, "", "");
+            fsm->process_event(s, ImapEvent::CONNECT, "");
         }
     );
 }
@@ -299,7 +299,7 @@ void ImapsSession<ConnectionType>::process_read() {
         session->command_parsed_ = false;
         auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
         fsm->process_event(self, ImapEvent::APPEND,
-                           session->current_tag_, session->last_command_args_);
+                           session->current_tag_);
         return;
     }
 
@@ -307,7 +307,7 @@ void ImapsSession<ConnectionType>::process_read() {
     session->command_parsed_ = false;
     auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
     fsm->process_event(self, session->next_event_,
-                       session->current_tag_, session->last_command_args_);
+                       session->current_tag_);
 }
 
 // ====================================================================

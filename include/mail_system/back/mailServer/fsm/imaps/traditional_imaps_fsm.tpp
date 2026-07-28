@@ -587,57 +587,57 @@ void TraditionalImapsFsm<ConnectionType>::init_transition_table() {
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::init_state_handlers() {
     // INIT
-    this->add_handler(ImapState::INIT, ImapEvent::CONNECT, [this](auto session, auto args) { handle_init_connect(session, args); });
+    this->add_handler(ImapState::INIT, ImapEvent::CONNECT, [this](auto session) { handle_init_connect(session); });
 
     // NOT_AUTHENTICATED
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::CAPABILITY, [this](auto session, auto args) { handle_capability(session, args); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::CAPABILITY, [this](auto session) { handle_capability(session); });
     if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
-        this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::STARTTLS, [this](auto session, auto args) { handle_starttls(session, args); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGIN, [this](auto session, auto args) { handle_login(session, args); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::AUTHENTICATE, [this](auto session, auto args) { handle_authenticate(session, args); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::NOOP, [this](auto session, auto args) { handle_noop(session, args); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGOUT, [this](auto session, auto args) { handle_logout(session, args); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::ERROR, [this](auto session, auto args) { handle_error(session, args); });
-    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::TIMEOUT, [this](auto session, auto args) { handle_timeout(session, args); });
+        this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::STARTTLS, [this](auto session) { handle_starttls(session); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGIN, [this](auto session) { handle_login(session); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::AUTHENTICATE, [this](auto session) { handle_authenticate(session); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::NOOP, [this](auto session) { handle_noop(session); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::LOGOUT, [this](auto session) { handle_logout(session); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::ERROR, [this](auto session) { handle_error(session); });
+    this->add_handler(ImapState::NOT_AUTHENTICATED, ImapEvent::TIMEOUT, [this](auto session) { handle_timeout(session); });
 
     // AUTHENTICATED
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CAPABILITY, [this](auto session, auto args) { handle_capability(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::SELECT, [this](auto session, auto args) { handle_select(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::EXAMINE, [this](auto session, auto args) { handle_examine(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LIST, [this](auto session, auto args) { handle_list(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LSUB, [this](auto session, auto args) { handle_lsub(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::IMAP_STATUS, [this](auto session, auto args) { handle_status(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CREATE, [this](auto session, auto args) { handle_create(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::DELETE, [this](auto session, auto args) { handle_delete(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::RENAME, [this](auto session, auto args) { handle_rename(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::SUBSCRIBE, [this](auto session, auto args) { handle_subscribe(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::UNSUBSCRIBE, [this](auto session, auto args) { handle_unsubscribe(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::APPEND, [this](auto session, auto args) { handle_append(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CHECK, [this](auto session, auto args) { handle_check(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CLOSE, [this](auto session, auto args) { handle_close(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::NOOP, [this](auto session, auto args) { handle_noop(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::IDLE, [this](auto session, auto args) { handle_idle(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LOGOUT, [this](auto session, auto args) { handle_logout(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::ERROR, [this](auto session, auto args) { handle_error(session, args); });
-    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::TIMEOUT, [this](auto session, auto args) { handle_timeout(session, args); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CAPABILITY, [this](auto session) { handle_capability(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::SELECT, [this](auto session) { handle_select(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::EXAMINE, [this](auto session) { handle_examine(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LIST, [this](auto session) { handle_list(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LSUB, [this](auto session) { handle_lsub(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::IMAP_STATUS, [this](auto session) { handle_status(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CREATE, [this](auto session) { handle_create(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::DELETE, [this](auto session) { handle_delete(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::RENAME, [this](auto session) { handle_rename(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::SUBSCRIBE, [this](auto session) { handle_subscribe(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::UNSUBSCRIBE, [this](auto session) { handle_unsubscribe(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::APPEND, [this](auto session) { handle_append(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CHECK, [this](auto session) { handle_check(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::CLOSE, [this](auto session) { handle_close(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::NOOP, [this](auto session) { handle_noop(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::IDLE, [this](auto session) { handle_idle(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::LOGOUT, [this](auto session) { handle_logout(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::ERROR, [this](auto session) { handle_error(session); });
+    this->add_handler(ImapState::AUTHENTICATED, ImapEvent::TIMEOUT, [this](auto session) { handle_timeout(session); });
 
     // SELECTED
-    this->add_handler(ImapState::SELECTED, ImapEvent::FETCH, [this](auto session, auto args) { handle_fetch(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::STORE, [this](auto session, auto args) { handle_store(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::SEARCH, [this](auto session, auto args) { handle_search(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::COPY, [this](auto session, auto args) { handle_copy(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::MOVE, [this](auto session, auto args) { handle_move(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::UID, [this](auto session, auto args) { handle_uid(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::EXPUNGE, [this](auto session, auto args) { handle_expunge(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::CLOSE, [this](auto session, auto args) { handle_close(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::CHECK, [this](auto session, auto args) { handle_check(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::APPEND, [this](auto session, auto args) { handle_append(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::CAPABILITY, [this](auto session, auto args) { handle_capability(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::NOOP, [this](auto session, auto args) { handle_noop(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::IDLE, [this](auto session, auto args) { handle_idle(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::LOGOUT, [this](auto session, auto args) { handle_logout(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::ERROR, [this](auto session, auto args) { handle_error(session, args); });
-    this->add_handler(ImapState::SELECTED, ImapEvent::TIMEOUT, [this](auto session, auto args) { handle_timeout(session, args); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::FETCH, [this](auto session) { handle_fetch(session, false); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::STORE, [this](auto session) { handle_store(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::SEARCH, [this](auto session) { handle_search(session, false); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::COPY, [this](auto session) { handle_copy(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::MOVE, [this](auto session) { handle_move(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::UID, [this](auto session) { handle_uid(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::EXPUNGE, [this](auto session) { handle_expunge(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::CLOSE, [this](auto session) { handle_close(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::CHECK, [this](auto session) { handle_check(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::APPEND, [this](auto session) { handle_append(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::CAPABILITY, [this](auto session) { handle_capability(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::NOOP, [this](auto session) { handle_noop(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::IDLE, [this](auto session) { handle_idle(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::LOGOUT, [this](auto session) { handle_logout(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::ERROR, [this](auto session) { handle_error(session); });
+    this->add_handler(ImapState::SELECTED, ImapEvent::TIMEOUT, [this](auto session) { handle_timeout(session); });
 }
 
 // ====================================================================
@@ -648,15 +648,14 @@ template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::process_event(
     std::shared_ptr<SessionBase<ConnectionType>> session,
     ImapEvent event,
-    const std::string& tag,
-    const std::string& args)
+    const std::string& tag)
 {
     if constexpr (ENABLE_IMAP_DETAIL_DEBUG_LOG) {
-        LOG_IMAP_DETAIL_DEBUG("Current State: {}, Event: {}, Tag: {}, Args: {}",
+        LOG_IMAP_DETAIL_DEBUG("Current State: {}, Event: {}, Tag: {}",
                           ImapsFsm<ConnectionType>::get_state_name(
                               static_cast<ImapState>(session->get_current_state())),
                           ImapsFsm<ConnectionType>::get_event_name(event),
-                          tag, args);
+                          tag);
     }
 
     // 保存 tag 到 context
@@ -665,7 +664,7 @@ void TraditionalImapsFsm<ConnectionType>::process_event(
         ctx->current_tag = tag;
     }
 
-    this->dispatch(session, static_cast<ImapState>(session->get_current_state()), event, args);
+    this->dispatch(session, static_cast<ImapState>(session->get_current_state()), event);
 }
 template <typename ConnectionType>
 bool TraditionalImapsFsm<ConnectionType>::is_terminal_state(ImapState s) const {
@@ -675,7 +674,7 @@ bool TraditionalImapsFsm<ConnectionType>::is_terminal_state(ImapState s) const {
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::on_invalid_transition(
     ImapState, ImapEvent,
-    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string&)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     send_tagged(session, ctx ? ctx->current_tag : "*", "BAD", "Invalid command sequence");
@@ -684,7 +683,7 @@ void TraditionalImapsFsm<ConnectionType>::on_invalid_transition(
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::on_handler_not_found(
     ImapState, ImapEvent,
-    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string&)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     send_tagged(session, ctx ? ctx->current_tag : "*", "BAD", "Unsupported command in current state");
@@ -693,11 +692,10 @@ void TraditionalImapsFsm<ConnectionType>::on_handler_not_found(
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::invoke_handler(
     typename FsmBase<ConnectionType, ImapState, ImapEvent>::Handler& h,
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     try {
-        h(session, args);
+        h(session);
     } catch (const std::exception& e) {
         auto* ctx = static_cast<ImapContext*>(session->get_context());
         LOG_IMAP_ERROR("IMAP handler exception: {} tag={}", e.what(),
@@ -721,7 +719,7 @@ void TraditionalImapsFsm<ConnectionType>::auto_process_event(
 
     // 如果是 IDLE 状态的特殊处理
     if (ctx->idle_mode) {
-        handle_done(session, "");
+        handle_done(session);
         return;
     }
 
@@ -742,8 +740,7 @@ void TraditionalImapsFsm<ConnectionType>::auto_process_event(
 // ---------- INIT → CONNECT → greeting ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_init_connect(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
 
@@ -764,8 +761,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_init_connect(
 // ---------- CAPABILITY ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_capability(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -787,14 +783,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_capability(
 // ---------- LOGIN ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_login(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
 
     // 解析 "username password"
-    std::string username, password;
+    std::string username, password, args = session->get_last_command_args();
     size_t space = args.find(' ');
     if (space != std::string::npos && space > 0) {
         // 可能带引号
@@ -823,7 +818,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
     if (!username.empty() && username.find('@') == std::string::npos) {
         auto config = std::atomic_load(&session->get_server()->m_config);
         username += "@" + config->system_domain;
-        LOG_IMAP_DEBUG("Auto-domain applied: {} → {}", args, username);
+        LOG_IMAP_DEBUG("Auto-domain applied: {}@{}", username, config->system_domain);
     }
 
     uint64_t user_id = 0;
@@ -852,14 +847,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
 // ---------- AUTHENTICATE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_authenticate(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
 
     // 解析机制名
-    std::string mechanism = args;
+    std::string mechanism = session->get_last_command_args();
     size_t space = mechanism.find(' ');
     if (space != std::string::npos) {
         mechanism = mechanism.substr(0, space);
@@ -879,8 +873,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_authenticate(
 // ---------- LOGOUT ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_logout(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string current_tag = ctx ? ctx->current_tag : "*";
@@ -913,13 +906,12 @@ void TraditionalImapsFsm<ConnectionType>::handle_logout(
 // ---------- SELECT ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_select(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
 
-    std::string mailbox_name = args;
+    std::string mailbox_name = session->get_last_command_args();
     if (!mailbox_name.empty() && mailbox_name[0] == '"') {
         size_t end = mailbox_name.find('"', 1);
         if (end != std::string::npos)
@@ -996,13 +988,12 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
 // ---------- EXAMINE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_examine(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
 
-    std::string mailbox_name = args;
+    std::string mailbox_name = session->get_last_command_args();
     if (!mailbox_name.empty() && mailbox_name[0] == '"') {
         size_t end = mailbox_name.find('"', 1);
         if (end != std::string::npos) {
@@ -1053,8 +1044,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_examine(
 // ---------- LIST ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_list(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1097,8 +1087,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_list(
 // ---------- LSUB ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_lsub(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1131,8 +1120,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_lsub(
 // ---------- STATUS ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_status(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1143,6 +1131,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_status(
     }
 
     // Parse "mailbox (MESSAGES UNSEEN UIDNEXT UIDVALIDITY)"
+    std::string args = session->get_last_command_args();
     std::string mailbox_name = args;
     std::string status_attrs;
 
@@ -1205,10 +1194,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_status(
 // ---------- FETCH ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_fetch(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args, bool is_uid)
+    std::shared_ptr<SessionBase<ConnectionType>> session, bool is_uid)
 {
-    LOG_IMAP_INFO("FETCH ENTER args=[{}]", args);
+    LOG_IMAP_INFO("FETCH ENTER args=[{}]", session->get_last_command_args());
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
 
@@ -1220,6 +1208,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     // Parse: <sequence-set> <message-data-item-names>
     // e.g. "1:* (FLAGS INTERNALDATE RFC822.SIZE ENVELOPE)"
     // or   "1:* (BODY[])"
+    auto args = (ctx && ctx->is_uid_command) ? ctx->uid_overridden_args : session->get_last_command_args();
     size_t space = args.find(' ');
     if (space == std::string::npos) {
         send_tagged(session, tag, "BAD", "FETCH requires arguments");
@@ -1495,8 +1484,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
 // ---------- STORE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_store(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1509,6 +1497,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
     // Parse: <sequence-set> <data-item> <value>
     // e.g. "1:* +FLAGS (\\Seen \\Flagged)"
     //      "2:4 FLAGS (\\Deleted)"
+    auto* ctx_store = static_cast<ImapContext*>(session->get_context());
+    auto args = (ctx_store && ctx_store->is_uid_command) ? ctx_store->uid_overridden_args : session->get_last_command_args();
     size_t space1 = args.find(' ');
     if (space1 == std::string::npos) {
         send_tagged(session, tag, "BAD", "STORE requires arguments");
@@ -1618,8 +1608,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
 // ---------- EXPUNGE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_expunge(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1656,8 +1645,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_expunge(
 // ---------- CLOSE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_close(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
 
@@ -1683,8 +1671,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_close(
 // ---------- NOOP ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_noop(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1694,8 +1681,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_noop(
 // ---------- CHECK ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_check(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1705,8 +1691,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_check(
 // ---------- STARTTLS ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_starttls(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1730,8 +1715,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_starttls(
 // ---------- CREATE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_create(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1741,7 +1725,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_create(
         return;
     }
 
-    std::string mailbox_name = args;
+    std::string mailbox_name = session->get_last_command_args();
     if (!mailbox_name.empty() && mailbox_name[0] == '"') {
         size_t end = mailbox_name.find('"', 1);
         if (end != std::string::npos) {
@@ -1775,8 +1759,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_create(
 // ---------- DELETE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_delete(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1786,7 +1769,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
         return;
     }
 
-    std::string mailbox_name = args;
+    std::string mailbox_name = session->get_last_command_args();
     if (!mailbox_name.empty() && mailbox_name[0] == '"') {
         size_t end = mailbox_name.find('"', 1);
         if (end != std::string::npos) {
@@ -1830,8 +1813,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
 // ---------- RENAME ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_rename(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1842,7 +1824,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_rename(
     }
 
     // Parse old_name new_name
-    std::string old_name, new_name;
+    std::string old_name, new_name, args = session->get_last_command_args();
     size_t space = args.find(' ');
     if (space != std::string::npos) {
         old_name = args.substr(0, space);
@@ -1890,32 +1872,29 @@ void TraditionalImapsFsm<ConnectionType>::handle_rename(
 // ---------- SUBSCRIBE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_subscribe(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
-    LOG_IMAP_INFO("SUBSCRIBE {} — subscription persistence not yet implemented", args);
+    LOG_IMAP_INFO("SUBSCRIBE {} — subscription persistence not yet implemented");
     send_tagged(session, tag, "OK", "SUBSCRIBE completed");
 }
 
 // ---------- UNSUBSCRIBE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_unsubscribe(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
-    LOG_IMAP_INFO("UNSUBSCRIBE {} — subscription persistence not yet implemented", args);
+    LOG_IMAP_INFO("UNSUBSCRIBE {} — subscription persistence not yet implemented");
     send_tagged(session, tag, "OK", "UNSUBSCRIBE completed");
 }
 
 // ---------- APPEND ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_append(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -1989,7 +1968,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
     }
 
     // 正文内容即 literal 数据（args）
-    std::string body_content = args;
+    std::string body_content = session->get_last_command_args();
     std::string subject = "(APPEND)";
 
     // 尝试提取 Subject（正文第一行或全文首 200 字符）
@@ -2033,8 +2012,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
 // ---------- SEARCH ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_search(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args, bool is_uid)
+    std::shared_ptr<SessionBase<ConnectionType>> session, bool is_uid)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -2048,7 +2026,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
     this->get_mailbox_mails(ctx->selected_mailbox_id, ctx->user_id, mails);
 
     // 解析搜索关键词（简单实现常用关键词）
-    std::string upper_args = args;
+    std::string upper_args = session->get_last_command_args();
     std::transform(upper_args.begin(), upper_args.end(), upper_args.begin(), ::toupper);
 
     bool search_unseen = (upper_args.find("UNSEEN") != std::string::npos
@@ -2081,8 +2059,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
 // ---------- UID ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_uid(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -2092,6 +2069,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
         return;
     }
 
+    std::string args = session->get_last_command_args();
     size_t space = args.find(' ');
     if (space == std::string::npos) {
         send_tagged(session, tag, "BAD", "UID requires subcommand");
@@ -2144,17 +2122,23 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
         subargs = seq_set + rest;
     }
 
+    ctx->is_uid_command = true;
+    ctx->uid_overridden_args = subargs;
+
     if (subcmd == "FETCH") {
-        handle_fetch(session, subargs, true);  // is_uid=true → 强制包含 UID
+        handle_fetch(session, true);
     } else if (subcmd == "STORE") {
-        handle_store(session, subargs);
+        handle_store(session);
     } else if (subcmd == "SEARCH") {
-        handle_search(session, subargs, true);  // is_uid=true → 返回 mail_id
+        handle_search(session, true);
     } else if (subcmd == "COPY") {
-        handle_copy(session, subargs);
+        handle_copy(session);
     } else {
         send_tagged(session, tag, "BAD", "Unknown UID subcommand");
     }
+
+    ctx->is_uid_command = false;
+    ctx->uid_overridden_args.clear();
     LOG_IMAP_INFO("UID subcmd done: {}", subcmd);
 }
 
@@ -2163,7 +2147,6 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
     std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args,
     bool is_move)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
@@ -2175,6 +2158,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
     }
 
     // 解析 "seq_set mailbox"
+    auto args = (ctx && ctx->is_uid_command) ? ctx->uid_overridden_args : session->get_last_command_args();
     size_t sp = args.rfind(' ');
     if (sp == std::string::npos) {
         send_tagged(session, tag, "BAD", "COPY/MOVE requires sequence set and mailbox");
@@ -2263,21 +2247,20 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_copy(
-    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args) {
-    handle_copy_move(session, args, false);
+    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    handle_copy_move(session, false);
 }
 
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_move(
-    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& args) {
-    handle_copy_move(session, args, true);
+    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    handle_copy_move(session, true);
 }
 
 // ---------- IDLE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_idle(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
@@ -2311,8 +2294,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_idle(
 // ---------- DONE ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_done(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     if (!ctx) return;
@@ -2326,19 +2308,18 @@ void TraditionalImapsFsm<ConnectionType>::handle_done(
 // ---------- ERROR ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_error(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     auto* ctx = static_cast<ImapContext*>(session->get_context());
     std::string tag = ctx ? ctx->current_tag : "*";
-    send_tagged(session, tag, "BAD", args.empty() ? "Protocol error" : args);
+    auto err = session->get_last_command_args();
+    send_tagged(session, tag, "BAD", err.empty() ? "Protocol error" : err);
 }
 
 // ---------- TIMEOUT ----------
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::handle_timeout(
-    std::shared_ptr<SessionBase<ConnectionType>> session,
-    const std::string& args)
+    std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     session->do_async_write("* BYE TIMEOUT\r\n",
         [](std::shared_ptr<SessionBase<ConnectionType>> s,
