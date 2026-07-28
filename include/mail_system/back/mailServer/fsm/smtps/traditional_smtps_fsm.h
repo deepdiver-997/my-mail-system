@@ -4,13 +4,19 @@
 #include "mail_system/back/mailServer/session/session_base.h"
 #include "mail_system/back/mailServer/fsm/fsm_base.h"
 #include "mail_system/back/db/db_pool.h"
+#include "mail_system/back/db/db_service.h"
+#include "mail_system/back/db/mysql_service.h"
+#include "mail_system/back/db/sql_queries.h"
 #include "mail_system/back/thread_pool/thread_pool_base.h"
-#include "mail_system/back/mailServer/fsm/smtps/smtps_fsm.hpp"
-#include "mail_system/back/persist_storage/persistent_queue.h"
+#include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
+#include "mail_system/back/common/auth_cache.h"
+#include "mail_system/back/common/bcrypt.h"
+#include "mail_system/back/persist_storage/persistent_queue.h"
+#include "mail_system/back/mailServer/fsm/smtps/smtps_fsm.hpp"
+#include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
-#include "mail_system/back/router/i_shard_router.h"
 #include <boost/asio/ssl.hpp>
 #include <atomic>
 #include <chrono>
@@ -18,11 +24,14 @@
 #include <cstddef>
 #include <cstdio>
 #include <ctime>
+#include <fstream>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace mail_system {
 
@@ -30,19 +39,72 @@ template <typename ConnectionType>
 class SmtpsSession;  // 前向声明
 
 template <typename ConnectionType>
-class TraditionalSmtpsFsm : public SmtpsFsm<ConnectionType>, public FsmBase<ConnectionType, SmtpsState, SmtpsEvent> {
+class TraditionalSmtpsFsm : public FsmBase<ConnectionType, SmtpsState, SmtpsEvent> {
+protected:
+    std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
+    std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
+    std::shared_ptr<router::IShardRouter> m_shardRouter;
+    std::shared_ptr<IMailboxCache> m_mailboxCache;
+    std::shared_ptr<mail_system::persist_storage::PersistentQueue> m_persistentQueue;
+
 public:
+    std::shared_ptr<AuthCache> m_authCache = std::make_shared<AuthCache>();
+
     TraditionalSmtpsFsm(
         std::shared_ptr<ThreadPoolBase> io_thread_pool,
         std::shared_ptr<ThreadPoolBase> worker_thread_pool,
         std::shared_ptr<persist_storage::PersistentQueue> persistent_queue,
         std::shared_ptr<router::IShardRouter> shard_router
-    ) : SmtpsFsm<ConnectionType>(io_thread_pool, worker_thread_pool, persistent_queue, std::move(shard_router)) {
+    ) : m_ioThreadPool(io_thread_pool),
+        m_workerThreadPool(worker_thread_pool),
+        m_shardRouter(std::move(shard_router)),
+        m_persistentQueue(persistent_queue) {
         init_transition_table();
         init_state_handlers();
     }
 
     ~TraditionalSmtpsFsm() override = default;
+
+    void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = cache; }
+    std::shared_ptr<IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
+
+    ScopedConnection acquire_connection(int shard) {
+        auto pool = m_shardRouter->get_db_pool(static_cast<size_t>(shard));
+        return pool->acquire_connection();
+    }
+
+    // 处理事件
+    void process_event(std::shared_ptr<SessionBase<ConnectionType>> session, SmtpsEvent event);
+    void auto_process_event(std::shared_ptr<SessionBase<ConnectionType>> session);
+
+    // 获取状态名称
+    static std::string get_state_name(SmtpsState state);
+
+    // 获取事件名称
+    static std::string get_event_name(SmtpsEvent event);
+
+    bool auth_user(SessionBase<ConnectionType>* session, const std::string& mail_address,
+                   const std::string& password, int& out_shard);
+
+    void get_mail_data(SessionBase<ConnectionType>* session, std::string& mail_data);
+    void get_mail_data(std::shared_ptr<SessionBase<ConnectionType>> session, std::string& mail_data);
+
+    // 保存邮件元数据到数据库（异步），返回future用于跟踪操作结果
+    std::future<bool> save_mail_metadata_async(mail* data, const std::string& file_path_prefix);
+
+    // 保存附件元数据到数据库（异步），返回 future
+    std::future<bool> save_attachment_metadata_async(const attachment& att, size_t mail_id);
+
+    // 根据文件路径删除邮件元数据 假定数据库操作一定成功
+    void remove_metadata_by_file_path(const std::vector<std::string>& file_paths);
+
+    // 保存邮件正文到本地文件
+    bool save_mail_body_to_file(mail* data, const std::string& file_path);
+
+    bool save_attachment_to_file(attachment& att, const std::string& file_path);
+
+    // 检查异步操作结果，失败则删除对应文件
+    void cleanup_failed_saves(std::vector<std::future<bool>>& futures, const std::vector<std::string>& file_paths);
 
 private:
     static void cleanup_streamed_attachments(SmtpsContext* ctx);
@@ -58,11 +120,6 @@ private:
     void on_invalid_transition(SmtpsState s, SmtpsEvent e,
         std::shared_ptr<SessionBase<ConnectionType>> session) override;
 
-public:
-    void process_event(std::shared_ptr<SessionBase<ConnectionType>> session, SmtpsEvent event) override;
-    void auto_process_event(std::shared_ptr<SessionBase<ConnectionType>> session);
-
-private:
     void handle_init_connect(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_greeting_ehlo(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_wait_auth_starttls(std::shared_ptr<SessionBase<ConnectionType>> session);

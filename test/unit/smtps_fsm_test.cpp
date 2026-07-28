@@ -116,7 +116,7 @@ struct FsmTestFixture {
 
         auto session = std::make_shared<SmtpsSession<MockConnection>>(
             server.get(), std::move(conn_u),
-            std::shared_ptr<SmtpsFsm<MockConnection>>(fsm));
+            fsm);
 
         ListenerConfig lc;
         lc.type       = ListenerType::TCP;
@@ -430,7 +430,7 @@ TEST(starttls) {
 
     auto session = std::make_shared<SmtpsSession<MockConnection>>(
         fx.server.get(), std::move(conn_u),
-        std::shared_ptr<SmtpsFsm<MockConnection>>(fx.fsm));
+        fx.fsm);
 
     ListenerConfig lc;
     lc.auth_policy = InboundAuthPolicy::OFF;

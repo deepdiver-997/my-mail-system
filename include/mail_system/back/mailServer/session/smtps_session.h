@@ -36,7 +36,7 @@ public:
     SmtpsSession(
         ServerBase* server,
         std::unique_ptr<ConnectionType> connection,
-        std::shared_ptr<SmtpsFsm<ConnectionType>> fsm);
+        std::shared_ptr<TraditionalSmtpsFsm<ConnectionType>> fsm);
 
     ~SmtpsSession() {
         this->session_authenticated_ = context_.is_authenticated;
@@ -126,7 +126,7 @@ private:
 
     void wait_for_async_writes();
 
-    std::shared_ptr<SmtpsFsm<ConnectionType>> fsm_;
+    std::shared_ptr<TraditionalSmtpsFsm<ConnectionType>> fsm_;
     SmtpsState state_;
     SmtpsEvent next_event_;
     bool ignore_current_command_;

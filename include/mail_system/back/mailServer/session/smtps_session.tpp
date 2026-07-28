@@ -6,7 +6,7 @@ template <typename ConnectionType>
 SmtpsSession<ConnectionType>::SmtpsSession(
     ServerBase* server,
     std::unique_ptr<ConnectionType> connection,
-    std::shared_ptr<SmtpsFsm<ConnectionType>> fsm
+    std::shared_ptr<TraditionalSmtpsFsm<ConnectionType>> fsm
 ) : SessionBase<ConnectionType>(std::move(connection), server)
     , fsm_(std::move(fsm))
     , state_(SmtpsState::INIT)

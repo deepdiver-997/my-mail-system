@@ -61,7 +61,7 @@ static bool deliver_one(TraditionalSmtpsFsm<MockConnection>& fsm,
 
     auto session = std::make_unique<SmtpsSession<MockConnection>>(
         &server, std::move(conn),
-        std::shared_ptr<SmtpsFsm<MockConnection>>(&fsm, [](void*){}));
+        std::shared_ptr<TraditionalSmtpsFsm<MockConnection>>(&fsm, [](void*){}));
 
     ListenerConfig lc;
     lc.type       = ListenerType::TCP;

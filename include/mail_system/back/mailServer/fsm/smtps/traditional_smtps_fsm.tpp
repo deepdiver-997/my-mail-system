@@ -161,8 +161,8 @@ void TraditionalSmtpsFsm<ConnectionType>::process_event(
 {
     if constexpr (ENABLE_SMTP_DETAIL_DEBUG_LOG) {
         LOG_SMTP_DETAIL_DEBUG("Current State: {}, Event: {}",
-            SmtpsFsm<ConnectionType>::get_state_name(static_cast<SmtpsState>(session->get_current_state())),
-            SmtpsFsm<ConnectionType>::get_event_name(event));
+            TraditionalSmtpsFsm<ConnectionType>::get_state_name(static_cast<SmtpsState>(session->get_current_state())),
+            TraditionalSmtpsFsm<ConnectionType>::get_event_name(event));
     }
     this->dispatch(session, static_cast<SmtpsState>(session->get_current_state()), event);
 }
@@ -757,7 +757,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_error(
     std::shared_ptr<SessionBase<ConnectionType>> session)
 {
     LOG_SMTP_DETAIL_WARN("SMTP error: state={} session->get_last_command_args()=[{}] stay={}",
-        SmtpsFsm<ConnectionType>::get_state_name(static_cast<SmtpsState>(session->get_current_state())),
+        TraditionalSmtpsFsm<ConnectionType>::get_state_name(static_cast<SmtpsState>(session->get_current_state())),
         session->get_last_command_args(), session->stay_times_);
     session->stay_times_++;
     if (session->stay_times_ > 3) {
@@ -768,6 +768,314 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_error(
                 if (ec) return;
                 s->do_async_read();
             });
+    }
+}
+
+// ========== 从 SmtpsFsm 迁移的方法实现 ==========
+
+template <typename ConnectionType>
+std::string TraditionalSmtpsFsm<ConnectionType>::get_state_name(SmtpsState state) {
+    static const std::unordered_map<SmtpsState, std::string> state_names = {
+        {SmtpsState::INIT, "INIT"},
+        {SmtpsState::GREETING, "GREETING"},
+        {SmtpsState::WAIT_EHLO, "WAIT_EHLO"},
+        {SmtpsState::WAIT_AUTH, "WAIT_AUTH"},
+        {SmtpsState::WAIT_AUTH_USERNAME, "WAIT_AUTH_USERNAME"},
+        {SmtpsState::WAIT_AUTH_PASSWORD, "WAIT_AUTH_PASSWORD"},
+        {SmtpsState::WAIT_MAIL_FROM, "WAIT_MAIL_FROM"},
+        {SmtpsState::WAIT_RCPT_TO, "WAIT_RCPT_TO"},
+        {SmtpsState::WAIT_DATA, "WAIT_DATA"},
+        {SmtpsState::IN_MESSAGE, "IN_MESSAGE"},
+        {SmtpsState::WAIT_QUIT, "WAIT_QUIT"},
+        {SmtpsState::CLOSED, "CLOSED"}
+    };
+    auto it = state_names.find(state);
+    if (it != state_names.end()) {
+        return it->second;
+    }
+    return "UNKNOWN_STATE";
+}
+
+template <typename ConnectionType>
+std::string TraditionalSmtpsFsm<ConnectionType>::get_event_name(SmtpsEvent event) {
+    static const std::unordered_map<SmtpsEvent, std::string> event_names = {
+        {SmtpsEvent::CONNECT, "CONNECT"},
+        {SmtpsEvent::EHLO, "EHLO"},
+        {SmtpsEvent::AUTH, "AUTH"},
+        {SmtpsEvent::STARTTLS, "STARTTLS"},
+        {SmtpsEvent::MAIL_FROM, "MAIL_FROM"},
+        {SmtpsEvent::RCPT_TO, "RCPT_TO"},
+        {SmtpsEvent::DATA, "DATA"},
+        {SmtpsEvent::DATA_END, "DATA_END"},
+        {SmtpsEvent::QUIT, "QUIT"},
+        {SmtpsEvent::ERROR, "ERROR"},
+        {SmtpsEvent::TIMEOUT, "TIMEOUT"}
+    };
+    auto it = event_names.find(event);
+    if (it != event_names.end()) {
+        return it->second;
+    }
+    return "UNKNOWN_EVENT";
+}
+
+template <typename ConnectionType>
+bool TraditionalSmtpsFsm<ConnectionType>::auth_user(
+    SessionBase<ConnectionType>* session, const std::string& mail_address,
+    const std::string& password, int& out_shard)
+{
+    if (!session) { LOG_AUTH_ERROR("Session is null in auth_user"); return false; }
+
+    // shard router
+    int shard = 0;
+    if (m_shardRouter) { int r = m_shardRouter->route(mail_address); if (r >= 0) shard = r; }
+    out_shard = shard;
+
+    // 查缓存
+    AuthCacheEntry ce;
+    if (m_authCache->lookup(mail_address, ce)) {
+        if (ce.status != 1) return false;
+        out_shard = ce.shard;
+        if (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
+            return bcrypt_verify(password, ce.password_hash);
+        return ce.password_hash == password;
+    }
+
+    // 缓存未命中，查 DB → 写入缓存
+    auto conn = acquire_connection(shard);
+    if (!conn.is_valid()) { LOG_AUTH_ERROR("Failed to get DB connection"); return false; }
+
+    std::string sql = db::sql::build_auth_user_query();
+    auto result = conn->query(sql, {mail_address});
+    if (!result || result->get_row_count() == 0) { LOG_AUTH_WARN("User not found: {}", mail_address); return false; }
+    int status = std::stoi(result->get_value(0, "status"));
+    if (status != 1) { LOG_AUTH_WARN("User account disabled: {}", mail_address); return false; }
+    std::string stored = result->get_value(0, "password");
+    m_authCache->store(mail_address, {stored, status, 0, shard});
+    bool ok = (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2')
+                    ? bcrypt_verify(password, stored)
+                    : (stored == password);
+    if (ok) conn->execute(db::sql::build_update_last_login(), {mail_address});
+    return ok;
+}
+
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::get_mail_data(
+    SessionBase<ConnectionType>* session, std::string& mail_data)
+{
+    if (!session) {
+        LOG_AUTH_ERROR("Session is null in get_mail_data");
+        return;
+    }
+
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        LOG_AUTH_ERROR("Failed to get database connection in get_mail_data");
+        return;
+    }
+
+    // 从session上下文获取发件人地址（如果已设置）
+    std::string sender = session->context_.sender_address.empty() ? session->context_.client_username : session->context_.sender_address;
+
+    // 使用参数化查询
+    std::string sql = "SELECT subject, body FROM mails WHERE sender = ? ORDER BY send_time DESC LIMIT 1";
+    auto result = conn->query(sql, {sender});
+    if (result && result->get_row_count() > 0) {
+        std::string subject = result->get_value(0, "subject");
+        std::string body = result->get_value(0, "body");
+        mail_data = "Subject: " + subject + "\n\n" + body;
+    }
+}
+
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::get_mail_data(
+    std::shared_ptr<SessionBase<ConnectionType>> session, std::string& mail_data)
+{
+    get_mail_data(session.get(), mail_data);
+}
+
+template <typename ConnectionType>
+std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_mail_metadata_async(
+    mail* data, const std::string& file_path_prefix)
+{
+    std::future<bool> future;
+
+    if (!data) {
+        LOG_DATABASE_ERROR("Mail data is null in save_mail_metadata_async");
+        return std::future<bool>();
+    }
+
+    if (!m_workerThreadPool) {
+        LOG_DATABASE_ERROR("WorkerThreadPool is null in save_mail_metadata_async");
+        return std::future<bool>();
+    }
+
+    mail& mail_data = *data;
+
+    auto task = [this, file_path_prefix, mail_data]() -> bool {
+        auto conn = this->acquire_connection(0);
+        if (!conn.is_valid()) {
+            LOG_DATABASE_ERROR("Failed to get database connection in async task");
+            return false;
+        }
+
+        auto* conn_ptr = conn.operator->();
+
+        bool success = true;
+
+        // 第一步：插入邮件元数据到 mails 表
+        std::string body_path = file_path_prefix;
+        std::string mail_sql = db::sql::build_insert_mail_with_status(
+            mail_data.id, mail_data.subject, body_path,
+            mail_data.status, conn_ptr);
+        LOG_DATABASE_DEBUG("Executing SQL: {}", mail_sql);
+        if (!conn_ptr->execute(mail_sql)) {
+            LOG_DATABASE_ERROR("Failed to insert mail metadata. Error: {}", conn_ptr->get_last_error());
+            return false;
+        }
+
+        // 第二步：插入邮件收发件人关系到 mail_recipients 表
+        std::string recipient_sql = db::sql::build_insert_recipients_simple(
+            mail_data, conn_ptr);
+        LOG_DATABASE_DEBUG("Executing SQL: {}", recipient_sql);
+        if (!recipient_sql.empty() && !conn_ptr->execute(recipient_sql)) {
+            LOG_DATABASE_ERROR("Failed to insert mail recipients. Error: {}", conn_ptr->get_last_error());
+            // 如果插入收件人失败，删除已插入的邮件元数据
+            conn_ptr->execute(db::sql::build_delete_mail_by_id(mail_data.id));
+            return false;
+        }
+
+        // 第三步：插入附件元数据
+        if (!mail_data.attachments.empty()) {
+            std::string att_sql = db::sql::build_insert_attachments(
+                mail_data.id, mail_data.attachments, conn_ptr);
+            LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
+            if (!conn_ptr->execute(att_sql)) {
+                LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", conn_ptr->get_last_error());
+                success = false;
+            }
+        }
+
+        return success;
+    };
+
+    future = this->m_workerThreadPool->submit(std::move(task));
+
+    return future;
+}
+
+template <typename ConnectionType>
+std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_attachment_metadata_async(
+    const attachment& att, size_t mail_id)
+{
+    if (!m_workerThreadPool) {
+        LOG_DATABASE_ERROR("DBPool or WorkerThreadPool is null in save_attachment_metadata_async");
+        return std::future<bool>();
+    }
+
+    auto task = [this, att, mail_id]() -> bool {
+        auto conn = this->acquire_connection(0);
+        if (!conn.is_valid()) {
+            LOG_DATABASE_ERROR("Failed to get database connection in save_attachment_metadata_async");
+            return false;
+        }
+
+        auto* conn_ptr = conn.operator->();
+        if (!conn_ptr) {
+            LOG_DATABASE_ERROR("Failed to cast to MySQLConnection");
+            return false;
+        }
+
+        std::string att_sql = db::sql::build_insert_attachment_single(
+            mail_id, att, conn_ptr);
+        LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
+        if (!conn_ptr->execute(att_sql)) {
+            LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", conn_ptr->get_last_error());
+            return false;
+        }
+        return true;
+    };
+
+    return this->m_workerThreadPool->submit(std::move(task));
+}
+
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::remove_metadata_by_file_path(
+    const std::vector<std::string>& file_paths)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        LOG_DATABASE_ERROR("Failed to get database connection in remove_metadata_by_file_path");
+        return;
+    }
+
+    // 注意：数据库中 body_path 字段存储的是文件路径
+    std::string sql = "DELETE FROM mails WHERE body_path = ?";
+    for (const auto& file_path : file_paths) {
+        if (!conn->execute(sql, {file_path})) {
+            LOG_DATABASE_ERROR("Failed to delete mail metadata for file path: {}", file_path);
+        }
+    }
+}
+
+template <typename ConnectionType>
+bool TraditionalSmtpsFsm<ConnectionType>::save_mail_body_to_file(
+    mail* data, const std::string& file_path)
+{
+    if (!data) {
+        LOG_FILE_IO_ERROR("Mail data is null in save_mail_body_to_file");
+        return false;
+    }
+
+    LOG_FILE_IO_DEBUG("Saving mail body to file: {}, body size: {}", file_path, data->body.size());
+
+    std::ofstream out(file_path);
+    if (!out.is_open()) {
+        LOG_FILE_IO_ERROR("Failed to open file for writing: {}", file_path);
+        return false;
+    }
+
+    if (data->body.empty()) {
+        out << data->header;
+        out.close();
+        LOG_FILE_IO_DEBUG("Mail body is empty, only header saved to file: {}", file_path);
+        return true;
+    }
+    out << data->body;
+    out.close();
+    LOG_FILE_IO_DEBUG("Mail body saved successfully to file: {}", file_path);
+    return true;
+}
+
+template <typename ConnectionType>
+bool TraditionalSmtpsFsm<ConnectionType>::save_attachment_to_file(
+    attachment& att, const std::string& file_path)
+{
+    std::ofstream out(file_path, std::ios::binary);
+    if (!out.is_open()) {
+        LOG_FILE_IO_ERROR("Failed to open attachment file for writing: {}", file_path);
+        return false;
+    }
+    out.write(att.content.data(), static_cast<std::streamsize>(att.content.size()));
+    out.close();
+    att.filepath = file_path;
+    att.file_size = att.content.size();
+    att.content.clear(); // 释放内存
+    LOG_FILE_IO_DEBUG("Attachment saved to file: {}", file_path);
+    return true;
+}
+
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::cleanup_failed_saves(
+    std::vector<std::future<bool>>& futures, const std::vector<std::string>& file_paths)
+{
+    for (size_t i = 0; i < futures.size(); ++i) {
+        if (futures[i].valid()) {
+            bool success = futures[i].get();
+            if (!success && i < file_paths.size()) {
+                LOG_FILE_IO_ERROR("Database save failed, removing file: {}", file_paths[i]);
+                std::remove(file_paths[i].c_str());
+            }
+        }
     }
 }
 

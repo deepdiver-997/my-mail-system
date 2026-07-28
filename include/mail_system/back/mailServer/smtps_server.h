@@ -16,10 +16,10 @@ namespace mail_system {
          std::shared_ptr<ThreadPoolBase> workerThreadPool = nullptr,
          std::shared_ptr<DBPool> dbPool = nullptr);
         virtual ~SmtpsServer() override;
-        std::shared_ptr<SmtpsFsm<TcpConnection>> get_tcp_fsm() const {
+        std::shared_ptr<TraditionalSmtpsFsm<TcpConnection>> get_tcp_fsm() const {
             return m_tcp_fsm;
         }
-        std::shared_ptr<SmtpsFsm<SslConnection>> get_ssl_fsm() const {
+        std::shared_ptr<TraditionalSmtpsFsm<SslConnection>> get_ssl_fsm() const {
             return m_ssl_fsm;
         }
 
@@ -39,8 +39,8 @@ namespace mail_system {
         void post_to_local_client(std::shared_ptr<void> client, std::unique_ptr<mail>&& mail);
         bool inner_ip(const std::string& ip);
 
-        std::shared_ptr<SmtpsFsm<TcpConnection>> m_tcp_fsm;
-        std::shared_ptr<SmtpsFsm<SslConnection>> m_ssl_fsm;
+        std::shared_ptr<TraditionalSmtpsFsm<TcpConnection>> m_tcp_fsm;
+        std::shared_ptr<TraditionalSmtpsFsm<SslConnection>> m_ssl_fsm;
     };
 
 } // namespace mail_system
