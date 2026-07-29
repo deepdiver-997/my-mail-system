@@ -55,14 +55,19 @@ public:
         if (running_.exchange(true)) return;
 
         completion_cb_ = [this](uint64_t record_id, bool success) {
+            // DB 写入 post 到 worker 池，不阻塞 IO 线程
             auto db = server_->m_shardRouter->get_db_pool(0);
-            if (!db) return;
-            auto conn = db->acquire_connection();
-            if (success)
-                repo_.mark_sent(*db, record_id, "250 OK");
-            else
-                repo_.mark_dead(*db, record_id, "500 permanent failure");
+            if (db) {
+                server_->m_workerThreadPool->post([this, db, record_id, success]() {
+                    auto conn = db->acquire_connection();
+                    if (success)
+                        repo_.mark_sent(*db, record_id, "250 OK");
+                    else
+                        repo_.mark_dead(*db, record_id, "500 permanent failure");
+                });
+            }
 
+            // 计数递减和 try_pull 立即可执行（不依赖 DB 写入结果）
             int64_t prev = pending_count_.fetch_sub(1) - 1;
             if (prev < LOW_WATERMARK) try_pull();
         };

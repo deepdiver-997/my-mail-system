@@ -5,8 +5,14 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <functional>
 
 namespace mail_system {
+
+// ── 异步回调类型 ──────────────────────────────────────────────
+using QueryCallback   = std::function<void(std::shared_ptr<class IDBResult>)>;
+using ExecuteCallback = std::function<void(bool success)>;
+// ────────────────────────────────────────────────────────────────
 
 // 数据库查询结果接口
 class IDBResult {
