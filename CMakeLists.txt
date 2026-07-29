@@ -22,13 +22,28 @@ option(ENABLE_INBOUND_DEDUP_CHECK "Enable inbound duplicate check" ON)
 option(ENABLE_HDFS_WEB_STORAGE "Enable WebHDFS storage (requires libcurl)" ON)
 option(ENABLE_S3_STORAGE "Enable S3/MinIO storage (requires libcurl, OpenSSL)" ON)
 
-# ===== Feature flags =====
-set(PROTORELAY_FEATURE_SSL         ${USE_SSL})
-set(PROTORELAY_FEATURE_INBOUND_DEDUP ${ENABLE_INBOUND_DEDUP_CHECK})
-set(PROTORELAY_FEATURE_OBJECT_ONLY ${BUILD_OBJECT_ONLY})
-
+# ===== Feature flags — 必须始终定义为 0/1（help_text.cpp 等 #if 使用）=====
+if(USE_SSL)
+    set(PROTORELAY_FEATURE_SSL 1)
+else()
+    set(PROTORELAY_FEATURE_SSL 0)
+endif()
+if(ENABLE_INBOUND_DEDUP_CHECK)
+    set(PROTORELAY_FEATURE_INBOUND_DEDUP 1)
+else()
+    set(PROTORELAY_FEATURE_INBOUND_DEDUP 0)
+endif()
+if(BUILD_OBJECT_ONLY)
+    set(PROTORELAY_FEATURE_OBJECT_ONLY 1)
+else()
+    set(PROTORELAY_FEATURE_OBJECT_ONLY 0)
+endif()
 if(ENABLE_HDFS_WEB_STORAGE)
+    set(PROTORELAY_FEATURE_HDFS_WEB 1)
     add_compile_definitions(PROTORELAY_ENABLE_HDFS_WEB_STORAGE=1)
+else()
+    set(PROTORELAY_FEATURE_HDFS_WEB 0)
+    add_compile_definitions(PROTORELAY_ENABLE_HDFS_WEB_STORAGE=0)
 endif()
 
 # Build info
