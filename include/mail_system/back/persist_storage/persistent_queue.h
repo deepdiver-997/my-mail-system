@@ -5,6 +5,7 @@
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/mysql_pool.h"
 #include "mail_system/back/outbound/outbox_repository.h"
+#include "mail_system/back/outbound/outbound_server.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/router/i_shard_router.h"
 #include "framework/thread_pool/thread_pool_base.h"
@@ -19,10 +20,7 @@
 #include <thread>
 #include <vector>
 
-namespace mail_system {
-namespace outbound { class SmtpOutboundClient; }
-class MetricsServer;
-}
+namespace mail_system { class MetricsServer; }
 
 namespace mail_system {
 namespace persist_storage {
@@ -80,7 +78,7 @@ public:
         return inflight_mail_count_.load(std::memory_order_relaxed);
     }
 
-    void set_outbound_client(std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client);
+    void set_outbound_server(std::shared_ptr<mail_system::outbound::OutboundServer> server);
     void set_local_domain(std::string local_domain);
     void set_batch_pop_size(size_t batch_size);
     void set_pressure_config(PersistentQueuePressureConfig config);
@@ -136,7 +134,7 @@ private:
     // ---- 成员变量 ----
     std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<ThreadPoolBase> worker_pool_;
-    std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client_;
+    std::shared_ptr<mail_system::outbound::OutboundServer> outbound_server_;
     std::string local_domain_{"example.com"};
     PersistentQueuePressureConfig pressure_config_{};
 

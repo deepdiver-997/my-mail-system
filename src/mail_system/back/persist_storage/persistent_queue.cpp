@@ -5,7 +5,7 @@
 #include "framework/metrics_server.h"
 #include "mail_system/back/outbound/mx_routing_utils.h"
 #include "mail_system/back/outbound/outbox_repository.h"
-#include "mail_system/back/outbound/smtp_outbound_client.h"
+#include "mail_system/back/outbound/outbound_server.h"
 #include <array>
 #include <algorithm>
 #include <chrono>
@@ -25,12 +25,68 @@
 namespace mail_system {
 namespace persist_storage {
 
+// ================================================================
+// 无锁 Bloom filter 去重
+//   3 次哈希, 1024 bits, 锁定写入和测试, 加锁仅用于定时清除
+// ================================================================
 #if ENABLE_INBOUND_DEDUP_CHECK
 namespace {
+class DedupFilter {
+    static constexpr int kBits = 1024;
+    static constexpr int kSlots = kBits / 64;
+    static constexpr int kWindowSec = 600;
+    std::array<std::atomic<uint64_t>, kSlots> bits_{};
+    std::chrono::steady_clock::time_point last_clear_{std::chrono::steady_clock::now()};
+    std::mutex clear_mu_;
+
+    static uint64_t mix(uint64_t h) {
+        h ^= h >> 33;
+        h *= 0xff51afd7ed558ccdULL;
+        h ^= h >> 33;
+        return h;
+    }
+
+    void maybe_clear() {
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_clear_ > std::chrono::seconds(kWindowSec)) {
+            std::lock_guard<std::mutex> lk(clear_mu_);
+            if (now - last_clear_ > std::chrono::seconds(kWindowSec)) {
+                for (auto& b : bits_) b.store(0, std::memory_order_release);
+                last_clear_ = now;
+            }
+        }
+    }
+
+public:
+    bool test_and_set(const std::string& key) {
+        maybe_clear();
+        uint64_t h = std::hash<std::string>{}(key);
+        uint64_t h1 = h;
+        uint64_t h2 = mix(h);
+        uint64_t h3 = mix(h2);
+
+        int s1 = (h1 >> 6) % kSlots, b1 = h1 & 63;
+        int s2 = (h2 >> 6) % kSlots, b2 = h2 & 63;
+        int s3 = (h3 >> 6) % kSlots, b3 = h3 & 63;
+
+        uint64_t m1 = 1ULL << b1, m2 = 1ULL << b2, m3 = 1ULL << b3;
+
+        bool all_set = ((bits_[s1].load(std::memory_order_relaxed) & m1) != 0) &&
+                       ((bits_[s2].load(std::memory_order_relaxed) & m2) != 0) &&
+                       ((bits_[s3].load(std::memory_order_relaxed) & m3) != 0);
+
+        if (!all_set) {
+            bits_[s1].fetch_or(m1, std::memory_order_relaxed);
+            bits_[s2].fetch_or(m2, std::memory_order_relaxed);
+            bits_[s3].fetch_or(m3, std::memory_order_relaxed);
+        }
+        return all_set;  // true = probable duplicate
+    }
+};
+
+DedupFilter g_dedup_filter;
 constexpr int kInboundDedupWindowSeconds = 600;
-std::mutex g_inbound_dedup_mu;
-std::unordered_map<std::string, std::chrono::steady_clock::time_point> g_inbound_dedup_seen;
-}
+} // namespace
 #endif
 
 namespace {
@@ -233,8 +289,8 @@ size_t PersistentQueue::queue_size() const {
     return queued_task_count_.load(std::memory_order_relaxed);
 }
 
-void PersistentQueue::set_outbound_client(std::shared_ptr<mail_system::outbound::SmtpOutboundClient> outbound_client) {
-    outbound_client_ = std::move(outbound_client);
+void PersistentQueue::set_outbound_server(std::shared_ptr<mail_system::outbound::OutboundServer> server) {
+    outbound_server_ = std::move(server);
 }
 
 void PersistentQueue::set_local_domain(std::string local_domain) {
@@ -322,17 +378,9 @@ bool PersistentQueue::process_task() {
         }
 
         std::vector<outbound::OutboxRecord> reserved_records;
-        const bool can_hot_dispatch =
-            outbound_client_ &&
-            outbound::has_external_recipient(*mail_data, local_domain_) &&
-            !ticket.is_cancel_requested();
-        const std::string reserve_owner = can_hot_dispatch ? outbound_client_->worker_id() : std::string{};
-        const int reserve_lease_seconds =
-            can_hot_dispatch ? outbound_client_->local_reservation_lease_seconds() : 0;
-
         if (persist_mail_transactional(mail_data.get(),
-                                       reserve_owner,
-                                       reserve_lease_seconds,
+                                       /*reserve_owner=*/"",
+                                       /*reserve_lease_seconds=*/0,
                                        &reserved_records,
                                        error)) {
             const auto mail_id = mail_data->id;
@@ -345,29 +393,19 @@ bool PersistentQueue::process_task() {
 
             mail_data->persist_status = PersistStatus::SUCCESS;
             if (mail_data->deduplicated_inbound) {
-                // 重复入站邮件：清理文件，不存储
                 cleanup_mail_files(mail_data.get());
-            } else if (outbound::has_external_recipient(*mail_data, local_domain_)) {
-                // 有外部收件人：移交 outbound 客户端（由其负责清理）
-                if (can_hot_dispatch) {
-                    std::vector<std::uint64_t> reserved_ids;
-                    reserved_ids.reserve(reserved_records.size());
-                    for (const auto& record : reserved_records) {
-                        reserved_ids.push_back(record.id);
-                    }
-                    if (!outbound_client_->accept_reserved_mail_ownership(std::move(mail_data),
-                                                                          std::move(reserved_records))) {
-                        LOG_PERSISTENT_QUEUE_WARN("Failed to hand reserved outbox records to local outbound client, mail_id={}",
-                                                  mail_id);
-                        outbound::OutboxRepository repository;
-                        if (!repository.release_local_reservations(*m_shardRouter->get_db_pool(0), reserved_ids)) {
-                            LOG_PERSISTENT_QUEUE_WARN("Failed to release local outbox reservations for mail_id={}",
-                                                      mail_id);
-                        }
-                        outbound_client_->notify_outbox_ready();
-                    }
-                } else if (outbound_client_) {
-                    outbound_client_->notify_outbox_ready();
+            } else if (outbound::has_external_recipient(*mail_data, local_domain_) && outbound_server_) {
+                // 将 outbox 记录转为 MailDeliveryTask 提交到 OutboundServer
+                for (auto& rec : reserved_records) {
+                    auto task = std::make_unique<outbound::MailDeliveryTask>();
+                    task->mail_id = rec.mail_id;
+                    task->record_id = rec.id;
+                    task->sender = rec.sender;
+                    task->recipient = rec.recipient;
+                    task->mail_ptr = std::make_shared<mail>(*mail_data);
+                    task->attempt_count = rec.attempt_count;
+                    task->max_attempts = rec.max_attempts;
+                    outbound_server_->submit(std::move(task));
                 }
             }
             // 本地收件/入站邮件：保留 body 文件供 IMAP 读取，不清理
@@ -453,72 +491,37 @@ bool PersistentQueue::is_probable_duplicate_mail(mail* mail_data, IDBConnection*
         return false;
     }
 
-    // First priority: upstream Message-ID in a short-lived in-memory cache.
+    // 1. Bloom filter: 快速内存去重（无锁，10 分钟窗口）
     if (!mail_data->source_message_id.empty()) {
-        const auto now = std::chrono::steady_clock::now();
-        const auto ttl = std::chrono::seconds(kInboundDedupWindowSeconds);
-        std::lock_guard<std::mutex> lock(g_inbound_dedup_mu);
-
-        for (auto it = g_inbound_dedup_seen.begin(); it != g_inbound_dedup_seen.end();) {
-            if (now - it->second > ttl) {
-                it = g_inbound_dedup_seen.erase(it);
-            } else {
-                ++it;
-            }
-        }
-
+        // 为每个收件人构造唯一 key，全命中才判定重复
         bool all_seen = true;
-        for (const auto& recipient_raw : mail_data->to) {
-            const std::string key = mail_data->from + "\n" + recipient_raw + "\n" + mail_data->source_message_id;
-            if (g_inbound_dedup_seen.find(key) == g_inbound_dedup_seen.end()) {
-                all_seen = false;
-            }
+        for (const auto& r : mail_data->to) {
+            std::string key = mail_data->from + "\n" + r + "\n" + mail_data->source_message_id;
+            if (!g_dedup_filter.test_and_set(key)) all_seen = false;
         }
-        if (all_seen) {
-            return true;
-        }
+        if (all_seen) return true;
 
-        for (const auto& recipient_raw : mail_data->to) {
-            const std::string key = mail_data->from + "\n" + recipient_raw + "\n" + mail_data->source_message_id;
-            g_inbound_dedup_seen[key] = now;
-        }
-
-        // Also run DB heuristic below so restart/cross-process duplicates are still reduced.
+        // 2. DB 回退：跨进程/重启后的去重
         std::string sql = db::sql::build_dedup_by_subject_sender(
             mail_data->subject, mail_data->from, kInboundDedupWindowSeconds, conn);
-
         auto result = conn->query(sql);
         if (result && result->get_row_count() > 0) {
-            // Message-ID is not persisted as a dedicated DB column yet; use it as a strict in-memory hint
-            // together with sender/subject/time window and recipient matching below.
-            for (const auto& recipient_raw : mail_data->to) {
-                std::string rcpt_sql = db::sql::build_dedup_by_subject_sender_recipient(
-                    mail_data->subject, mail_data->from, recipient_raw,
-                    kInboundDedupWindowSeconds, conn);
-                auto rcpt_res = conn->query(rcpt_sql);
-                if (!(rcpt_res && rcpt_res->get_row_count() > 0)) {
-                    return false;
-                }
+            for (const auto& r : mail_data->to) {
+                auto rc = conn->query(db::sql::build_dedup_by_subject_sender_recipient(
+                    mail_data->subject, mail_data->from, r, kInboundDedupWindowSeconds, conn));
+                if (!(rc && rc->get_row_count() > 0)) return false;
             }
             return true;
         }
     }
 
-    // Fallback heuristic when Message-ID is missing: sender+subject+all recipients in a short window.
-    if (mail_data->subject.empty()) {
-        return false;
+    // 3. 无 Message-ID 时的回退：sender+subject+recipient DB 查询
+    if (mail_data->subject.empty()) return false;
+    for (const auto& r : mail_data->to) {
+        auto rc = conn->query(db::sql::build_dedup_by_subject_sender_recipient(
+            mail_data->subject, mail_data->from, r, kInboundDedupWindowSeconds, conn));
+        if (!(rc && rc->get_row_count() > 0)) return false;
     }
-
-    for (const auto& recipient_raw : mail_data->to) {
-        std::string sql = db::sql::build_dedup_by_subject_sender_recipient(
-            mail_data->subject, mail_data->from, recipient_raw,
-            kInboundDedupWindowSeconds, conn);
-        auto result = conn->query(sql);
-        if (!(result && result->get_row_count() > 0)) {
-            return false;
-        }
-    }
-
     return true;
 }
 #endif
