@@ -25,19 +25,6 @@ public:
     // 唯一公开的获取连接方式 —— 返回 RAII 包装，析构自动归还
     ScopedConnection acquire_connection();
 
-    // ── 异步接口（实现见 ScopedConnection 定义之后） ────────
-    // 默认实现：直接同步执行查询/执行 + 同步回调
-    // 子类可重写为真正异步（post 到线程池 / 非阻塞 IO）
-    virtual void async_query(std::string sql, QueryCallback cb);
-    virtual void async_query(std::string sql,
-                             std::vector<std::string> params,
-                             QueryCallback cb);
-    virtual void async_execute(std::string sql, ExecuteCallback cb);
-    virtual void async_execute(std::string sql,
-                               std::vector<std::string> params,
-                               ExecuteCallback cb);
-    // ──────────────────────────────────────────────────────────
-
     // 连接池运行状况（只读）
     virtual size_t get_pool_size() const = 0;
     virtual size_t get_available_connections() const = 0;
@@ -96,33 +83,6 @@ private:
 // DBPool::acquire_connection 必须在 ScopedConnection 完整定义之后
 inline ScopedConnection DBPool::acquire_connection() {
     return ScopedConnection(this);
-}
-
-// DBPool async 方法 —— 必须在 ScopedConnection 完整定义之后
-// 默认实现：同步执行 + 同步回调（子类可重写为真正异步）
-
-inline void DBPool::async_query(std::string sql, QueryCallback cb) {
-    auto conn = acquire_connection();
-    if (cb) cb(conn->query(sql));
-}
-
-inline void DBPool::async_query(std::string sql,
-                                std::vector<std::string> params,
-                                QueryCallback cb) {
-    auto conn = acquire_connection();
-    if (cb) cb(conn->query(sql, params));
-}
-
-inline void DBPool::async_execute(std::string sql, ExecuteCallback cb) {
-    auto conn = acquire_connection();
-    if (cb) cb(conn->execute(sql));
-}
-
-inline void DBPool::async_execute(std::string sql,
-                                  std::vector<std::string> params,
-                                  ExecuteCallback cb) {
-    auto conn = acquire_connection();
-    if (cb) cb(conn->execute(sql, params));
 }
 
 // 数据库连接池配置

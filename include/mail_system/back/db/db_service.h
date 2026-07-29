@@ -67,6 +67,25 @@ public:
     virtual std::string get_last_error() const = 0;
     // 转义字符串
     virtual std::string escape_string(const std::string& str) const = 0;
+
+    // ── 异步接口（默认同步执行 + 同步回调，子类可重写） ──────
+    virtual void async_query(const std::string& sql, QueryCallback cb) {
+        if (cb) cb(query(sql));
+    }
+    virtual void async_query(const std::string& sql,
+                             const std::vector<std::string>& params,
+                             QueryCallback cb) {
+        if (cb) cb(query(sql, params));
+    }
+    virtual void async_execute(const std::string& sql, ExecuteCallback cb) {
+        if (cb) cb(execute(sql));
+    }
+    virtual void async_execute(const std::string& sql,
+                               const std::vector<std::string>& params,
+                               ExecuteCallback cb) {
+        if (cb) cb(execute(sql, params));
+    }
+    // ──────────────────────────────────────────────────────────
 };
 
 // 数据库服务抽象类
