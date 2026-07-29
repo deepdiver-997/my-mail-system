@@ -111,7 +111,7 @@ struct FsmTestFixture {
 TEST(capability_response) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
-    fx.fsm->process_event(h.session, ImapEvent::CAPABILITY, "A001", "");
+    fx.fsm->process_event(h.session, ImapEvent::CAPABILITY, "A001");
     auto& w = h.conn->written();
     assert(HAS(w, "CAPABILITY IMAP4rev1"));
     std::cout << "  [PASS] capability_response" << std::endl;
@@ -123,7 +123,7 @@ TEST(noop_reply) {
     auto* ctx = static_cast<ImapContext*>(h.session->get_context());
     ctx->is_authenticated = true;
     ctx->current_tag = "C001";
-    fx.fsm->process_event(h.session, ImapEvent::NOOP, "C001", "");
+    fx.fsm->process_event(h.session, ImapEvent::NOOP, "C001");
     auto& w = h.conn->written();
     assert(HAS(w, "C001 OK NOOP completed"));
     std::cout << "  [PASS] noop_reply" << std::endl;
@@ -132,7 +132,7 @@ TEST(noop_reply) {
 TEST(login_success) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
-    fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A001", "user0@test.local test123");
+    fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A001");
     auto& w = h.conn->written();
     assert(HAS(w, "A001 OK LOGIN completed"));
     std::cout << "  [PASS] login_success" << std::endl;
@@ -141,7 +141,7 @@ TEST(login_success) {
 TEST(login_wrong_password) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
-    fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A002", "user0@test.local wrong");
+    fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A002");
     auto& w = h.conn->written();
     assert(HAS(w, "A002 NO LOGIN failed"));
     std::cout << "  [PASS] login_wrong_password" << std::endl;
@@ -169,7 +169,7 @@ TEST(logout_bye) {
     auto* ctx = static_cast<ImapContext*>(h.session->get_context());
     ctx->is_authenticated = true;
     ctx->current_tag = "B001";
-    fx.fsm->process_event(h.session, ImapEvent::LOGOUT, "B001", "");
+    fx.fsm->process_event(h.session, ImapEvent::LOGOUT, "B001");
     auto& w = h.conn->written();
     assert(HAS(w, "BYE IMAP4rev1 Server logging out"));
     assert(HAS(w, "B001 OK LOGOUT completed"));
@@ -181,7 +181,7 @@ TEST(logout_bye) {
 TEST(select_without_login) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
-    fx.fsm->process_event(h.session, ImapEvent::SELECT, "D001", "INBOX");
+    fx.fsm->process_event(h.session, ImapEvent::SELECT, "D001");
     auto& w = h.conn->written();
     assert(HAS(w, "D001 NO") || HAS(w, "BAD"));
     std::cout << "  [PASS] select_without_login" << std::endl;
@@ -190,7 +190,7 @@ TEST(select_without_login) {
 TEST(fetch_without_login) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
-    fx.fsm->process_event(h.session, ImapEvent::FETCH, "E001", "1 (FLAGS)");
+    fx.fsm->process_event(h.session, ImapEvent::FETCH, "E001");
     auto& w = h.conn->written();
     assert(HAS(w, "E001 NO") || HAS(w, "BAD"));
     std::cout << "  [PASS] fetch_without_login" << std::endl;
@@ -209,7 +209,7 @@ TEST(uid_fetch_no_db) {
     h.session->set_current_state(static_cast<int>(ImapState::SELECTED));
 
     // 直接调用 UID → FETCH handler（模拟客户端发 UID FETCH 1:* (FLAGS)）
-    fx.fsm->process_event(h.session, ImapEvent::UID, "A001", "FETCH 1:* (FLAGS)");
+    fx.fsm->process_event(h.session, ImapEvent::UID, "A001");
     auto& w = h.conn->written();
     std::cout << "  [PASS] uid_fetch_no_db response=[" << w.substr(0, 80) << "]" << std::endl;
 }
@@ -219,7 +219,7 @@ TEST(uid_fetch_no_db) {
 TEST(invalid_command_in_state) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
-    fx.fsm->process_event(h.session, ImapEvent::STORE, "H001", "1 +FLAGS (\\Seen)");
+    fx.fsm->process_event(h.session, ImapEvent::STORE, "H001");
     auto& w = h.conn->written();
     assert(HAS(w, "H001 BAD") || HAS(w, "H001 NO"));
     std::cout << "  [PASS] invalid_command_in_state" << std::endl;

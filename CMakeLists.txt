@@ -21,6 +21,7 @@ option(BUILD_OBJECT_ONLY "Compile object files only" OFF)
 option(ENABLE_INBOUND_DEDUP_CHECK "Enable inbound duplicate check" ON)
 option(ENABLE_HDFS_WEB_STORAGE "Enable WebHDFS storage (requires libcurl)" ON)
 option(ENABLE_S3_STORAGE "Enable S3/MinIO storage (requires libcurl, OpenSSL)" ON)
+option(BUILD_TESTS "Build test and benchmark targets" ON)
 
 # ===== Feature flags — 必须始终定义为 0/1（help_text.cpp 等 #if 使用）=====
 if(USE_SSL)
@@ -362,9 +363,9 @@ else()
 endif()
 
 # ================================================================
-# 测试 / Benchmark
+# 测试 / Benchmark（BUILD_TESTS=OFF 时跳过）
 # ================================================================
-if(NOT BUILD_OBJECT_ONLY)
+if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(test_inbound_verifier test/test_inbound_verifier.cpp)
     setup_mail_target(test_inbound_verifier)
 
@@ -401,6 +402,8 @@ if(NOT BUILD_OBJECT_ONLY)
 
     add_executable(smtp_client test/bench/smtp_client.cpp)
     target_compile_features(smtp_client PRIVATE cxx_std_17)
+endif()
 
+if(NOT BUILD_OBJECT_ONLY)
     install(TARGETS smtpsServer imapsServer mailServer RUNTIME DESTINATION bin)
 endif()

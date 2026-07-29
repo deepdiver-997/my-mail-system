@@ -265,7 +265,7 @@ bool SessionBase<ConnectionType>::record_auth_failure_and_check() {
         auto cfg = std::atomic_load(&m_server->m_config);
         if (cfg) max_attempts = cfg->max_auth_attempts;
     }
-    if (auth_attempt_count_ >= max_attempts) {
+    if (static_cast<size_t>(auth_attempt_count_) >= max_attempts) {
         LOG_SESSION_WARN("AUTH failures exceeded ({}/{}), closing session from {}",
             auth_attempt_count_, max_attempts, get_client_ip());
         return true;

@@ -58,7 +58,7 @@ cleanup_root_cmake_artifacts() {
 
 # 使用方法
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <Debug|Release|SafeRelease> [clean] [jobs] [object-only] [cross-x64]"
+    echo "Usage: $0 <Debug|Release|SafeRelease> [clean] [jobs] [object-only] [cross-x64] [no-tests]"
     echo "       $0 sync-sysroot [server]"
     echo ""
     echo "Examples:"
@@ -72,6 +72,7 @@ if [ "$#" -lt 1 ]; then
     echo "  $0 Release clean 1 object-only   # 仅编译 .o，不做最终链接"
     echo "  $0 Debug object-only             # 快速验证编译（需头文件，不强制链接库）"
     echo "  $0 Release cross-x64             # 交叉编译到 Linux x86_64（自动处理 sysroot）"
+    echo "  $0 Release no-tests              # 跳过 test/bench 目标（重构时有用）"
     echo "  $0 sync-sysroot                  # 从服务器同步 spdlog/fmt 头文件到本地 sysroot"
     echo ""
     echo "Env override: BUILD_JOBS=<n>, EXTRA_CMAKE_ARGS='<...>'"
@@ -100,6 +101,7 @@ CLEAN_BUILD=""
 USER_JOBS=""
 BUILD_OBJECT_ONLY="OFF"
 CROSS_X64_LINUX="OFF"
+BUILD_TESTS="ON"
 CROSS_CC="${CROSS_CC:-}"
 CROSS_CXX="${CROSS_CXX:-}"
 
@@ -113,9 +115,11 @@ for arg in "${@:2}"; do
         BUILD_OBJECT_ONLY="ON"
     elif [[ "$arg" == "cross-x64" || "$arg" == "cross-linux-x64" || "$arg" == "cross-ubuntu24" || "$arg" == "x64-ubuntu24" ]]; then
         CROSS_X64_LINUX="ON"
+    elif [[ "$arg" == "no-tests" || "$arg" == "no-test" || "$arg" == "skip-tests" ]]; then
+        BUILD_TESTS="OFF"
     else
         print_warning "Unknown argument: $arg"
-        echo "Allowed optional args: clean, <jobs>, object-only, cross-x64"
+        echo "Allowed optional args: clean, <jobs>, object-only, cross-x64, no-tests"
         exit 1
     fi
 done
@@ -299,6 +303,7 @@ cmake_args=(
     -B "$BUILD_DIR"
     -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE"
     -DBUILD_OBJECT_ONLY="$BUILD_OBJECT_ONLY"
+    -DBUILD_TESTS="$BUILD_TESTS"
 )
 
 if [[ "$USE_BOOST_LEGACY_FIND" == "ON" ]]; then
