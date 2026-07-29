@@ -34,26 +34,47 @@ Current implementation status:
 +-------------------------------+------------------------------+
                                 |
 +-------------------------------v------------------------------+
-| Server Core                                                   |
-| server_base, smtps server, imaps server, session management, |
-| SMTP FSM, IMAP FSM                                           |
+| Business Layer (mail_system/back/)                            |
+| smtp/         SMTP FSM + session + server                    |
+| imap/         IMAP FSM + session + server                    |
+| outbound/     SMTP outbound delivery client                  |
+| persist_storage/  Inbound persistence queue                   |
+| router/       Shard routing strategies                       |
+| storage/      File storage backends (local, S3, HDFS)        |
+| db/           DB connection pool + SQL builders              |
+| entities/     mail, usr data structs                          |
 +-------------------------------+------------------------------+
                                 |
 +-------------------------------v------------------------------+
-| Message Pipeline                                               |
-| parser -> envelope/message model -> persistence -> outbox     |
-+-------------------------------+------------------------------+
-                                |
-+-------------------------------v------------------------------+
-| Infrastructure Adapters                                        |
-| DB pool/service, storage providers, outbound SMTP client      |
+| Framework (include/framework/)                                |
+| SessionBase   — async I/O, command buffering, lifecycle      |
+| FsmBase       — transition table, dispatch, virtual hooks    |
+| ServerBase    — config, metrics, intrusion, lifecycle        |
+| TcpServerBase — TCP/SSL acceptors, listener thread            |
+| Connection    — IConnection, TcpConnection, SslConnection    |
+| ThreadPool    — ThreadPoolBase, IOThreadPool, BoostThreadPool|
 +-------------------------------+------------------------------+
                                 |
 +-------------------------------v------------------------------+
 | Platform                                                        |
-| Boost.Asio, OpenSSL, MySQL client, optional libcurl (WebHDFS) |
+| Boost.Asio, OpenSSL, MySQL client, spdlog, nlohmann/json       |
 +--------------------------------------------------------------+
 ```
+
+### 3.1 Framework vs Business
+
+The `include/framework/` directory contains **transport-and-protocol-agnostic** infrastructure:
+- `SessionBase<ConnectionType>` — manages one TCP/SSL connection lifecycle, async read/write, command buffering
+- `FsmBase<ConnectionType, State, Event>` — transition table + handler registry + dispatch loop
+- `ServerBase` — config loading, metrics, intrusion detection, lifecycle (start/stop/run)
+- `TcpServerBase<TcpSession, SslSession>` — TCP/SSL acceptor loop, STARTTLS handoff
+
+Business code in `include/mail_system/back/` inherits from these:
+- `SmtpsSession` / `ImapsSession` : public `SessionBase`
+- `TraditionalSmtpsFsm` / `TraditionalImapsFsm` : public `FsmBase`
+- `SmtpsServer` / `ImapsServer` : public `TcpServerBase`
+
+See [docs/framework-refactor.md](framework-refactor.md) for the extraction history.
 
 ## 4. Core Components
 
@@ -72,7 +93,7 @@ Key points:
 - Session logic is built around async callbacks and strict ownership rules.
 - Validation and protocol responses are generated with SMTP utility helpers.
 
-**Multi-listener architecture:** server_base manages vectors of TCP and SSL acceptors, each bound to a listener config that specifies per-port security policy. IP ban checks run at accept time (before session creation), reducing FSM complexity.
+**Multi-listener architecture:** `TcpServerBase` manages vectors of TCP and SSL acceptors, each bound to a listener config that specifies per-port security policy. IP ban checks run at accept time (before session creation), reducing FSM complexity. Accepted sockets are bound to `IOThreadPool` io_contexts for load distribution.
 
 | Port | Type | STARTTLS | AUTH policy | SPF/DKIM/DMARC | Use case |
 |------|------|----------|-------------|----------------|----------|
@@ -349,6 +370,7 @@ Expected extension directions:
 
 - `README.md` / `README_zh.md`
 - `test/bench-report.md`
+- `docs/framework-refactor.md` — framework extraction history (2026-07)
 - `docs/sharding-refactor.md`
 - `docs/smtp-outbound-client-design.md`
 - `docs/vs-postfix.md`
