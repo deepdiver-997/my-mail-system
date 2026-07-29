@@ -190,7 +190,7 @@ std::string SessionBase<ConnectionType>::pop_buffered_line() {
 template <typename ConnectionType>
 void SessionBase<ConnectionType>::drain_buffered_commands() {
     paused_ = false;
-    while (has_buffered_input()) {
+    while (has_buffered_input() && !paused_) {
         handle_read(extract_one_line());
         process_read();
     }
