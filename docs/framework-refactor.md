@@ -111,8 +111,34 @@ ServerBase depends only on `IConnection` interface, not on the transport type. D
 ### Error codes
 `SessionError` enum on `SessionBase` with virtual `error_message()` mapping. FSM handlers set error via `session->set_error()`, protocol-specific subclasses override the mapping for tailored messages.
 
+### 9. Outbound SMTP normalization (commits `4f0c3b0`~`58ba847`)
+- Created `OutboundSmtpFsm` + `OutboundSmtpSession` using the same FsmBase/SessionBase pattern as inbound
+- `OutboundServer` with MX connection pool, CAS-based task pulling, `OutboxRepository` integration
+- `submit()` + completion callback for delivery status reporting
+- Session queue + `in_callback` pattern for autonomous delivery loop
+- Multi-line SMTP response parsing, dot-stuffing, RSET pipeline reuse
+- `MAX_MAILS_PER_CONNECTION` threshold for graceful reconnect
+
+### 10. PersistentQueue migration (commit `665f773`)
+- Replaced old `SmtpOutboundClient` hot dispatch with `OutboundServer::submit()`
+- Each outbox record becomes a `MailDeliveryTask` submitted directly to the new engine
+- Old `SmtpOutboundClient` fully deleted (4 files removed)
+
+### 11. Lock-free Bloom dedup filter (commit `665f773`)
+- Replaced `std::mutex` + `std::unordered_map` with atomic Bloom filter (1024 bits, 3 hashes)
+- `test_and_set()` — lock-free on read/write path, only mutex for periodic clear
+- Auto-rotates every 10 minutes; DB heuristic retained as fallback for cross-process dedup
+
+### 12. Build system improvements (commits `4790cd8`, `f8ac36e`)
+- `BUILD_TESTS` CMake option + `--no-tests` flag in build.sh
+- `setup_mail_target()` function eliminates 200+ lines of repetition
+- Renamed `*_fsm.hpp` → `*_types.hpp` (files only contain type definitions)
+
 ## Future Work
 
 - Move `IOThreadPool` ownership from `ServerBase` to `TcpServerBase` (currently shared via `ThreadPoolBase*` cast)
-- Outbound SMTP normalization: apply the same FsmBase + SessionBase pattern to outbound delivery
+- Outbound pull loop: replace polling thread with async callback model (no long-term thread pool occupation)
+- Outbound connection pool LRU eviction integration with `evict_idle()`
 - QUIC transport: implement `QuicServerBase : ServerBase` with `IConnection`-compatible QUIC streams
+- IPC multi-process outbound for fault isolation
+- Comprehensive unit/integration tests for new outbound engine

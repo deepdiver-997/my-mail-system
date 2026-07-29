@@ -136,17 +136,22 @@ The server supports three AUTH policies via `inbound_auth_policy`:
 
 ## 4.2 Outbound Delivery Pipeline
 
-Responsibilities:
+The outbound engine uses the same FsmBase + SessionBase pattern as inbound:
 
-- Poll outbound queue.
-- Claim pending items (lease style) to avoid duplicate processing.
-- Resolve destination MX/host policy and attempt SMTP delivery.
-- Retry with capped backoff until success or max attempts.
+- `OutboundSmtpFsm` — 12-state SMTP client state machine (INIT → CONNECT → EHLO → MAIL → RCPT → DATA → ... → CLOSED)
+- `OutboundSmtpSession` — manages one MX TCP connection, pipeline delivery with in_callback queue
+- `OutboundServer` — MX connection pool, CAS-based DB task pulling, `OutboxRepository` integration
+
+Design highlights:
+
+- **Connection reuse**: up to 100 mails per TCP connection, RSET between mails
+- **Load-aware pulling**: atomic `pending_count_` counter with CAS `try_pull()` — only one thread pulls from DB at a time
+- **Bloom dedup**: lock-free 1024-bit filter replaces `mutex + unordered_map` for inbound duplicate detection
+- **PersistentQueue** persists mail metadata + outbox records in one transaction, then submits `MailDeliveryTask` to `OutboundServer`
 
 Configuration (via `outbound` section in smtpsConfig.json):
 
 - `outbound.max_attempts`
-- `outbound.polling.busy_sleep_ms` / `backoff_base_ms` / `backoff_max_ms` / `backoff_shift_cap`
 - `outbound.ports`
 - `outbound.helo_domain` / `mail_from_domain` / `rewrite_header_from`
 - `outbound.dkim.enabled` / `selector` / `domain` / `private_key_file`
