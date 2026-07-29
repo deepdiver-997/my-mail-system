@@ -2,15 +2,16 @@
 #define OUTBOUND_SERVER_H
 
 #include "framework/server_base.h"
+#include "framework/thread_pool/io_thread_pool.h"
 #include "mail_system/back/outbound/outbound_smtp_session.h"
 #include "mail_system/back/outbound/outbound_types.hpp"
 #include "mail_system/back/outbound/outbox_repository.h"
+#include <boost/asio/steady_timer.hpp>
 #include <map>
 #include <vector>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
-#include <condition_variable>
 #include <chrono>
 #include <atomic>
 
@@ -18,12 +19,15 @@ namespace mail_system {
 namespace outbound {
 
 // ================================================================
-// OutboundServer — 出站投递调度器
+// OutboundServer — 出站投递调度器（事件驱动）
 //
-//   原子计数器 + CAS 单拉取者模式：
-//   - submit() 增加 pending，通知 poll 线程
-//   - 完成回调递减 pending，低于阈值时触发 try_pull()
-//   - is_pulling CAS 保证同一时刻只有一个线程拉 DB
+//   水位预占 + CAS 单拉取周期：
+//   - try_pull() 先判水位，再 CAS 抢占拉取周期
+//   - 抢占后预占 BATCH_SIZE，claim 回调中修正
+//   - completion_cb / submit() 事件驱动触发 try_pull()
+//   - claim 返回空时指数退避重试，不释放 is_pulling_
+//   - 空闲回收由独立 steady_timer 驱动
+//   - 不再常驻占用 worker 线程
 // ================================================================
 class OutboundServer {
 public:
@@ -32,6 +36,8 @@ public:
     static constexpr int DEFAULT_MAX_MX_ENTRIES = 256;
     static constexpr int DEFAULT_BATCH_SIZE = 32;
     static constexpr int64_t LOW_WATERMARK = 16;
+    static constexpr int MIN_RETRY_DELAY_SEC = 5;
+    static constexpr int MAX_RETRY_DELAY_SEC = 60;
 
     OutboundServer(ServerBase* server,
                    int max_per_mx = DEFAULT_MAX_SESSIONS_PER_MX,
@@ -48,7 +54,6 @@ public:
     void start() {
         if (running_.exchange(true)) return;
 
-        // 投递完成回调：递减计数器 + 按需拉取
         completion_cb_ = [this](uint64_t record_id, bool success) {
             auto db = server_->m_shardRouter->get_db_pool(0);
             if (!db) return;
@@ -58,21 +63,29 @@ public:
             else
                 repo_.mark_dead(*db, record_id, "500 permanent failure");
 
-            // 递减计数器，低于水位时尝试拉取
             int64_t prev = pending_count_.fetch_sub(1) - 1;
             if (prev < LOW_WATERMARK) try_pull();
         };
 
-        // poll 线程：处理空闲回收和初始拉取
-        server_->m_workerThreadPool->post([this]() { poll_loop(); });
+        // 初始拉取：post 到 worker 池，不占常驻线程
+        server_->m_workerThreadPool->post([this]() { try_pull(); });
+
+        // 空闲回收定时器
+        auto& io_ctx = static_cast<IOThreadPool*>(
+            server_->m_ioThreadPool.get())->get_io_context();
+        evict_timer_ = std::make_unique<boost::asio::steady_timer>(io_ctx);
+        schedule_evict();
 
         LOG_SMTP_INFO("OutboundServer started: worker={}", worker_id_);
     }
 
     void stop() {
         if (!running_.exchange(false)) return;
-        cv_.notify_all();
-        // 简单等待 poll 退出（实际项目中可改用 joinable thread + join）
+
+        // 取消定时器
+        if (evict_timer_) evict_timer_->cancel();
+        if (retry_timer_) retry_timer_->cancel();
+
         std::unique_lock<std::shared_mutex> lk(mutex_);
         for (auto& [mx, sessions] : mx_sessions_)
             for (auto& s : sessions)
@@ -90,50 +103,26 @@ public:
         auto session = acquire_session(domain, port);
         if (session) {
             session->submit(std::move(task));
+            try_pull();  // 事件驱动：新任务到达后检查是否需要拉取
         } else {
-            pending_count_.fetch_sub(1);  // 回退
+            pending_count_.fetch_sub(1);
         }
     }
 
-    // ── 拉取（CAS 保护，仅一个线程执行） ──────────────────────
+    // ── 拉取入口（水位检查 + CAS 抢占） ───────────────────────
     void try_pull() {
+        // 快速路径：水位够高直接返回，无 CAS 开销
+        if (pending_count_.load(std::memory_order_relaxed) >= LOW_WATERMARK)
+            return;
+
+        // CAS 抢占拉取周期
         bool expected = false;
         if (!is_pulling_.compare_exchange_strong(expected, true))
-            return;  // 另一个线程已经在拉取
-
-        auto db = server_->m_shardRouter->get_db_pool(0);
-        if (!db) {
-            is_pulling_.store(false);
             return;
-        }
 
-        auto records = repo_.claim_batch(*db, worker_id_, DEFAULT_BATCH_SIZE, 120);
-        int pulled = static_cast<int>(records.size());
-        if (pulled == 0) { is_pulling_.store(false); return; }
-
-        pending_count_.fetch_add(pulled);
-
-        for (auto& rec : records) {
-            auto mail_ptr = repo_.load_mail(*db, rec.mail_id);
-            auto task = std::make_unique<MailDeliveryTask>();
-            task->mail_id = rec.mail_id;
-            task->record_id = rec.id;
-            task->sender = rec.sender;
-            task->recipient = rec.recipient;
-            task->mail_ptr = std::move(mail_ptr);
-            task->attempt_count = rec.attempt_count;
-            task->max_attempts = rec.max_attempts;
-
-            // 直接路由到 session，不通过 public submit() 避免重复计数
-            std::string domain = extract_domain(task->recipient);
-            auto session = acquire_session(domain, 25);
-            if (session) session->submit(std::move(task));
-        }
-
-        is_pulling_.store(false);
-
-        // 拉满了 → 可能还有更多
-        if (pulled >= DEFAULT_BATCH_SIZE) try_pull();
+        // 预占水位：claim 返回后修正
+        pending_count_.fetch_add(DEFAULT_BATCH_SIZE, std::memory_order_relaxed);
+        do_claim_batch();
     }
 
     // ── 空闲回收 ──────────────────────────────────────────────
@@ -209,21 +198,98 @@ private:
     using SessionList = std::vector<SessionPtr>;
     using CompletionCb = OutboundSmtpSession<TcpConnection>::CompletionCb;
 
-    // ── poll 循环 ─────────────────────────────────────────────
-    void poll_loop() {
-        try_pull();  // 初始拉取
-
-        while (running_.load(std::memory_order_relaxed)) {
-            evict_idle();
-
-            // 如果 pending 低于水位，再拉一批
-            if (pending_count_.load() < LOW_WATERMARK) try_pull();
-
-            // 空闲回收间隔：30 秒
-            std::unique_lock<std::mutex> lk(cv_mu_);
-            cv_.wait_for(lk, std::chrono::seconds(30),
-                         [this]() { return !running_.load(); });
+    // ── DB 拉取（发送到 worker 线程池） ───────────────────────
+    void do_claim_batch() {
+        auto db = server_->m_shardRouter->get_db_pool(0);
+        if (!db) {
+            // DB 不可用，退还预占并放弃本次拉取周期
+            pending_count_.fetch_sub(DEFAULT_BATCH_SIZE, std::memory_order_relaxed);
+            is_pulling_.store(false);
+            return;
         }
+
+        server_->m_workerThreadPool->post([this, db]() {
+            auto records = repo_.claim_batch(*db, worker_id_, DEFAULT_BATCH_SIZE, 120);
+            on_claim_complete(std::move(records));
+        });
+    }
+
+    // ── claim 回调：修正水位 + 分发 + 续拉 / 退避重试 ────────
+    void on_claim_complete(std::vector<OutboxRecord> records) {
+        int pulled = static_cast<int>(records.size());
+
+        // 修正预占水位（只会少不会多，over >= 0）
+        int over = DEFAULT_BATCH_SIZE - pulled;
+        if (over > 0)
+            pending_count_.fetch_sub(over, std::memory_order_relaxed);
+
+        // 无记录：退避重试，不释放 is_pulling_
+        if (records.empty()) {
+            schedule_retry();
+            return;
+        }
+
+        // 有数据，重置退避延迟
+        retry_delay_sec_ = MIN_RETRY_DELAY_SEC;
+
+        // 加载邮件并分发到 session
+        auto db = server_->m_shardRouter->get_db_pool(0);
+        if (!db) {
+            is_pulling_.store(false);
+            return;
+        }
+
+        for (auto& rec : records) {
+            auto mail_ptr = repo_.load_mail(*db, rec.mail_id);
+            auto task = std::make_unique<MailDeliveryTask>();
+            task->mail_id = rec.mail_id;
+            task->record_id = rec.id;
+            task->sender = rec.sender;
+            task->recipient = rec.recipient;
+            task->mail_ptr = std::move(mail_ptr);
+            task->attempt_count = rec.attempt_count;
+            task->max_attempts = rec.max_attempts;
+
+            // 直接路由到 session，不通过 public submit() 避免重复计数
+            std::string domain = extract_domain(task->recipient);
+            auto session = acquire_session(domain, 25);
+            if (session) session->submit(std::move(task));
+        }
+
+        // 水位仍低 → 链式续拉，不释放 is_pulling_
+        if (pending_count_.load(std::memory_order_relaxed) < LOW_WATERMARK) {
+            pending_count_.fetch_add(DEFAULT_BATCH_SIZE, std::memory_order_relaxed);
+            do_claim_batch();
+        } else {
+            is_pulling_.store(false);
+        }
+    }
+
+    // ── 退避重试（claim 返回空时） ────────────────────────────
+    void schedule_retry() {
+        retry_delay_sec_ = std::min(retry_delay_sec_ * 2, MAX_RETRY_DELAY_SEC);
+
+        auto& io_ctx = static_cast<IOThreadPool*>(
+            server_->m_ioThreadPool.get())->get_io_context();
+        retry_timer_ = std::make_unique<boost::asio::steady_timer>(io_ctx);
+        retry_timer_->expires_after(std::chrono::seconds(retry_delay_sec_));
+        retry_timer_->async_wait([this](const boost::system::error_code& ec) {
+            if (ec || !running_.load(std::memory_order_relaxed)) return;
+            // is_pulling_ 仍为 true，直接重新预占并拉取
+            pending_count_.fetch_add(DEFAULT_BATCH_SIZE, std::memory_order_relaxed);
+            do_claim_batch();
+        });
+    }
+
+    // ── 空闲回收定时器（30 秒周期） ───────────────────────────
+    void schedule_evict() {
+        if (!running_.load(std::memory_order_relaxed)) return;
+        evict_timer_->expires_after(std::chrono::seconds(30));
+        evict_timer_->async_wait([this](const boost::system::error_code& ec) {
+            if (ec || !running_.load(std::memory_order_relaxed)) return;
+            evict_idle();
+            schedule_evict();  // 重新武装
+        });
     }
 
     SessionPtr acquire_session(const std::string& mx, int port) {
@@ -281,14 +347,15 @@ private:
 
     std::atomic<int64_t> pending_count_{0};
     std::atomic<bool> is_pulling_{false};
+    int retry_delay_sec_ = MIN_RETRY_DELAY_SEC;
 
     mutable std::shared_mutex mutex_;
     std::map<std::string, SessionList> mx_sessions_;
     std::map<std::string, std::chrono::steady_clock::time_point> last_active_;
 
-    std::mutex cv_mu_;
-    std::condition_variable cv_;
     std::atomic<bool> running_{false};
+    std::unique_ptr<boost::asio::steady_timer> evict_timer_;
+    std::unique_ptr<boost::asio::steady_timer> retry_timer_;
 };
 
 } // namespace outbound
