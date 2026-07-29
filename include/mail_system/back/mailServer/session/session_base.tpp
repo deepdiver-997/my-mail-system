@@ -4,17 +4,6 @@
 namespace mail_system {
 
 // ================================================================
-// make_copyable
-// ================================================================
-template <typename F>
-auto make_copyable(F&& f) {
-    auto s = std::make_shared<std::decay_t<F>>(std::forward<F>(f));
-    return [s](auto&&... args) {
-        return (*s)(std::forward<decltype(args)>(args)...);
-    };
-}
-
-// ================================================================
 // 1. 构造 / 析构
 // ================================================================
 template <typename ConnectionType>
@@ -111,29 +100,6 @@ bool SessionBase<ConnectionType>::is_closed() const {
 // ================================================================
 // 3. 异步 I/O
 // ================================================================
-template <typename ConnectionType>
-template <typename HandshakeHandler>
-void SessionBase<ConnectionType>::do_handshake(
-    std::shared_ptr<SessionBase<ConnectionType>> self,
-    boost::asio::ssl::stream_base::handshake_type type,
-    HandshakeHandler&& handler)
-{
-    if (self->closed_ || !self->connection_) return;
-    auto* conn = self->connection_.get();
-    conn->async_handshake(type,
-        make_copyable([self, handler = std::forward<HandshakeHandler>(handler)](
-            const boost::system::error_code& error) mutable {
-            if (self->closed_) return;
-            if (error) {
-                LOG_SESSION_ERROR("Handshake failed: {}", error.message());
-                self->handle_error(error);
-            } else {
-                LOG_SESSION_INFO("Handshake successful.");
-            }
-            handler(self, error);
-        }));
-}
-
 template <typename ConnectionType>
 void SessionBase<ConnectionType>::handle_error(const boost::system::error_code& error) {
     LOG_SESSION_ERROR("SessionBase Error: {}", error.message());

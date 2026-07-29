@@ -36,9 +36,15 @@ enum class SessionError {
 
 // ================================================================
 // make_copyable — 将 move-only 回调包装为 copyable（供 do_handshake 使用）
+//   成员模板，必须在头文件中 inline 定义
 // ================================================================
 template <typename F>
-auto make_copyable(F&& f);
+auto make_copyable(F&& f) {
+    auto s = std::make_shared<std::decay_t<F>>(std::forward<F>(f));
+    return [s](auto&&... args) {
+        return (*s)(std::forward<decltype(args)>(args)...);
+    };
+}
 
 // ================================================================
 // SessionBase — 协议无关的网络会话基类
@@ -72,11 +78,28 @@ public:
     void do_async_read();
     void do_async_write(const std::string& data, WriteCallback callback = nullptr);
 
+    // 成员模板 — 必须在头文件中定义
     template <typename HandshakeHandler>
     static void do_handshake(
         std::shared_ptr<SessionBase<ConnectionType>> self,
         boost::asio::ssl::stream_base::handshake_type type,
-        HandshakeHandler&& handler);
+        HandshakeHandler&& handler)
+    {
+        if (self->closed_ || !self->connection_) return;
+        auto* conn = self->connection_.get();
+        conn->async_handshake(type,
+            make_copyable([self, handler = std::forward<HandshakeHandler>(handler)](
+                const boost::system::error_code& error) mutable {
+                if (self->closed_) return;
+                if (error) {
+                    LOG_SESSION_ERROR("Handshake failed: {}", error.message());
+                    self->handle_error(error);
+                } else {
+                    LOG_SESSION_INFO("Handshake successful.");
+                }
+                handler(self, error);
+            }));
+    }
 
     virtual void handle_error(const boost::system::error_code& error);
 
