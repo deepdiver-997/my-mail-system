@@ -340,6 +340,12 @@ set(COMMON_SRCS
     src/mail_system/back/inbound/inbound_verifier.cpp
     src/mail_system/back/persist_storage/persistent_queue.cpp
     src/mail_system/back/router/table_shard_router.cpp
+    # 显式模板实例化（避免每个翻译单元重复编译模板实现）
+    src/mail_system/back/mailServer/session/session_base_inst.cpp
+    src/mail_system/back/mailServer/session/smtps_session_inst.cpp
+    src/mail_system/back/mailServer/session/imaps_session_inst.cpp
+    src/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm_inst.cpp
+    src/mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm_inst.cpp
 )
 
 if(ENABLE_HDFS_WEB_STORAGE)

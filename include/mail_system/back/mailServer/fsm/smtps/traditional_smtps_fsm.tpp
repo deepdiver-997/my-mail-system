@@ -875,7 +875,8 @@ void TraditionalSmtpsFsm<ConnectionType>::get_mail_data(
     }
 
     // 从session上下文获取发件人地址（如果已设置）
-    std::string sender = session->context_.sender_address.empty() ? session->context_.client_username : session->context_.sender_address;
+    auto* smtp_s = static_cast<SmtpsSession<ConnectionType>*>(session);
+    std::string sender = smtp_s->context_.sender_address.empty() ? smtp_s->context_.client_username : smtp_s->context_.sender_address;
 
     // 使用参数化查询
     std::string sql = "SELECT subject, body FROM mails WHERE sender = ? ORDER BY send_time DESC LIMIT 1";

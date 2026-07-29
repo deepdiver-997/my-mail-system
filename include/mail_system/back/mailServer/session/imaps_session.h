@@ -84,6 +84,5 @@ using SslImapsSession = ImapsSession<SslConnection>;
 
 } // namespace mail_system
 
-#include "mail_system/back/mailServer/session/imaps_session.tpp"
 
 #endif // IMAPS_SESSION_H

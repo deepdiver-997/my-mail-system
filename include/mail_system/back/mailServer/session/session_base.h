@@ -139,6 +139,4 @@ protected:
 
 } // namespace mail_system
 
-#include "session_base.tpp"
-
 #endif // SESSION_BASE_H

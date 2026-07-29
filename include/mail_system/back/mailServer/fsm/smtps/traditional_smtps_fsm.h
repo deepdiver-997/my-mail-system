@@ -140,6 +140,5 @@ private:
 
 } // namespace mail_system
 
-#include "mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.tpp"
 
 #endif // TRADITIONAL_SMTPS_FSM_H

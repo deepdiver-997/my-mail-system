@@ -27,6 +27,7 @@ namespace mail_system {
 
 template <typename ConnectionType>
 class SmtpsSession : public SessionBase<ConnectionType> {
+    friend class TraditionalSmtpsFsm<ConnectionType>;
     static constexpr size_t MAX_BODY_BYTES = 10 * 1024 * 1024;
     static constexpr size_t INITIAL_BUFFER_SIZE = 8192;
     static constexpr size_t MAX_BUFFER_SIZE = 1048576;
@@ -152,6 +153,5 @@ using SslSmtpsSession = SmtpsSession<SslConnection>;
 
 } // namespace mail_system
 
-#include "mail_system/back/mailServer/session/smtps_session.tpp"
 
 #endif // SMTPS_SESSION_H
