@@ -23,12 +23,24 @@
 #include <fcntl.h>
 
 // ── helpers ────────────────────────────────────────────────────────────────
-static int tcp_connect(const char* host, int port, int timeout_sec) {
+static int tcp_connect(const char* local_ip, const char* host, int port, int timeout_sec) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
-    // SO_REUSEADDR: reuse local port in TIME_WAIT to avoid ephemeral port
-    // exhaustion under high-rate connect/disconnect workloads.
-    int one = 1; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    int one = 1;
+
+    // 绑定本地 loopback IP（解决 ephemeral port 耗尽：每个 src_ip 独立 16K 端口范围）
+    if (local_ip && local_ip[0]) {
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        struct sockaddr_in local{};
+        local.sin_family = AF_INET;
+        inet_pton(AF_INET, local_ip, &local.sin_addr);
+        if (bind(fd, (struct sockaddr*)&local, sizeof(local)) < 0) {
+            close(fd); return -1;
+        }
+    } else {
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    }
+
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(port));
@@ -81,6 +93,7 @@ struct BenchConfig {
     int threads = 4;
     bool pipeline = true;
     bool reuse = false;
+    std::vector<std::string> local_ips = {"127.0.0.1"};
 };
 
 static std::string g_senders[10], g_recipients[10];
@@ -107,9 +120,10 @@ static std::string build_mail_body(int idx) {
 // Sequential (no pipelining): one command + one response per round-trip
 static void worker_seq_perconn(int idx, const BenchConfig& cfg,
                                 std::atomic<size_t>& ok, std::atomic<size_t>& fail) {
+    const auto& lip = cfg.local_ips[idx % cfg.local_ips.size()];
     int n = cfg.messages / cfg.threads + (idx < cfg.messages % cfg.threads ? 1 : 0);
     for (int i = 0; i < n; ++i) {
-        int fd = tcp_connect(cfg.host, cfg.port, cfg.timeout);
+        int fd = tcp_connect(lip.c_str(), cfg.host, cfg.port, cfg.timeout);
         if (fd < 0) { fail.fetch_add(1); continue; }
         FILE* f = fdopen(fd, "r");
         if (!f) { close(fd); fail.fetch_add(1); continue; }
@@ -140,9 +154,10 @@ static void worker_seq_perconn(int idx, const BenchConfig& cfg,
 
 static void worker_seq_reuse(int idx, const BenchConfig& cfg,
                               std::atomic<size_t>& ok, std::atomic<size_t>& fail) {
+    const auto& lip = cfg.local_ips[idx % cfg.local_ips.size()];
     int n = cfg.messages / cfg.threads + (idx < cfg.messages % cfg.threads ? 1 : 0);
     if (n == 0) return;
-    int fd = tcp_connect(cfg.host, cfg.port, cfg.timeout);
+    int fd = tcp_connect(lip.c_str(), cfg.host, cfg.port, cfg.timeout);
     if (fd < 0) { fail.fetch_add(static_cast<size_t>(n)); return; }
     FILE* f = fdopen(fd, "r");
     if (!f) { close(fd); fail.fetch_add(static_cast<size_t>(n)); return; }
@@ -175,9 +190,10 @@ static void worker_seq_reuse(int idx, const BenchConfig& cfg,
 // Pipeline workers: batch all commands in one TCP write
 static void worker_pipe_perconn(int idx, const BenchConfig& cfg,
                                 std::atomic<size_t>& ok, std::atomic<size_t>& fail) {
+    const auto& lip = cfg.local_ips[idx % cfg.local_ips.size()];
     int n = cfg.messages / cfg.threads + (idx < cfg.messages % cfg.threads ? 1 : 0);
     for (int i = 0; i < n; ++i) {
-        int fd = tcp_connect(cfg.host, cfg.port, cfg.timeout);
+        int fd = tcp_connect(lip.c_str(), cfg.host, cfg.port, cfg.timeout);
         if (fd < 0) { fail.fetch_add(1); continue; }
         FILE* f = fdopen(fd, "r");
         if (!f) { close(fd); fail.fetch_add(1); continue; }
@@ -195,9 +211,10 @@ static void worker_pipe_perconn(int idx, const BenchConfig& cfg,
 
 static void worker_pipe_reuse(int idx, const BenchConfig& cfg,
                               std::atomic<size_t>& ok, std::atomic<size_t>& fail) {
+    const auto& lip = cfg.local_ips[idx % cfg.local_ips.size()];
     int n = cfg.messages / cfg.threads + (idx < cfg.messages % cfg.threads ? 1 : 0);
     if (n == 0) return;
-    int fd = tcp_connect(cfg.host, cfg.port, cfg.timeout);
+    int fd = tcp_connect(lip.c_str(), cfg.host, cfg.port, cfg.timeout);
     if (fd < 0) { fail.fetch_add(static_cast<size_t>(n)); return; }
     FILE* f = fdopen(fd, "r");
     if (!f) { close(fd); fail.fetch_add(static_cast<size_t>(n)); return; }
@@ -226,6 +243,19 @@ int main(int argc, char* argv[]) {
         else if (a == "--msgs" && i + 1 < argc) cfg.messages = std::stoi(argv[++i]);
         else if (a == "--port" && i + 1 < argc) cfg.port = std::stoi(argv[++i]);
         else if (a == "--host" && i + 1 < argc) cfg.host = argv[++i];
+        else if (a == "--local-ips" && i + 1 < argc) {
+            cfg.local_ips.clear();
+            std::string ips = argv[++i];
+            size_t pos = 0;
+            while (pos < ips.size()) {
+                auto comma = ips.find(',', pos);
+                auto ip = ips.substr(pos, comma - pos);
+                if (!ip.empty()) cfg.local_ips.push_back(ip);
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
+            if (cfg.local_ips.empty()) cfg.local_ips = {"127.0.0.1"};
+        }
     }
 
     for (int i = 0; i < 10; ++i) {

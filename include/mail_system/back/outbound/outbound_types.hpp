@@ -38,6 +38,7 @@ enum class OutboundSmtpState {
     WAIT_ACCEPT,       // 正文发送完毕，等待 250 OK
     QUIT,              // 已发 QUIT，等待 221
     CLOSED,            // 连接已关闭
+    COUNT
 };
 
 // ================================================================
@@ -57,6 +58,7 @@ enum class OutboundSmtpEvent {
     ERROR_4XX,         // 临时错误
     ERROR_5XX,         // 永久错误
     CONNECTION_LOST,   // 连接丢失
+    COUNT
 };
 
 } // namespace outbound

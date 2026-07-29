@@ -329,26 +329,26 @@ if(BUILD_OBJECT_ONLY)
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/smtps/smtps_server.cpp
         src/mail_system/back/mailServer/imaps/imaps_server.cpp
-        test/smtps_test.cpp
+        test/server/smtps_test.cpp
     )
     setup_mail_target(smtpsServer_obj)
-    add_library(imapsServer_obj OBJECT test/imaps_test.cpp)
+    add_library(imapsServer_obj OBJECT test/server/imaps_test.cpp)
     setup_mail_target(imapsServer_obj)
-    add_library(mailServer_obj OBJECT test/mail_server_combined.cpp)
+    add_library(mailServer_obj OBJECT test/server/mail_server_combined.cpp)
     setup_mail_target(mailServer_obj)
 else()
     add_executable(smtpsServer
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/smtps/smtps_server.cpp
         src/mail_system/back/mailServer/imaps/imaps_server.cpp
-        test/smtps_test.cpp
+        test/server/smtps_test.cpp
     )
     setup_mail_target(smtpsServer)
 
     add_executable(imapsServer
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/imaps/imaps_server.cpp
-        test/imaps_test.cpp
+        test/server/imaps_test.cpp
     )
     setup_mail_target(imapsServer)
 
@@ -356,7 +356,7 @@ else()
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/smtps/smtps_server.cpp
         src/mail_system/back/mailServer/imaps/imaps_server.cpp
-        test/mail_server_combined.cpp
+        test/server/mail_server_combined.cpp
     )
     setup_mail_target(mailServer)
 endif()
@@ -365,8 +365,18 @@ endif()
 # 测试 / Benchmark（BUILD_TESTS=OFF 时跳过）
 # ================================================================
 if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
-    add_executable(test_inbound_verifier test/test_inbound_verifier.cpp)
+    add_executable(test_inbound_verifier
+        test/unit/test_inbound_verifier.cpp
+        src/mail_system/back/inbound/inbound_verifier.cpp
+    )
     setup_mail_target(test_inbound_verifier)
+    target_include_directories(test_inbound_verifier PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+
+    add_executable(sql_queries_test
+        test/unit/sql_queries_test.cpp
+        src/mail_system/back/db/sql_queries.cpp
+    )
+    setup_mail_target(sql_queries_test)
 
     add_executable(fsm_bench
         ${COMMON_SRCS}
@@ -395,8 +405,24 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(smtp_client test/bench/smtp_client.cpp)
     target_compile_features(smtp_client PRIVATE cxx_std_17)
 
-    add_executable(outbound_smoke test/outbound_smoke.cpp)
+    add_executable(dispatch_bench test/bench/dispatch_bench.cpp)
+    target_compile_features(dispatch_bench PRIVATE cxx_std_17)
+
+    add_executable(outbound_smoke test/unit/outbound_smoke.cpp)
     setup_mail_target(outbound_smoke)
+    target_include_directories(outbound_smoke PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+endif()
+
+# ================================================================
+# CTest 集成
+# ================================================================
+if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
+    enable_testing()
+    add_test(NAME smtps_fsm_test   COMMAND smtps_fsm_test)
+    add_test(NAME imaps_fsm_test   COMMAND imaps_fsm_test)
+    add_test(NAME inbound_verifier COMMAND test_inbound_verifier)
+    add_test(NAME outbound_smoke   COMMAND outbound_smoke)
+    add_test(NAME sql_queries_test COMMAND sql_queries_test)
 endif()
 
 if(NOT BUILD_OBJECT_ONLY)

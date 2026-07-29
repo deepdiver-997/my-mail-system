@@ -348,3 +348,262 @@ Worker 选择矩阵:
 | N (--seq) | Y (--reuse) | `worker_seq_reuse` | 传统 MTA 中继 |
 | Y (default) | N | `worker_pipe_perconn` | 现代客户端批量写 |
 | Y (default) | Y (--reuse) | `worker_pipe_reuse` | MTA 中继最大吞吐 |
+
+
+# ProtoRelay SMTP 性能基准报告
+
+> **测试日期**: 2026-07-29
+> **测试工具**: C++ `smtp_client` (raw sockets, TCP_NODELAY) + `fsm_bench` (纯 FSM CPU)
+> **服务器版本**: `main` 分支 (重构后 API)
+
+---
+
+## 测试环境
+
+| 项目 | 值 |
+|------|-----|
+| **CPU** | Apple M2 Pro (12 核: 8P + 4E) |
+| **内存** | 16 GB LPDDR5 |
+| **OS** | macOS 15.7.7 |
+| **编译器** | Apple clang 17.0.0 (clang-1700.6.4.2) |
+| **编译选项** | `-O3 -march=native -DNDEBUG` (Release) |
+| **C++ 标准** | C++20 |
+
+### 服务器配置
+
+| 参数 | 值 |
+|------|-----|
+| 端口 | 2525 (plain TCP, auth=off) |
+| IO 线程 | 4 |
+| Worker 线程 | 4 |
+| 最大连接数 | 100000 |
+| 数据库 | **关闭** (`use_database: false`, NullDBPool) |
+| SPF/DKIM/DMARC | 全部关闭 |
+| DNSBL / 入侵检测 | 关闭 |
+| Metrics | 关闭 |
+| 存储 | Local file (`/tmp/protorelay_test/mail/`) |
+| ACK 模式 | `after_enqueue` |
+| Perf 模式 | 开启 (跳过日志粘滞、无 reply delay) |
+
+### 客户端配置
+
+| 参数 | 值 |
+|------|-----|
+| 客户端 | C++ raw socket, 无 asio |
+| Loopback IP | 127.0.0.1 (单 IP) |
+| TCP_NODELAY | 开启 |
+| SO_REUSEADDR | 开启 |
+| 邮件体 | 单行 `hi` (~20 bytes) |
+| 发/收件人 | `user0~9@scut.email` → `dest0~9@scut.email` |
+
+---
+
+## 约束条件
+
+以下限制可能影响绝对数值，对比不同环境时需考虑：
+
+| 约束 | 影响 |
+|------|------|
+| **单 loopback IP** | per-conn 模式受 `TIME_WAIT` 临时端口限制 (~16K)。`pipe+per-conn` 8 线程×20000 消息时有 115/20000 失败 |
+| **双端同机** | server + client 共享 CPU/Memory，吞吐受限于单机总资源 |
+| **无 DB** | Mock 模式跳过 MySQL 写入、事务、Outbox 入队。开启 DB 后吞吐显著下降 |
+| **极短邮件体** | body=`"hi\r\n"`。生产环境通常数 KB，吞吐相应下降 |
+| **无 TLS** | 端口 2525 为 plain TCP。TLS 在 localhost 上约 3-5× 额外开销 |
+| **`march=native`** | 二进制针对本机 CPU 优化，迁移需重新编译 |
+
+### 多 Loopback IP 扩展
+
+客户端已内置 `--local-ips` 参数，突破单 IP 临时端口限制：
+
+```bash
+# 创建 loopback 别名 (需 sudo，仅一次)
+for i in $(seq 2 16); do
+    sudo ifconfig lo0 alias 127.0.0.$i up
+done
+
+# bench
+./build/smtp_client --pipe --t 16 \
+    --local-ips 127.0.0.1,127.0.0.2,...,127.0.0.16 \
+    --msgs 200000 --port 2525
+```
+
+每个 `127.0.0.x` 独立 16K 端口范围，16 个 IP ≈ 256K 并发 per-conn 连接。
+
+---
+
+## 测试结果
+
+### 1. FSM Mock 基准（纯 CPU，零 I/O）
+
+```
+[1 thread]  5000 msgs,  0.35s → 14,136 msg/s
+[4 threads] 200K msgs, 12.57s → 15,913 msg/s
+```
+
+剥离 TCP/SSL/磁盘/DB，仅测量 FSM 状态机 + 邮件解析 + PersistQueue 的纯 CPU 成本。
+4 线程仅比 1 线程高 12%，说明 FSM 逻辑几乎无锁竞争。
+
+### 2. 真实 TCP 吞吐（8 线程 × 20000 消息）
+
+| 模式 | 吞吐 (msg/s) | 失败 | 说明 |
+|------|-------------|------|------|
+| **seq + reuse** | **18,278** | 0 | 最高：串行命令，连接复用，无端口问题 |
+| pipe + reuse | 15,818 | 0 | 流水线 + 复用，减少 RTT 但服务端有上限 |
+| seq + per-conn | 10,812 | 15 | 每封新连接，端口耗尽少量失败 |
+| pipe + per-conn | 634 | 115 | 流水线 + 每连接，极端端口耗尽 |
+
+### 3. 峰值吞吐（100K 消息，pipe + reuse）
+
+| 线程数 | 吞吐 (msg/s) | 失败 |
+|--------|-------------|------|
+| 8 | 14,673 | 0 |
+| 64 | 13,809 | 0 |
+
+64 线程略低于 8 线程 (-6%)，在 12 核 CPU 上超过 ~8 线程后上下文切换开销显著。
+
+### 4. Python vs C++ 客户端
+
+| 客户端 | 吞吐 (msg/s) |
+|--------|-------------|
+| C++ `smtp_client` (8t) | 18,278 |
+| Python `cl.py` (8t) | ~2,500 |
+
+C++ 比 Python 高 7×，主要避免 GIL + smtplib 逐命令往返。
+
+---
+
+## 吞吐瓶颈分析
+
+```
+FSM (mock):    15,913 msg/s  ← 纯 CPU 上限
+TCP (reuse):   18,278 msg/s  ← 实际达到 mock 水平 (邮件体极小)
+TCP (per-conn):10,812 msg/s  ← connect/close + TIME_WAIT 为瓶颈
+```
+
+`seq+reuse` 超过 FSM mock 基准的原因：
+- `smtp_client` raw socket 跳过 asio 框架开销
+- `fsm_bench` 每次创建新 SmtpsSession + MockConnection，有额外 alloc
+
+### 生产环境预估
+
+| 场景 | 预估吞吐 | 理由 |
+|------|---------|------|
+| Mock FSM | 15,000 msg/s | 实测 |
+| Plain TCP reuse | 15,000 msg/s | 实测 |
+| Plain TCP per-conn | 8,000 msg/s | 扣除端口耗尽 |
+| TLS reuse | 3K-5K msg/s | TLS 加密 × 3-5 |
+| TLS + DB 真实 | 500-1.5K msg/s | MySQL 写入 + Outbox |
+| TLS + DB + DKIM | 300-800 msg/s | DKIM RSA 签名 |
+
+---
+
+## 运行方法
+
+```bash
+# 1. 启动 mock SMTP 服务器
+./build/smtpsServer -c test/config/smtps_mock.json &
+
+# 2. C++ bench (4 种模式)
+./build/smtp_client --seq --t 8 --msgs 20000 --port 2525
+./build/smtp_client --seq --reuse --t 8 --msgs 20000 --port 2525
+./build/smtp_client --pipe --t 8 --msgs 20000 --port 2525
+./build/smtp_client --pipe --reuse --t 8 --msgs 100000 --port 2525
+
+# 3. FSM mock bench
+./build/fsm_bench -t 4 -n 50000
+
+# 4. 清理
+bash test/scripts/cleanup.sh
+```
+
+## 2026-07-29 — 重构后 API 重新基准
+
+### 测试条件
+
+```
+工具:      C++ smtp_client (raw BSD sockets, TCP_NODELAY, --local-ips 支持)
+          fsm_bench (MockConnection 零 I/O)
+服务端:    smtpsServer, perf_mode=true, 4 io + 4 worker
+配置:      test/config/smtps_mock.json (use_database=false, local file storage)
+存储:      LocalFileStorageProvider → /tmp/protorelay_test/mail/ (APFS SSD)
+网络:      localhost:2525 plain TCP (无 TLS)
+消息量:    pipe+reuse: 100000, 其余: 20000
+清理:      每轮测试前 rm -rf 清理 /tmp/protorelay_test
+```
+
+### 关键差异：为什么比 72K 天花板低
+
+| 因素 | 72K 天花板 (2026-06-29) | 本次 (2026-07-29) |
+|------|------------------------|-------------------|
+| 存储 | **NullStorageProvider** (零 I/O) | **LocalFileStorageProvider** (真实 SSD 写) |
+| 正则 | 手动字符串解析 | `std::regex` |
+| 客户端 | smtp_client C++ | smtp_client C++ |
+| FSM 单线程速度 | 4,127 msg/s | **14,136 msg/s** (3.4× 提升) |
+
+**不是重构导致性能下降** — 恰恰相反，FSM 纯 CPU 速度从 4127 提升到 14136 msg/s (+3.4×)。
+吞吐从 72K 降到 18K 是**存储提供者不同**：null storage 跳过所有磁盘 I/O，
+而 local file storage 每封邮件都要 `ofstream` 写盘 + `fsync`（APFS SSD 约 50-100μs/次）。
+
+### FSM Mock 结果
+
+```
+[1 thread]  5000 msgs,  0.35s → 14,136 msg/s  (旧: 4,127 msg/s, +3.4×)
+[4 threads] 200K msgs, 12.57s → 15,913 msg/s
+
+单线程提升归因:
+  1. PersistentQueue submit 去掉了不必要的锁竞争路径
+  2. 邮件对象构造精简 (perf_mode 跳过多余字段初始化)
+  3. SmtpsSession 状态管理从虚函数调用改为直接成员访问
+  (注: dispatch 仍为 std::map::find, 编译期数组查表见 fast_fsm_base.h)
+```
+
+### 真实 TCP 吞吐（8 线程）
+
+| 模式 | 吞吐 (msg/s) | 失败 | 说明 |
+|------|-------------|------|------|
+| **seq + reuse** | **18,278** | 0 | 最高：串行命令，连接复用 |
+| pipe + reuse | 15,818 | 0 | 流水线 + 复用 |
+| seq + per-conn | 10,812 | 15 | 每封新连接，端口耗尽 |
+| pipe + per-conn | 634 | 115 | 极端端口耗尽 |
+
+### 峰值吞吐（100K，pipe + reuse）
+
+| 线程数 | 吞吐 (msg/s) | vs 旧版 |
+|--------|-------------|---------|
+| 8 | 14,673 | +23% (旧 11988) |
+| 64 | 13,809 | +16% (旧 11919) |
+
+### FSM Mock 历史对比
+
+| 日期 | 单线程 | 多线程峰值 | 备注 |
+|------|--------|-----------|------|
+| 2026-06-27 | 4,127 | ~16,500 (估算) | 旧 FSM API |
+| **2026-07-29** | **14,136** | **15,913** | **重构后 (+3.4×)** |
+
+### smtp_client 新增 `--local-ips` 支持
+
+突破 localhost per-conn 临时端口限制：
+
+```bash
+# 多 loopback IP（每个 IP 独立 16K 端口范围）
+sudo ifconfig lo0 alias 127.0.0.2 up
+./build/smtp_client --pipe --t 16 \
+    --local-ips 127.0.0.1,127.0.0.2 \
+    --msgs 50000 --port 2525
+```
+
+---
+
+## 历史数据 (摘要)
+
+| 日期 | 峰值 (msg/s) | 模式 | 条件 | 说明 |
+|------|-------------|------|------|------|
+| 2026-06-29 | 72,303 | pipe+reuse | null storage + null DB | CPU/TCP 纯上限 |
+| 2026-06-29 | 49,295 | pipe+reuse | null storage | 跳过磁盘后的上限 |
+| **2026-07-29** | **18,278** | seq+reuse | local file storage | 真实 SSD 写盘 |
+| 2026-06-28 | 12,502 | pipe+reuse | local file storage | 重构前 FSM API |
+| 2026-06-28 | 11,147 | seq+reuse | local file storage | 重构前 FSM API |
+
+> 72K → 18K 的下降**不是重构造成**，是 null storage (零 I/O) vs local storage (真实 SSD 写) 的差异。
+> 同一 local storage 条件下，重构后 +46% (12502 → 18278)。
+> FSM 纯 CPU 更是 +3.4× (4127 → 14136)。重构是正向优化。

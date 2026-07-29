@@ -395,7 +395,7 @@ fi
 
 # 编译
 print_info "Building with ${BUILD_JOBS_VALUE} thread(s)..."
-cmake --build "$BUILD_DIR" -- -j"$BUILD_JOBS_VALUE"
+cmake --build "$BUILD_DIR" -j"$BUILD_JOBS_VALUE"
 
 # 输出结果
 print_success "Build completed successfully!"
@@ -409,7 +409,7 @@ if [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
     print_info "Mode: object-only (no final executable link)"
     print_info "Objects: ${BUILD_DIR}/CMakeFiles/smtpsServer_obj.dir/..."
 else
-    print_info "Executable: ${SCRIPT_DIR}/test/smtpsServer"
+    print_info "Executable: ${BUILD_DIR}/smtpsServer"
 fi
 
 # 导出构建产物到显眼目录，方便 scp 传输。
@@ -450,8 +450,8 @@ if [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
     OBJ_COUNT=$(find "$EXPORT_DIR" -type f -name '*.o' | wc -l | tr -d ' ')
     print_info "Exported object files: ${OBJ_COUNT}"
 else
-    if [ -f "${SCRIPT_DIR}/test/smtpsServer" ]; then
-        cp "${SCRIPT_DIR}/test/smtpsServer" "${EXPORT_DIR}/"
+    if [ -f "${BUILD_DIR}/smtpsServer" ]; then
+        cp "${BUILD_DIR}/smtpsServer" "${EXPORT_DIR}/"
         chmod +x "${EXPORT_DIR}/smtpsServer"
     fi
 fi
@@ -472,7 +472,7 @@ if [ "$BUILD_TYPE" = "Debug" ]; then
         echo "  • Link step: skipped (object-only)"
         echo "Object files are ready for target-machine linking."
     else
-        echo "Start server with: ./test/smtpsServer"
+        echo "Start server with: ./build/smtpsServer"
     fi
 elif [ "$BUILD_TYPE" = "Release" ]; then
     echo -e "${GREEN}Release Mode Enabled:${NC}"
@@ -485,7 +485,7 @@ elif [ "$BUILD_TYPE" = "Release" ]; then
         echo "  • Link step: skipped (object-only)"
         echo "Object files are ready for target-machine linking."
     else
-        echo "Start server with: ./test/smtpsServer"
+        echo "Start server with: ./build/smtpsServer"
         echo "Or run tests with: cd test && uv run cl.py"
     fi
 else
@@ -499,6 +499,6 @@ else
         echo "  • Link step: skipped (object-only)"
         echo "Object files are ready for target-machine linking."
     else
-        echo "Start server with: ./test/smtpsServer"
+        echo "Start server with: ./build/smtpsServer"
     fi
 fi

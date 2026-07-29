@@ -23,7 +23,8 @@ enum class ImapState {
     AUTHENTICATED = 2,       // 已登录，无选中的邮箱
     SELECTED = 3,            // 已选中一个邮箱
     LOGOUT = 4,              // LOGOUT 发送完毕
-    CLOSED = 5               // 连接关闭
+    CLOSED = 5,              // 连接关闭
+    COUNT = 6
 };
 
 // ====================================================================
@@ -60,7 +61,8 @@ enum class ImapEvent {
     DONE = 27,
     STARTTLS = 28,
     ERROR = 29,
-    TIMEOUT = 30
+    TIMEOUT = 30,
+    COUNT = 31
 };
 
 // ====================================================================

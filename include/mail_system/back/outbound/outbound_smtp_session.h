@@ -28,8 +28,8 @@ public:
     OutboundSmtpSession(ServerBase* server, const std::string& mx_host, int mx_port = 25)
         : SessionBase<ConnectionType>(nullptr, server)
         , mx_host_(mx_host), mx_port_(mx_port)
-        , fsm_(std::make_shared<OutboundSmtpFsm<ConnectionType>>())
         , helo_domain_(server->m_domain)
+        , fsm_(std::make_shared<OutboundSmtpFsm<ConnectionType>>())
     {
         register_handlers();
     }

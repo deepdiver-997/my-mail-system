@@ -4,6 +4,9 @@
 // 用法: ./fsm_bench [--threads N] [--iterations N]
 
 #include "mail_system/back/mailServer/smtps_server.h"
+#include "mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.tpp"
+#include "mail_system/back/mailServer/session/smtps_session.tpp"
+#include "framework/session_base.tpp"
 #include "framework/server_config.h"
 #include "framework/thread_pool/io_thread_pool.h"
 #include "framework/thread_pool/boost_thread_pool.h"
@@ -44,24 +47,20 @@ struct BenchServer : ServerBase {
                 std::shared_ptr<pq::PersistentQueue> q)
         : ServerBase(c, io, w, nullptr) {
         m_shardRouter = std::move(r);
-        m_persistentQueue = std::move(q);
     }
-    void handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&&,
-                       const boost::system::error_code&, ListenerConfig) override {}
-    void handle_tcp_accept(std::unique_ptr<boost::asio::ip::tcp::socket>&&,
-                           const boost::system::error_code&, ListenerConfig) override {}
+    void start() override {}
     bool should_reject_connection(std::string&, const std::string&) const override { return false; }
 };
 
 // 单封投递: 创建 mock session → 喂命令 → FSM 处理 → QUIT 关闭
-static bool deliver_one(TraditionalSmtpsFsm<MockConnection>& fsm,
+// 注意: SmtpsSession 内部使用 shared_from_this()，必须用 shared_ptr 管理
+static bool deliver_one(std::shared_ptr<TraditionalSmtpsFsm<MockConnection>> fsm,
                         BenchServer& server, int idx) {
     auto conn = std::make_unique<MockConnection>();
-    conn->set_read_data(build_pipeline_msg(idx));  // 预加载流水线命令
+    conn->set_read_data(build_pipeline_msg(idx));
 
-    auto session = std::make_unique<SmtpsSession<MockConnection>>(
-        &server, std::move(conn),
-        std::shared_ptr<TraditionalSmtpsFsm<MockConnection>>(&fsm, [](void*){}));
+    auto session = std::make_shared<SmtpsSession<MockConnection>>(
+        &server, std::move(conn), fsm);
 
     ListenerConfig lc;
     lc.type       = ListenerType::TCP;
@@ -72,10 +71,7 @@ static bool deliver_one(TraditionalSmtpsFsm<MockConnection>& fsm,
     session->set_current_state(static_cast<int>(SmtpsState::INIT));
     session->set_next_event(static_cast<int>(SmtpsEvent::CONNECT));
 
-    // process_read → do_async_read → 从 MockConnection 读 → pipeline 循环
-    auto base = std::unique_ptr<SessionBase<MockConnection>>(session.release());
-    static_cast<SmtpsSession<MockConnection>*>(base.get())
-        ->process_read();
+    session->process_read();
     return true;
 }
 
@@ -144,7 +140,7 @@ int main(int argc, char* argv[]) {
               << "  auth_cache_preload=10\n\n";
 
     // 预热
-    deliver_one(*fsm, server, 0);
+    deliver_one(fsm, server, 0);
 
     // 单线程
     size_t warm_n = std::min<size_t>(5000, iterations);
@@ -152,7 +148,7 @@ int main(int argc, char* argv[]) {
         auto t0 = std::chrono::steady_clock::now();
         size_t ok = 0;
         for (size_t i = 0; i < warm_n; ++i) {
-            if (deliver_one(*fsm, server, static_cast<int>(i))) ++ok;
+            if (deliver_one(fsm, server, static_cast<int>(i))) ++ok;
         }
         auto t1 = std::chrono::steady_clock::now();
         double s = std::chrono::duration<double>(t1 - t0).count();
@@ -170,7 +166,7 @@ int main(int argc, char* argv[]) {
             threads.emplace_back([&, t]() {
                 size_t local = 0;
                 for (size_t i = 0; i < iterations; ++i) {
-                    if (deliver_one(*fsm, server,
+                    if (deliver_one(fsm, server,
                                     static_cast<int>(i * thread_count + t)))
                         ++local;
                 }

@@ -20,7 +20,7 @@
 using namespace mail_system;
 
 namespace {
-constexpr const char* kDefaultConfigPath = "config/smtpsConfig.json";
+constexpr const char* kDefaultConfigPath = "config/imapsConfig.json";
 
 struct CliOptions {
     std::string config_path = kDefaultConfigPath;

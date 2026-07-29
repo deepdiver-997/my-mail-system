@@ -24,7 +24,8 @@ enum class SmtpsState {
     WAIT_DATA = 8,
     IN_MESSAGE = 9,
     WAIT_QUIT = 10,
-    CLOSED = 11
+    CLOSED = 11,
+    COUNT = 12
 };
 
 // SMTPS 事件枚举
@@ -39,7 +40,8 @@ enum class SmtpsEvent {
     QUIT = 7,
     STARTTLS = 8,
     ERROR = 9,
-    TIMEOUT = 10
+    TIMEOUT = 10,
+    COUNT = 11
 };
 
 // SMTPS 上下文

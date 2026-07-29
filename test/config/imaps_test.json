@@ -1,0 +1,64 @@
+{
+  "address": "127.0.0.1",
+  "system_name": "test-imap",
+  "system_domain": "test.local",
+
+  "listeners": [
+    { "type": "tcp", "port": 1414, "auth_policy": "off" },
+    { "type": "ssl", "port": 8993, "auth_policy": "on" }
+  ],
+
+  "certFile": "../config/crt/server.crt",
+  "keyFile": "../config/crt/server.key",
+
+  "use_database": false,
+
+  "maxMessageSize": 10485760,
+  "maxConnections": 1000,
+
+  "io_thread_count": 2,
+  "worker_thread_count": 2,
+
+  "connection_timeout": 30,
+  "read_timeout": 10,
+  "write_timeout": 10,
+  "max_auth_attempts": 3,
+
+  "perf_mode": true,
+
+  "metrics_enabled": false,
+
+  "log_level": "warn",
+  "log_to_console": false,
+  "log_to_file": true,
+  "log_file": "/tmp/protorelay_test_imap.log",
+
+  "storage": {
+    "provider": "local",
+    "local": {
+      "mail_path": "/tmp/protorelay_test_mail",
+      "attachment_path": "/tmp/protorelay_test_att"
+    }
+  },
+  "persist_min_available_memory_mb": 0,
+  "inbound_ack_mode": "after_enqueue",
+
+  "inbound_auth_policy": "off",
+  "inbound_spf_mode": "off",
+  "inbound_dkim_mode": "off",
+  "inbound_dmarc_mode": "off",
+
+  "dnsbl_enabled": false,
+  "intrusion_detection_enabled": false,
+
+  "outbound": {
+    "helo_domain": "test.local",
+    "mail_from_domain": "test.local",
+    "rewrite_header_from": false,
+    "max_attempts": 1,
+    "ports": [25],
+    "dkim": {
+      "enabled": false
+    }
+  }
+}
