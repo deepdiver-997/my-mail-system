@@ -1,6 +1,7 @@
 #ifndef TRADITIONAL_IMAPS_FSM_TPP
 #define TRADITIONAL_IMAPS_FSM_TPP
 
+#include "mail_system/back/mailServer/imaps_server.h"
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -892,7 +893,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_logout(
                 return;
             }
             auto timer = std::make_shared<boost::asio::steady_timer>(
-                *s->get_server()->get_io_context());
+                *static_cast<ImapsServer*>(s->get_server())->get_io_context());
             timer->expires_after(std::chrono::milliseconds(100));
             timer->async_wait([s = std::move(s), timer](const boost::system::error_code& ec) mutable {
                 if (!ec) {
@@ -1705,7 +1706,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_starttls(
                 LOG_IMAP_ERROR("Error sending STARTTLS response: {}", ec.message());
                 return;
             }
-            auto server = self->get_server();
+            auto server = static_cast<ImapsServer*>(self->get_server());
             auto tcp_sock = self->release_connection()->release_socket();
             server->handoff_starttls_socket(std::move(tcp_sock));
         }

@@ -58,7 +58,7 @@ bool TraditionalSmtpsFsm<ConnectionType>::persist_and_reply(std::shared_ptr<Sess
     session->do_async_write(reply,
         [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) LOG_SMTP_DETAIL_ERROR("Error sending QUIT reply: {}", ec.message());
-            auto io_ctx = s->get_server()->get_io_context();
+            auto io_ctx = static_cast<SmtpsServer*>(s->get_server())->get_io_context();
             auto timer = std::make_shared<boost::asio::steady_timer>(*io_ctx);
             timer->expires_after(std::chrono::milliseconds(100));
             timer->async_wait([s, timer](const boost::system::error_code& ec) mutable {
@@ -243,7 +243,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_starttls(
         [](std::shared_ptr<SessionBase<ConnectionType>> self, const boost::system::error_code& ec) mutable {
             if (ec) { LOG_SMTP_DETAIL_ERROR("Error sending STARTTLS: {}", ec.message()); return; }
             self->set_current_state(static_cast<int>(SmtpsState::INIT));
-            auto server = self->get_server();
+            auto server = static_cast<SmtpsServer*>(self->get_server());
             auto tcp_sock = self->release_connection()->release_socket();
             server->handoff_starttls_socket(std::move(tcp_sock));
         });

@@ -1,5 +1,6 @@
 #include "mail_system/back/mailServer/server_base.h"
-#include "mail_system/back/outbound/cares_dns_resolver.h"
+#include "mail_system/back/thread_pool/io_thread_pool.h"
+#include "mail_system/back/thread_pool/boost_thread_pool.h"
 #include "mail_system/back/router/hash_shard_router.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/router/table_shard_router.h"
@@ -27,12 +28,9 @@ ServerBase::ServerBase(const ServerConfig& config,
        std::shared_ptr<DBPool> dbPool)
     : m_ioThreadPool(ioThreadPool),
       m_workerThreadPool(wokerThreadPool),
-      ssl_in_worker(false),
       m_domain(config.system_domain.empty() ? std::string("example.com") : config.system_domain),
-      m_config(std::make_shared<ServerConfig>(config)),
-      m_sslContext(boost::asio::ssl::context::sslv23),
-      has_listener_thread(false),
-      m_state(ServerState::Stopped) {
+      m_config(std::make_shared<ServerConfig>(config))
+{
     auto cfg = std::atomic_load(&m_config);
     try {
         Logger::get_instance().init(
@@ -42,7 +40,7 @@ ServerBase::ServerBase(const ServerConfig& config,
         LOG_SERVER_INFO("Logger initialized with level: {}", config.log_level);
 
         // ---- 1. 创建 DB 池 ----
-        auto main_db_pool = dbPool;  // 可能从外部注入
+        auto main_db_pool = dbPool;
         if (config.use_database && main_db_pool == nullptr) {
             if (config.db_pool_config.achieve.find("mysql") == 0) {
                 try {
@@ -59,7 +57,7 @@ ServerBase::ServerBase(const ServerConfig& config,
         }
         if (!main_db_pool) {
             main_db_pool = std::make_shared<NullDBPool>();
-            LOG_SERVER_INFO("Null database pool created (use_database=false or no DB configured)");
+            LOG_SERVER_INFO("Null database pool created");
         } else {
             LOG_SERVER_INFO("Database pool initialized successfully");
         }
@@ -111,7 +109,7 @@ ServerBase::ServerBase(const ServerConfig& config,
                 throw std::runtime_error("Storage init failed: " + err);
         }
 
-        // ---- 3. 创建 Shard Router（包装 DB 池和存储） ----
+        // ---- 3. 创建 Shard Router ----
         auto& rc = config.router_config;
         std::vector<std::shared_ptr<DBPool>> shard_db_pools;
         std::vector<std::shared_ptr<storage::IStorageProvider>> shard_storages;
@@ -179,44 +177,6 @@ ServerBase::ServerBase(const ServerConfig& config,
             m_workerThreadPool->start();
         }
 
-        // io context
-        m_ioContext = std::make_shared<boost::asio::io_context>();
-        m_resolver = std::make_shared<boost::asio::ip::tcp::resolver>(*m_ioContext);
-        m_workGuard = std::make_unique<boost::asio::executor_work_guard<
-            boost::asio::io_context::executor_type>>(m_ioContext->get_executor());
-
-        auto addr = boost::asio::ip::make_address(config.address);
-
-        // SSL context (only if any SSL listener)
-        bool has_ssl = false;
-        for (auto& l : config.listeners)
-            if (l.type == ListenerType::SSL) { has_ssl = true; break; }
-
-        if (has_ssl) {
-            m_sslContext.set_options(
-                boost::asio::ssl::context::default_workarounds |
-                boost::asio::ssl::context::no_sslv2 |
-                boost::asio::ssl::context::no_sslv3 |
-                boost::asio::ssl::context::single_dh_use);
-            load_certificates(config.certFile, config.keyFile, config.dhFile);
-        }
-
-        // create acceptors from listener configs
-        for (auto& l : config.listeners) {
-            m_listener_configs[l.port] = l;
-            auto acc = std::make_shared<boost::asio::ip::tcp::acceptor>(*m_ioContext);
-            acc->open(boost::asio::ip::tcp::v4());
-            acc->set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
-            acc->bind(boost::asio::ip::tcp::endpoint(addr, l.port));
-            acc->listen();
-            if (l.type == ListenerType::SSL)
-                m_ssl_acceptors.push_back(acc);
-            else
-                m_tcp_acceptors.push_back(acc);
-            LOG_SERVER_INFO("{} acceptor on {}:{}",
-                           listener_type_to_string(l.type), config.address, l.port);
-        }
-
         LOG_SERVER_INFO("Server initialized with {} listener(s)", config.listeners.size());
         m_state = ServerState::Paused;
     } catch (const std::exception& e) {
@@ -227,254 +187,38 @@ ServerBase::ServerBase(const ServerConfig& config,
 
 ServerBase::~ServerBase() {
     try { stop(); } catch (...) {}
-    // stop() 已 join listener 线程；若未 join 则等待（最多 3 秒）
-    if (m_listenerThread.joinable()) {
-        try { m_listenerThread.join(); } catch (...) {}
-    }
 }
 
-const ListenerConfig* ServerBase::get_listener_config(uint16_t port) const {
-    auto it = m_listener_configs.find(port);
-    return it != m_listener_configs.end() ? &it->second : nullptr;
-}
-
-void ServerBase::handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket) {
-    if (!socket) return;
-    auto ssl_stream = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(
-        std::move(*socket), get_ssl_context());
-    uint16_t port = ssl_stream->next_layer().local_endpoint().port();
-    const ListenerConfig* lc = get_listener_config(port);
-    pass_stream(std::move(ssl_stream), lc ? *lc : ListenerConfig{});
-}
-
-// ---------------------------------------------------------------------------
-// Per-acceptor SSL accept
-// ---------------------------------------------------------------------------
-void ServerBase::do_ssl_accept(
-    std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor,
-    const ListenerConfig& lc)
-{
-    if (get_state() != ServerState::Running) return;
-
-    auto sock = std::make_unique<boost::asio::ip::tcp::socket>(
-        std::static_pointer_cast<IOThreadPool>(m_ioThreadPool)->get_io_context());
-    auto ssl_sock = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(
-        std::move(*sock), get_ssl_context());
-    auto& lowest = ssl_sock->next_layer();
-
-    acceptor->async_accept(lowest, [this, acceptor, lc,
-        ssl_sock = std::move(ssl_sock)](const boost::system::error_code& ec) mutable {
-        if (!ec) {
-            auto ip = ssl_sock->next_layer().remote_endpoint().address().to_string();
-            if (is_ip_banned(ip)) {
-                increment_connections_rejected();
-                boost::system::error_code ign;
-                ssl_sock->next_layer().close(ign);
-            } else {
-                std::string reason;
-                if (should_reject_connection(reason, ip)) {
-                    increment_connections_rejected();
-                    boost::system::error_code ign;
-                    ssl_sock->next_layer().close(ign);
-                } else {
-                    increment_connections_total();
-                    handle_accept(std::move(ssl_sock), ec, lc);
-                }
-            }
-        }
-        do_ssl_accept(acceptor, lc);
-    });
-}
-
-void ServerBase::start_all_ssl_acceptors() {
-    for (auto& acc : m_ssl_acceptors) {
-        uint16_t port = acc->local_endpoint().port();
-        do_ssl_accept(acc, m_listener_configs[port]);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Per-acceptor TCP accept
-// ---------------------------------------------------------------------------
-void ServerBase::do_tcp_accept(
-    std::shared_ptr<boost::asio::ip::tcp::acceptor> acceptor,
-    const ListenerConfig& lc)
-{
-    if (get_state() != ServerState::Running) return;
-
-    auto sock = std::make_unique<boost::asio::ip::tcp::socket>(
-        std::static_pointer_cast<IOThreadPool>(m_ioThreadPool)->get_io_context());
-    auto* psock = sock.get();
-
-    acceptor->async_accept(*psock, [this, acceptor, lc,
-        sock = std::move(sock)](const boost::system::error_code& ec) mutable {
-        if (!ec) {
-            auto ip = sock->remote_endpoint().address().to_string();
-            if (is_ip_banned(ip)) {
-                LOG_NETWORK_WARN("Banned IP {} rejected at accept", ip);
-                increment_connections_rejected();
-                boost::system::error_code ign;
-                sock->close(ign);
-            } else {
-                std::string reason;
-                if (should_reject_connection(reason, ip)) {
-                    LOG_NETWORK_WARN("Rejecting TCP connection from {}: {}", ip, reason);
-                    increment_connections_rejected();
-                    boost::system::error_code ign;
-                    sock->close(ign);
-                } else {
-                    LOG_NETWORK_INFO("New TCP connection accepted from {}", ip);
-                    increment_connections_total();
-                    handle_tcp_accept(std::move(sock), ec, lc);
-                }
-            }
-        }
-        do_tcp_accept(acceptor, lc);
-    });
-}
-
-void ServerBase::start_all_tcp_acceptors() {
-    for (auto& acc : m_tcp_acceptors) {
-        uint16_t port = acc->local_endpoint().port();
-        do_tcp_accept(acc, m_listener_configs[port]);
-    }
-}
-
-// ====================================================================
-// start — 非阻塞启动所有子系统
-//  1. 恢复入侵检测器状态
-//  2. 状态切换为 Running
-//  3. 启动 metrics HTTP server
-//  4. 创建 listener 线程: 注册 async_accept → io_context::run()
-// ====================================================================
-void ServerBase::start() {
-    if (m_state.load() == ServerState::Running) return;
-
-    {
-        auto cfg = std::atomic_load(&m_config);
-        m_intrusionDetector.set_enabled(cfg->intrusion_detection_enabled);
-        m_intrusionDetector.set_max_records(static_cast<size_t>(cfg->intrusion_max_records));
-        m_intrusionDetector.set_ban_threshold(cfg->intrusion_ban_threshold);
-        m_intrusionDetector.set_persist_interval(cfg->intrusion_persist_interval_sec);
-        m_intrusionDetector.set_persist_dirty_threshold(cfg->intrusion_persist_dirty_threshold);
-    }
-    m_intrusionDetector.restore();
-
-    if (m_state.load() != ServerState::Stopped) {
-        m_state.store(ServerState::Running);
-        start_metrics_server();
-
-        try {
-            if (!has_listener_thread) {
-                m_listenerThread = std::thread([this]() {
-                    start_all_ssl_acceptors();
-                    start_all_tcp_acceptors();
-                    m_ioContext->run();
-                });
-                has_listener_thread = true;
-                // m_listenerThread.detach();
-            } else {
-                boost::asio::post(*m_ioContext, [this]() {
-                    start_all_ssl_acceptors();
-                    start_all_tcp_acceptors();
-                });
-            }
-            LOG_SERVER_INFO("Server started");
-        } catch (const std::exception& e) {
-            LOG_SERVER_ERROR("Error starting server: {}", e.what());
-            stop();
-        }
-    }
-}
-
-// ====================================================================
-// run — 阻塞当前线程直到收到停止信号
-//  信号处理器调用 request_stop() 将状态置为 Pausing 后，此函数返回。
-//  返回后外部 shared_ptr 析构 → stop() → RAII 清理所有资源。
-// ====================================================================
 void ServerBase::run() {
     while (m_state.load() == ServerState::Running || m_state.load() == ServerState::Paused)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
-// ====================================================================
-// stop — 停止服务器并释放资源 (protected, 仅从 ~ServerBase 调用)
-//
-//  停止顺序（保证资源逆序释放）:
-//   1. work_guard.reset() — 移除 io_context 保活
-//   2. acceptor->close()  — 取消所有挂起的 async_accept
-//   3. io_context->stop() — 强制 listener 线程的 run() 返回
-//   4. listenerThread.join() — 等待线程结束
-//   5. stop_metrics_server() / outbound / persistent_queue — 停业务子系统
-//   6. io_thread_pool / worker_thread_pool — 最后停线程池
-//   7. intrusion_detector.persist() — 持久化 IP 封禁记录
-//
-//  外部应使用 request_stop() + 析构，不直接调用此函数。
-// ====================================================================
-void ServerBase::stop(ServerState next_state) {
-    if (next_state == ServerState::Running) {
-        LOG_SERVER_WARN("Can't switch to running in stop()");
-        return;
-    }
+void ServerBase::stop(ServerState state) {
     auto cur = m_state.load();
     if (cur != ServerState::Running && cur != ServerState::Pausing) return;
-    try {
-        m_state.store(next_state);
+    m_state.store(state);
 
-        // 1. 释放 work guard → io_context::run() 可退出
-        m_workGuard.reset();
+    stop_metrics_server();
 
-        // 2. 停 io_context → run() 返回 → join 线程
-        if (m_ioContext && !m_ioContext->stopped()) m_ioContext->stop();
-        if (m_listenerThread.joinable()) m_listenerThread.join();
-        LOG_SERVER_INFO("Listener thread stopped");
+    if (m_ioThreadPool) m_ioThreadPool->stop();
+    if (m_workerThreadPool) m_workerThreadPool->stop();
+    LOG_SERVER_INFO("ThreadPools stopped");
 
-        // 3. 线程已退出，安全关闭 acceptor
-        boost::system::error_code ec;
-        for (auto& a : m_ssl_acceptors) a->close(ec);
-        for (auto& a : m_tcp_acceptors) a->close(ec);
-
-        stop_metrics_server();
-
-        if (m_ioThreadPool) m_ioThreadPool->stop();
-        if (m_workerThreadPool) m_workerThreadPool->stop();
-        LOG_SERVER_INFO("ThreadPools stopped");
-
-        m_intrusionDetector.persist();
-        LOG_SERVER_INFO("Server stopped");
-    } catch (const std::exception& e) {
-        LOG_SERVER_ERROR("Error stopping server: {}", e.what());
-    }
+    m_intrusionDetector.persist();
+    LOG_SERVER_INFO("Server stopped");
 }
 
 ServerState ServerBase::get_state() const { return m_state.load(); }
-std::shared_ptr<boost::asio::io_context> ServerBase::get_io_context() { return m_ioContext; }
-boost::asio::ssl::context& ServerBase::get_ssl_context() { return m_sslContext; }
-
-void ServerBase::load_certificates(const std::string& cert_file, const std::string& key_file, const std::string& dh_file) {
-    try {
-        if (!std::ifstream(cert_file.c_str()).good())
-            throw std::runtime_error("Certificate file not found: " + cert_file);
-        if (!std::ifstream(key_file.c_str()).good())
-            throw std::runtime_error("Private key file not found: " + key_file);
-        m_sslContext.use_certificate_chain_file(cert_file);
-        m_sslContext.use_private_key_file(key_file, boost::asio::ssl::context::pem);
-        if (!dh_file.empty() && std::ifstream(dh_file.c_str()).good()) {
-            m_sslContext.use_tmp_dh_file(dh_file);
-        }
-        LOG_SERVER_INFO("SSL certificates loaded successfully");
-    } catch (const std::exception& e) {
-        LOG_SERVER_ERROR("Error loading SSL certificates: {}", e.what());
-        throw;
-    }
-}
 
 void ServerBase::start_metrics_server() {
     auto cfg = std::atomic_load(&m_config);
     if (!cfg->metrics_enabled || m_metricsServer) return;
     try {
+        auto& io_ctx = std::static_pointer_cast<IOThreadPool>(m_ioThreadPool)->get_io_context();
         m_metricsServer = std::make_shared<MetricsServer>(
-            *m_ioContext, cfg->metrics_port, cfg->metrics_bind_address,
+            io_ctx,
+            cfg->metrics_port, cfg->metrics_bind_address,
             [this]() -> std::string {
                 if (m_configFilePath.empty()) return "config file path not set";
                 return reload_config(m_configFilePath) ? "OK" : "reload failed";
@@ -498,12 +242,10 @@ void ServerBase::push_metric_gauge(const std::string& name,
                                      const MetricsServer::LabelMap& labels, double v) {
     if (auto m = m_metricsServer) m->set_gauge(name, labels, v);
 }
-
 void ServerBase::push_metric_counter(const std::string& name,
                                        const MetricsServer::LabelMap& labels, uint64_t v) {
     if (auto m = m_metricsServer) m->inc_counter(name, labels, v);
 }
-
 void ServerBase::push_metric_observe(const std::string& name,
                                        const MetricsServer::LabelMap& labels, double v) {
     if (auto m = m_metricsServer) m->observe(name, labels, v);
@@ -513,22 +255,18 @@ void ServerBase::increment_connection_count() {
     active_connections_.fetch_add(1, std::memory_order_relaxed);
     push_metric_gauge("protorelay_active_connections", {}, active_connections_.load());
 }
-
 void ServerBase::decrement_connection_count() {
     active_connections_.fetch_sub(1, std::memory_order_relaxed);
     push_metric_gauge("protorelay_active_connections", {}, active_connections_.load());
 }
-
 void ServerBase::increment_connections_total() {
     auto v = connections_total_.fetch_add(1, std::memory_order_relaxed) + 1;
     push_metric_counter("protorelay_connections_total", {}, v);
 }
-
 void ServerBase::increment_connections_rejected() {
     auto v = connections_rejected_total_.fetch_add(1, std::memory_order_relaxed) + 1;
     push_metric_counter("protorelay_connections_rejected_total", {}, v);
 }
-
 void ServerBase::increment_mails_accepted() {
     auto v = mails_accepted_total_.fetch_add(1, std::memory_order_relaxed) + 1;
     push_metric_counter("protorelay_mails_accepted_total", {}, v);
@@ -536,14 +274,6 @@ void ServerBase::increment_mails_accepted() {
 
 void ServerBase::refresh_metrics() {
     if (!m_metricsServer) return;
-
-    // 监听器
-    for (auto& [port, lc] : m_listener_configs) {
-        m_metricsServer->set_gauge("protorelay_listener_info",
-            {{"port", std::to_string(port)}, {"type", listener_type_to_string(lc.type)}}, 1);
-    }
-
-    // Shard Router
     if (m_shardRouter) {
         size_t n = m_shardRouter->shard_count();
         for (size_t i = 0; i < n; ++i) {
@@ -559,7 +289,6 @@ void ServerBase::refresh_metrics() {
             m_metricsServer->set_gauge("protorelay_storage_ready", labels, st ? 1 : 0);
         }
     }
-
 }
 
 bool ServerBase::reload_config(const std::string& json_file) {
@@ -589,5 +318,9 @@ bool ServerBase::reload_config(const std::string& json_file) {
                     applied->log_level, inbound_auth_policy_to_string(applied->inbound_auth_policy));
     return true;
 }
+
+// deprecated stubs
+std::string ServerBase::build_metrics_response() const { return ""; }
+std::string ServerBase::build_status_response() const { return ""; }
 
 } // namespace mail_system
