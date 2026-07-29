@@ -69,6 +69,12 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
         m_ioThreadPool, m_workerThreadPool, m_persistentQueue, m_shardRouter);
     m_ssl_fsm = std::make_shared<TraditionalSmtpsFsm<SslConnection>>(
         m_ioThreadPool, m_workerThreadPool, m_persistentQueue, m_shardRouter);
+
+    // 新 outbound 引擎（如果外部注入了）
+    if (m_outboundServer) {
+        m_outboundServer->start();
+        LOG_SERVER_INFO("OutboundServer (new engine) started");
+    }
 }
 
 SmtpsServer::~SmtpsServer() {
@@ -76,6 +82,7 @@ SmtpsServer::~SmtpsServer() {
 }
 
 void SmtpsServer::stop(ServerState state) {
+    if (m_outboundServer) { m_outboundServer->stop(); LOG_SERVER_INFO("OutboundServer stopped"); }
     if (m_outboundClient) { m_outboundClient->stop(); LOG_SERVER_INFO("Outbound client stopped"); }
     if (m_persistentQueue) {
         m_persistentQueue->shutdown();
