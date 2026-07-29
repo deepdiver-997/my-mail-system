@@ -273,6 +273,35 @@ bool SessionBase<ConnectionType>::record_auth_failure_and_check() {
     return false;
 }
 
+// ── 5b. 错误码 ─────────────────────────────────────────────────
+template <typename ConnectionType>
+void SessionBase<ConnectionType>::set_error(SessionError e, const std::string& detail) {
+    last_error_ = e;
+    last_error_detail_ = detail;
+}
+
+template <typename ConnectionType>
+SessionError SessionBase<ConnectionType>::get_error() const {
+    return last_error_;
+}
+
+template <typename ConnectionType>
+const std::string& SessionBase<ConnectionType>::get_error_detail() const {
+    return last_error_detail_;
+}
+
+template <typename ConnectionType>
+std::string SessionBase<ConnectionType>::error_message(SessionError e) const {
+    switch (e) {
+        case SessionError::None:           return "";
+        case SessionError::AuthFailed:     return "Authentication failed";
+        case SessionError::InvalidCommand: return "Invalid command";
+        case SessionError::Timeout:        return "Connection timeout";
+        case SessionError::Internal:       return "Internal server error";
+    }
+    return "Unknown error";
+}
+
 } // namespace mail_system
 
 #endif // SESSION_BASE_TPP

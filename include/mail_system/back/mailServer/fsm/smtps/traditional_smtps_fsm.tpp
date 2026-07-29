@@ -177,6 +177,7 @@ void TraditionalSmtpsFsm<ConnectionType>::on_invalid_transition(
     SmtpsState, SmtpsEvent,
     std::shared_ptr<SessionBase<ConnectionType>> session)
 {
+    session->set_error(SessionError::InvalidCommand);
     session->do_async_write("500 Error: Invalid command sequence\r\n",
         [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) return;

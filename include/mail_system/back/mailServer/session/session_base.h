@@ -22,6 +22,19 @@ using TcpSessionBase = SessionBase<TcpConnection>;
 using SslSessionBase = SessionBase<SslConnection>;
 
 // ================================================================
+// SessionError — 会话级错误码
+//   状态机 handler 通过 session->set_error(...) 设置，便于统一日志/响应。
+//   子类可覆写 error_message() 提供协议特定的文本映射。
+// ================================================================
+enum class SessionError {
+    None,
+    AuthFailed,
+    InvalidCommand,
+    Timeout,
+    Internal,
+};
+
+// ================================================================
 // make_copyable — 将 move-only 回调包装为 copyable（供 do_handshake 使用）
 // ================================================================
 template <typename F>
@@ -82,6 +95,13 @@ public:
     // 记录一次 AUTH 失败，返回 true 表示超过上限应关闭连接
     bool record_auth_failure_and_check();
 
+    // ── 5b. 错误码 ─────────────────────────────────────────────
+    void              set_error(SessionError e, const std::string& detail = "");
+    SessionError      get_error() const;
+    const std::string& get_error_detail() const;
+    // 子类可覆写以提供协议特定的错误消息
+    virtual std::string error_message(SessionError e) const;
+
     // ── 6. 纯虚接口（协议子类实现） ─────────────────────────────
     virtual void handle_read(const std::string& data) = 0;
     virtual void process_read() = 0;
@@ -110,6 +130,8 @@ protected:
     bool closed_ = false;
     bool session_authenticated_ = false;
     int  auth_attempt_count_ = 0;
+    SessionError last_error_ = SessionError::None;
+    std::string  last_error_detail_;
     ServerBase* m_server = nullptr;
     std::chrono::steady_clock::time_point session_start_{
         std::chrono::steady_clock::now()};
