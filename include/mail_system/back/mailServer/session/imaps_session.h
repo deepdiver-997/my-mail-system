@@ -24,7 +24,7 @@ public:
     ImapsSession(
         ServerBase* server,
         std::unique_ptr<ConnectionType> connection,
-        std::shared_ptr<ImapsFsm<ConnectionType>> fsm);
+        std::shared_ptr<TraditionalImapsFsm<ConnectionType>> fsm);
 
     ~ImapsSession() {
         this->session_authenticated_ = context_.is_authenticated;
@@ -59,7 +59,7 @@ private:
     bool is_waiting_for_literal() const { return awaiting_literal_; }
     
     // 各模块指针
-    std::shared_ptr<ImapsFsm<ConnectionType>> fsm_;
+    std::shared_ptr<TraditionalImapsFsm<ConnectionType>> fsm_;
     
     // 状态
     ImapState state_;

@@ -26,7 +26,7 @@ ImapsServer::ImapsServer(const ServerConfig& config,
 
     // 创建并注入共享的 LRU 邮箱统计缓存（容量 20000，TTL 8 秒）
     auto stats_cache = std::make_shared<
-        ImapsFsm<TcpConnection>::MailboxStatsCache>(20000, std::chrono::seconds(8));
+        TraditionalImapsFsm<TcpConnection>::MailboxStatsCache>(20000, std::chrono::seconds(8));
     m_tcp_fsm->set_mailbox_stats_cache(stats_cache);
     m_ssl_fsm->set_mailbox_stats_cache(stats_cache);
 

@@ -48,7 +48,7 @@ template <typename ConnectionType>
 ImapsSession<ConnectionType>::ImapsSession(
     ServerBase* server,
     std::unique_ptr<ConnectionType> connection,
-    std::shared_ptr<ImapsFsm<ConnectionType>> fsm)
+    std::shared_ptr<TraditionalImapsFsm<ConnectionType>> fsm)
     : SessionBase<ConnectionType>(std::move(connection), server)
     , fsm_(std::move(fsm))
     , state_(ImapState::INIT)

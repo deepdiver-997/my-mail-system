@@ -652,9 +652,9 @@ void TraditionalImapsFsm<ConnectionType>::process_event(
 {
     if constexpr (ENABLE_IMAP_DETAIL_DEBUG_LOG) {
         LOG_IMAP_DETAIL_DEBUG("Current State: {}, Event: {}, Tag: {}",
-                          ImapsFsm<ConnectionType>::get_state_name(
+                          TraditionalImapsFsm<ConnectionType>::get_state_name(
                               static_cast<ImapState>(session->get_current_state())),
-                          ImapsFsm<ConnectionType>::get_event_name(event),
+                          TraditionalImapsFsm<ConnectionType>::get_event_name(event),
                           tag);
     }
 
@@ -1226,7 +1226,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     }
 
     // 获取邮箱所有邮件
-    std::vector<typename ImapsFsm<ConnectionType>::MailboxMailInfo> mails;
+    std::vector<MailboxMailInfo> mails;
     if (!this->get_mailbox_mails(ctx->selected_mailbox_id, ctx->user_id, mails) || mails.empty()) {
         send_tagged(session, tag, "OK", "FETCH completed (empty)");
         return;
@@ -1548,7 +1548,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
     bool remove = store_cmd.find('-') != std::string::npos;
 
     // Get mails
-    std::vector<typename ImapsFsm<ConnectionType>::MailboxMailInfo> mails;
+    std::vector<MailboxMailInfo> mails;
     this->get_mailbox_mails(ctx->selected_mailbox_id, ctx->user_id, mails);
     if (mails.empty()) {
         send_tagged(session, tag, "OK", "STORE completed");
@@ -1619,7 +1619,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_expunge(
     }
 
     // Get mails before expunge
-    std::vector<typename ImapsFsm<ConnectionType>::MailboxMailInfo> mails;
+    std::vector<MailboxMailInfo> mails;
     this->get_mailbox_mails(ctx->selected_mailbox_id, ctx->user_id, mails);
 
     // Find which sequences are deleted
@@ -2022,7 +2022,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
         return;
     }
 
-    std::vector<typename ImapsFsm<ConnectionType>::MailboxMailInfo> mails;
+    std::vector<MailboxMailInfo> mails;
     this->get_mailbox_mails(ctx->selected_mailbox_id, ctx->user_id, mails);
 
     // 解析搜索关键词（简单实现常用关键词）
@@ -2084,7 +2084,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
 
     // UID FETCH/STORE/COPY: 把 UID 序列号映射为 mails 数组下标+1
     if (subcmd == "FETCH" || subcmd == "STORE" || subcmd == "COPY") {
-        std::vector<typename ImapsFsm<ConnectionType>::MailboxMailInfo> mails;
+        std::vector<MailboxMailInfo> mails;
         if (!this->get_mailbox_mails(ctx->selected_mailbox_id, ctx->user_id, mails) || mails.empty()) {
             send_tagged(session, tag, "OK", subcmd + " completed (empty)");
             return;
@@ -2181,7 +2181,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
     }
 
     // 获取所有邮件，建立序号→mail_id 映射
-    std::vector<typename ImapsFsm<ConnectionType>::MailboxMailInfo> mails;
+    std::vector<MailboxMailInfo> mails;
     this->get_mailbox_mails(ctx->selected_mailbox_id, ctx->user_id, mails);
 
     std::vector<uint64_t> mail_ids;
@@ -2356,6 +2356,577 @@ bool TraditionalImapsFsm<ConnectionType>::parse_seq_set(
     if (start < 1) start = 1;
     if (end > total) end = total;
     return start <= end;
+}
+
+// ====================================================================
+// ImapsFsm 迁移方法（原 inline，现 out-of-line template）
+// ====================================================================
+
+template <typename ConnectionType>
+bool TraditionalImapsFsm<ConnectionType>::auth_user(
+    SessionBase<ConnectionType>* session,
+    const std::string& mail_address,
+    const std::string& password,
+    uint64_t& out_user_id,
+    int& out_shard)
+{
+    LOG_AUTH_INFO("IMAP AUTH attempt: mail_address=[{}]", mail_address);
+
+    if (!session) {
+        LOG_AUTH_ERROR("Session is null in auth_user");
+        return false;
+    }
+
+    int shard = 0;
+    if (m_shardRouter) {
+        int r = m_shardRouter->route(mail_address);
+        if (r >= 0) shard = r;
+    }
+    out_shard = shard;
+
+    AuthCacheEntry ce;
+    if (m_authCache->lookup(mail_address, ce)) {
+        if (ce.status != 1) return false;
+        out_shard = ce.shard;
+        out_user_id = ce.user_id;
+        if (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
+            return bcrypt_verify(password, ce.password_hash);
+        return ce.password_hash == password;
+    }
+
+    auto conn = acquire_connection(shard);
+    if (!conn.is_valid()) {
+        LOG_AUTH_ERROR("Failed to get database connection for shard {}", shard);
+        return false;
+    }
+
+    std::string sql = db::sql::build_auth_user_query();
+    auto result = conn->query(sql, {mail_address});
+    if (!result || result->get_row_count() == 0) {
+        LOG_AUTH_WARN("User not found: {}", mail_address);
+        return false;
+    }
+
+    int status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
+    if (status != 1) {
+        LOG_AUTH_WARN("User account disabled: {}", mail_address);
+        return false;
+    }
+
+    std::string stored = result->get_value(0, "password");
+    uint64_t user_id = safe_stoull(result->get_value(0, "id"));
+    m_authCache->store(mail_address, {stored, status, user_id, shard});
+
+    bool ok = false;
+    if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2') {
+        ok = bcrypt_verify(password, stored);
+    } else {
+        ok = (stored == password);
+        if (ok) {
+            LOG_AUTH_WARN("User {} still using plaintext password", mail_address);
+        }
+    }
+
+    if (ok) {
+        out_user_id = user_id;
+        conn->execute(db::sql::build_update_last_login(), {mail_address});
+    }
+    return ok;
+}
+
+template <typename ConnectionType>
+bool TraditionalImapsFsm<ConnectionType>::get_mailboxes(
+    uint64_t user_id,
+    std::vector<std::tuple<uint64_t, std::string, int>>& mailboxes)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        LOG_DATABASE_ERROR("Failed to get DB connection in get_mailboxes");
+        return false;
+    }
+
+    auto result = conn->query(
+        db::sql::build_imap_list_mailboxes(),
+        {std::to_string(user_id)});
+    if (!result) {
+        return false;
+    }
+
+    for (size_t i = 0; i < result->get_row_count(); ++i) {
+        uint64_t id = safe_stoull(result->get_value(i, "id"));
+        std::string name = result->get_value(i, "name");
+        int box_type = static_cast<int>(safe_stoull(result->get_value(i, "box_type")));
+        mailboxes.emplace_back(id, name, box_type);
+    }
+    return true;
+}
+
+template <typename ConnectionType>
+uint64_t TraditionalImapsFsm<ConnectionType>::find_mailbox_id(
+    uint64_t user_id, const std::string& mailbox_name)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return 0;
+    }
+
+    std::string name_utf8 = mailbox_name;
+    if (mailbox_name.find('&') != std::string::npos) {
+        std::string decoded = decode_imap_utf7(mailbox_name);
+        if (!decoded.empty()) name_utf8 = decoded;
+    }
+
+    auto result = conn->query(
+        db::sql::build_imap_get_mailbox_by_name(),
+        {std::to_string(user_id), name_utf8});
+    if (result && result->get_row_count() > 0) {
+        return safe_stoull(result->get_value(0, "id"));
+    }
+
+    std::string upper = name_utf8;
+    std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+    if (upper == "INBOX") {
+        result = conn->query(
+            db::sql::build_imap_get_inbox_id(),
+            {std::to_string(user_id)});
+        if (result && result->get_row_count() > 0) {
+            return safe_stoull(result->get_value(0, "id"));
+        }
+    }
+
+    return 0;
+}
+
+template <typename ConnectionType>
+bool TraditionalImapsFsm<ConnectionType>::get_mailbox_mails(
+    uint64_t mailbox_id, uint64_t user_id,
+    std::vector<MailboxMailInfo>& mails)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return false;
+    }
+
+    std::string sql = db::sql::build_imap_get_mailbox_mails();
+
+    auto result = conn->query(sql, {
+        std::to_string(mailbox_id),
+        std::to_string(user_id)
+    });
+
+    if (!result) {
+        return false;
+    }
+
+    for (size_t i = 0; i < result->get_row_count(); ++i) {
+        MailboxMailInfo info;
+        info.mail_id = safe_stoull(result->get_value(i, "id"));
+        info.sender = result->get_value(i, "sender");
+        info.recipient = result->get_value(i, "recipient");
+        info.subject = result->get_value(i, "subject");
+        info.body_path = result->get_value(i, "body_path");
+        info.is_starred = result->get_value(i, "is_starred") == "1";
+        info.is_deleted = result->get_value(i, "is_deleted") == "1";
+        info.is_important = result->get_value(i, "is_important") == "1";
+        info.status = result->get_value(i, "status").empty() ? 0 : static_cast<int>(safe_stoull(result->get_value(i, "status")));
+        info.send_time = static_cast<time_t>(safe_stoull(result->get_value(i, "send_time")));
+        mails.push_back(std::move(info));
+    }
+    return true;
+}
+
+template <typename ConnectionType>
+bool TraditionalImapsFsm<ConnectionType>::get_mail_info(
+    uint64_t mail_id, MailboxMailInfo& info)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return false;
+    }
+
+    auto result = conn->query(
+        "SELECT id, subject, body_path, UNIX_TIMESTAMP(send_time) AS send_time FROM mails WHERE id = ?",
+        {std::to_string(mail_id)});
+
+    if (!result || result->get_row_count() == 0) {
+        return false;
+    }
+
+    info.mail_id = safe_stoull(result->get_value(0, "id"));
+    info.subject = result->get_value(0, "subject");
+    info.body_path = result->get_value(0, "body_path");
+    info.send_time = static_cast<time_t>(safe_stoull(result->get_value(0, "send_time")));
+    return true;
+}
+
+template <typename ConnectionType>
+std::string TraditionalImapsFsm<ConnectionType>::get_mail_sender(uint64_t mail_id)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return "";
+    }
+    auto result = conn->query(
+        "SELECT sender FROM mail_recipients WHERE mail_id = ? LIMIT 1",
+        {std::to_string(mail_id)});
+    if (result && result->get_row_count() > 0) {
+        return result->get_value(0, "sender");
+    }
+    return "";
+}
+
+template <typename ConnectionType>
+std::vector<std::string> TraditionalImapsFsm<ConnectionType>::get_mail_recipients(uint64_t mail_id)
+{
+    std::vector<std::string> recipients;
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return recipients;
+    }
+    auto result = conn->query(
+        "SELECT recipient FROM mail_recipients WHERE mail_id = ?",
+        {std::to_string(mail_id)});
+    if (result) {
+        for (size_t i = 0; i < result->get_row_count(); ++i) {
+            recipients.push_back(result->get_value(i, "recipient"));
+        }
+    }
+    return recipients;
+}
+
+template <typename ConnectionType>
+std::string TraditionalImapsFsm<ConnectionType>::get_user_email(uint64_t user_id)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return "";
+    }
+    auto result = conn->query(
+        "SELECT mail_address FROM users WHERE id = ?",
+        {std::to_string(user_id)});
+    if (result && result->get_row_count() > 0) {
+        return result->get_value(0, "mail_address");
+    }
+    return "";
+}
+
+template <typename ConnectionType>
+bool TraditionalImapsFsm<ConnectionType>::update_mail_seen(
+    uint64_t mail_id, const std::string& recipient, bool seen)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return false;
+    }
+    int new_status = seen ? 0 : 1;
+    return conn->execute(
+        "UPDATE mail_recipients SET status = ? WHERE mail_id = ? AND recipient = ?",
+        {std::to_string(new_status), std::to_string(mail_id), recipient});
+}
+
+template <typename ConnectionType>
+bool TraditionalImapsFsm<ConnectionType>::update_mail_deleted(
+    uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id, bool deleted)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return false;
+    }
+    return conn->execute(
+        db::sql::build_imap_update_mail_flag_deleted(),
+        {deleted ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
+}
+
+template <typename ConnectionType>
+bool TraditionalImapsFsm<ConnectionType>::update_mail_flagged(
+    uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id, bool flagged)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return false;
+    }
+    return conn->execute(
+        db::sql::build_imap_update_mail_flag_starred(),
+        {flagged ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
+}
+
+template <typename ConnectionType>
+uint64_t TraditionalImapsFsm<ConnectionType>::create_mail(
+    const std::string& subject, const std::string& body_content,
+    std::string& out_body_path, std::string& error)
+{
+    int64_t mail_id = algorithm::get_snowflake_generator().next_id();
+    out_body_path.clear();
+
+    std::string storage_key = get_storage(0)
+        ? get_storage(0)->build_mail_body_key(static_cast<uint64_t>(mail_id))
+        : "";
+    if (!storage_key.empty()) {
+        std::string err;
+        if (!get_storage(0)->append_binary(storage_key, body_content.data(),
+                                              body_content.size(), err)) {
+            error = "Storage error: " + err;
+            return 0;
+        }
+        out_body_path = storage_key;
+    } else {
+        std::string base = "mail/";
+        std::string fp = base + std::to_string(mail_id);
+        std::ofstream out(fp, std::ios::binary);
+        if (!out) { error = "Cannot write " + fp; return 0; }
+        out.write(body_content.data(), static_cast<std::streamsize>(body_content.size()));
+        if (!out) { error = "Write failed " + fp; return 0; }
+        out_body_path = fp;
+    }
+
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) { error = "DB connection failed"; return 0; }
+    auto ts = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    if (!conn->execute(
+            "INSERT INTO mails (id, subject, body_path, send_time) VALUES (?, ?, ?, ?)",
+            {std::to_string(mail_id),
+             subject.empty() ? "(无主题)" : subject,
+             out_body_path, std::to_string(ts)})) {
+        error = "Insert mail record failed";
+        return 0;
+    }
+    return static_cast<uint64_t>(mail_id);
+}
+
+template <typename ConnectionType>
+bool TraditionalImapsFsm<ConnectionType>::link_mail_to_mailbox(
+    uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id,
+    const std::string& sender, const std::string& recipient,
+    int status)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) return false;
+
+    int64_t rid = algorithm::get_snowflake_generator().next_id();
+    bool ok = conn->execute(
+        "INSERT INTO mail_recipients (id, mail_id, sender, recipient, status) "
+        "VALUES (?, ?, ?, ?, ?)",
+        {std::to_string(rid), std::to_string(mail_id),
+         sender, recipient, std::to_string(status)});
+    if (!ok) return false;
+
+    return conn->execute(
+        "INSERT INTO mail_mailbox (id, mail_id, mailbox_id, user_id, is_starred, "
+        "is_important, is_deleted, add_time) VALUES (?, ?, ?, ?, 0, 0, 0, NOW())",
+        {std::to_string(algorithm::get_snowflake_generator().next_id()),
+         std::to_string(mail_id), std::to_string(mailbox_id),
+         std::to_string(user_id)});
+}
+
+// IMAP-UTF-7 解码（RFC 3501 §5.1.3）
+template <typename ConnectionType>
+std::string TraditionalImapsFsm<ConnectionType>::decode_imap_utf7(const std::string& imap7)
+{
+    static const int rev[128] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,63,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+    };
+
+    std::string result;
+    size_t i = 0;
+    while (i < imap7.size()) {
+        char c = imap7[i];
+        if (c == '&') {
+            if (i + 1 < imap7.size() && imap7[i + 1] == '-') {
+                result += '&';
+                i += 2;
+            } else {
+                size_t end = imap7.find('-', i + 1);
+                if (end == std::string::npos) { result += c; i++; continue; }
+                std::string b64 = imap7.substr(i + 1, end - i - 1);
+                i = end + 1;
+
+                std::vector<uint8_t> bytes;
+                uint32_t acc = 0;
+                int bits = 0;
+                for (char bc : b64) {
+                    if (bc < 0 || bc >= 128) continue;
+                    int v = rev[static_cast<int>(bc)];
+                    if (v < 0) continue;
+                    acc = (acc << 6) | static_cast<uint32_t>(v);
+                    bits += 6;
+                    if (bits >= 8) {
+                        bits -= 8;
+                        bytes.push_back(static_cast<uint8_t>((acc >> bits) & 0xFF));
+                    }
+                }
+
+                for (size_t j = 0; j + 1 < bytes.size(); j += 2) {
+                    uint16_t unit = (static_cast<uint16_t>(bytes[j]) << 8) | bytes[j + 1];
+                    if (unit >= 0xD800 && unit <= 0xDBFF && j + 3 < bytes.size()) {
+                        uint16_t low = (static_cast<uint16_t>(bytes[j + 2]) << 8) | bytes[j + 3];
+                        uint32_t cp = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
+                        result += static_cast<char>(0xF0 | ((cp >> 18) & 0x07));
+                        result += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+                        result += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                        result += static_cast<char>(0x80 | (cp & 0x3F));
+                        j += 2;
+                    } else if (unit >= 0xD800 && unit <= 0xDFFF) {
+                        continue;
+                    } else if (unit < 0x80) {
+                        result += static_cast<char>(unit);
+                    } else if (unit < 0x800) {
+                        result += static_cast<char>(0xC0 | ((unit >> 6) & 0x1F));
+                        result += static_cast<char>(0x80 | (unit & 0x3F));
+                    } else {
+                        result += static_cast<char>(0xE0 | ((unit >> 12) & 0x0F));
+                        result += static_cast<char>(0x80 | ((unit >> 6) & 0x3F));
+                        result += static_cast<char>(0x80 | (unit & 0x3F));
+                    }
+                }
+            }
+        } else {
+            result += c;
+            i++;
+        }
+    }
+    return result;
+}
+
+template <typename ConnectionType>
+std::string TraditionalImapsFsm<ConnectionType>::read_mail_body(const std::string& body_path)
+{
+    if (body_path.empty()) {
+        return "";
+    }
+
+    std::ifstream in(body_path, std::ios::binary);
+    if (!in.is_open()) {
+        LOG_FILE_IO_ERROR("Failed to open mail body: {}", body_path);
+        return "";
+    }
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    return content;
+}
+
+template <typename ConnectionType>
+MailboxCacheEntry TraditionalImapsFsm<ConnectionType>::get_mailbox_stats_cached(
+    uint64_t user_id, uint64_t mailbox_id,
+    bool& from_cache_out, bool& stale_out)
+{
+    from_cache_out = false;
+    stale_out = false;
+
+    if (m_mailboxStatsCache) {
+        std::string key = mbox_cache_key(user_id, mailbox_id);
+        MailboxCacheEntry cached;
+        if (m_mailboxStatsCache->get(key, cached, stale_out)) {
+            from_cache_out = true;
+            if (!stale_out) {
+                return cached;
+            }
+        }
+    }
+
+    MailboxCacheEntry entry;
+    entry.exists = get_mailbox_count(mailbox_id, user_id);
+    entry.unseen = get_mailbox_unseen_count(mailbox_id, user_id);
+    entry.uidnext = get_mailbox_uidnext(mailbox_id, user_id);
+    entry.uidvalidity = mailbox_id;
+
+    if (m_mailboxStatsCache) {
+        m_mailboxStatsCache->put(mbox_cache_key(user_id, mailbox_id), entry);
+    }
+
+    return entry;
+}
+
+template <typename ConnectionType>
+size_t TraditionalImapsFsm<ConnectionType>::get_mailbox_count(
+    uint64_t mailbox_id, uint64_t user_id)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return 0;
+    }
+    auto result = conn->query(
+        db::sql::build_imap_select_status_total(),
+        {std::to_string(mailbox_id), std::to_string(user_id)});
+    if (result && result->get_row_count() > 0) {
+        return static_cast<size_t>(safe_stoull(result->get_value(0, "cnt")));
+    }
+    return 0;
+}
+
+template <typename ConnectionType>
+size_t TraditionalImapsFsm<ConnectionType>::get_mailbox_unseen_count(
+    uint64_t mailbox_id, uint64_t user_id)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return 0;
+    }
+    auto result = conn->query(
+        db::sql::build_imap_mailbox_unseen_count(),
+        {std::to_string(user_id), std::to_string(mailbox_id), std::to_string(user_id)});
+    if (result && result->get_row_count() > 0) {
+        return static_cast<size_t>(safe_stoull(result->get_value(0, "cnt")));
+    }
+    return 0;
+}
+
+template <typename ConnectionType>
+uint64_t TraditionalImapsFsm<ConnectionType>::get_mailbox_uidnext(
+    uint64_t mailbox_id, uint64_t user_id)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return 1;
+    }
+    auto result = conn->query(
+        db::sql::build_imap_mailbox_uidnext(),
+        {std::to_string(mailbox_id), std::to_string(user_id)});
+    if (result && result->get_row_count() > 0) {
+        return safe_stoull(result->get_value(0, "uidnext"));
+    }
+    return 1;
+}
+
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::expunge_mailbox(
+    uint64_t mailbox_id, uint64_t user_id)
+{
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return;
+    }
+    conn->execute(
+        db::sql::build_imap_expunge_delete_mailbox(),
+        {std::to_string(mailbox_id), std::to_string(user_id)});
+}
+
+template <typename ConnectionType>
+std::vector<uint64_t> TraditionalImapsFsm<ConnectionType>::get_expunged_ids(
+    uint64_t mailbox_id, uint64_t user_id)
+{
+    std::vector<uint64_t> ids;
+    auto conn = acquire_connection(0);
+    if (!conn.is_valid()) {
+        return ids;
+    }
+    auto result = conn->query(
+        db::sql::build_imap_expunge_select_ids(),
+        {std::to_string(mailbox_id), std::to_string(user_id)});
+    if (result) {
+        for (size_t i = 0; i < result->get_row_count(); ++i) {
+            ids.push_back(safe_stoull(result->get_value(i, "mail_id")));
+        }
+    }
+    return ids;
 }
 
 } // namespace mail_system

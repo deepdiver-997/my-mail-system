@@ -17,8 +17,8 @@ public:
          std::shared_ptr<DBPool> dbPool = nullptr);
     virtual ~ImapsServer() override;
 
-    std::shared_ptr<ImapsFsm<TcpConnection>> get_tcp_fsm() const { return m_tcp_fsm; }
-    std::shared_ptr<ImapsFsm<SslConnection>> get_ssl_fsm() const { return m_ssl_fsm; }
+    std::shared_ptr<TraditionalImapsFsm<TcpConnection>> get_tcp_fsm() const { return m_tcp_fsm; }
+    std::shared_ptr<TraditionalImapsFsm<SslConnection>> get_ssl_fsm() const { return m_ssl_fsm; }
 
 protected:
     // 处理新连接
@@ -33,8 +33,8 @@ protected:
     // STARTTLS: 从 TCP 升级到 TLS，不重启协议
     void handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket) override;
 
-    std::shared_ptr<ImapsFsm<TcpConnection>> m_tcp_fsm;
-    std::shared_ptr<ImapsFsm<SslConnection>> m_ssl_fsm;
+    std::shared_ptr<TraditionalImapsFsm<TcpConnection>> m_tcp_fsm;
+    std::shared_ptr<TraditionalImapsFsm<SslConnection>> m_ssl_fsm;
 };
 
 } // namespace mail_system
