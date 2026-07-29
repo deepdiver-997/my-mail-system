@@ -29,6 +29,7 @@ class OutboundServer {
 public:
     static constexpr int DEFAULT_MAX_SESSIONS_PER_MX = 4;
     static constexpr int DEFAULT_IDLE_TIMEOUT_SEC = 120;
+    static constexpr int DEFAULT_MAX_MX_ENTRIES = 256;
     static constexpr int DEFAULT_BATCH_SIZE = 32;
     static constexpr int64_t LOW_WATERMARK = 16;
 

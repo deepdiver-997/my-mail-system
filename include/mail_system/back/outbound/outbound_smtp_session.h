@@ -25,6 +25,12 @@ class OutboundSmtpFsm : public FsmBase<ConnectionType, OutboundSmtpState, Outbou
 public:
     OutboundSmtpFsm() { init_transition_table(); }
 
+    // 事件入口：session 调用此方法驱动状态机
+    void process_event(std::shared_ptr<SessionBase<ConnectionType>> session, OutboundSmtpEvent event) {
+        // 从 session 推断当前状态（简化：outbound FSM 外部跟踪状态）
+        this->dispatch(session, OutboundSmtpState::CONNECTED, event);
+    }
+
 private:
     void init_transition_table() {
         using S = OutboundSmtpState;
@@ -206,7 +212,7 @@ private:
         auto& io_ctx = static_cast<IOThreadPool*>(this->m_server->m_ioThreadPool.get())->get_io_context();
         auto resolver = std::make_shared<boost::asio::ip::tcp::resolver>(io_ctx);
 
-        auto self = this->shared_from_this();
+        auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
         resolver->async_resolve(mx_host_, std::to_string(mx_port_),
             [self, resolver](const boost::system::error_code& ec,
                              boost::asio::ip::tcp::resolver::results_type endpoints) mutable {
@@ -232,7 +238,6 @@ private:
                         self->connection_ = std::make_unique<TcpConnection>(std::move(sock));
                         self->mails_sent_on_conn_ = 0;
                         self->fsm_->process_event(self, OutboundSmtpEvent::CONNECTED);
-                        // 开始读 220 问候
                         self->do_async_read();
                     });
             });
@@ -262,7 +267,7 @@ private:
         current_task_ = std::move(task);
         mails_sent_on_conn_++;
 
-        auto self = this->shared_from_this();
+        auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
         this->do_async_write("MAIL FROM:<" + current_task_->sender + ">\r\n",
             [self](auto, const boost::system::error_code&) mutable {
                 self->do_async_read();
@@ -271,7 +276,7 @@ private:
 
     void do_graceful_quit() {
         if (!is_connected()) return;
-        auto self = this->shared_from_this();
+        auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
         this->do_async_write("QUIT\r\n",
             [self](auto, const boost::system::error_code&) mutable {
                 self->fsm_->process_event(self, OutboundSmtpEvent::QUIT_221);

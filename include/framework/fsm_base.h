@@ -16,19 +16,25 @@ public:
 
     virtual ~FsmBase() = default;
 
-protected:
-    using TransitionTable = std::map<std::pair<State, Event>, State>;
-    using HandlerMap      = std::map<State, std::map<Event, Handler>>;
-
-    TransitionTable transition_table_;
-    HandlerMap      state_handlers_;
-
     void add_transition(State from, Event on, State to) {
         transition_table_[{from, on}] = to;
     }
     void add_handler(State s, Event e, Handler h) {
         state_handlers_[s][e] = std::move(h);
     }
+
+    // 事件入口：子类也可以直接定义自己的 process_event
+    void process_event(std::shared_ptr<SessionBase<ConnectionType>> session, Event event) {
+        // 子类应覆写 get_current_state_for_dispatch()
+        // 此处为默认空实现
+    }
+
+protected:
+    using TransitionTable = std::map<std::pair<State, Event>, State>;
+    using HandlerMap      = std::map<State, std::map<Event, Handler>>;
+
+    TransitionTable transition_table_;
+    HandlerMap      state_handlers_;
 
     bool dispatch(std::shared_ptr<SessionBase<ConnectionType>> session,
                   State current_state, Event event)
