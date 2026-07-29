@@ -42,7 +42,7 @@ cmake -DENABLE_DEBUG_LOGS=ON -B build
 
 ### 全局日志级别
 
-在 `smtps_test.cpp` 的 `main()` 函数中初始化日志系统：
+在 `test/server/smtps_test.cpp` 的 `main()` 函数中初始化日志系统：
 
 ```cpp
 Logger::get_instance().init(
@@ -183,7 +183,7 @@ cmake -DENABLE_DEBUG_LOGS=ON -B build
 make
 
 # 运行服务器
-./test/smtpsServer
+./build/smtpsServer
 
 # 查看日志
 tail -f logs/mail_system.log | grep DB_QUERY
@@ -197,7 +197,7 @@ cmake -B build
 make
 
 # 运行服务器
-./test/smtpsServer
+./build/smtpsServer
 
 # 只查看错误日志
 tail -f logs/mail_system.log | grep -E "(error|critical)"

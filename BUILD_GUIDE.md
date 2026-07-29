@@ -126,11 +126,15 @@ Release 模式使用 `-march=native` 为当前 CPU 架构生成优化代码，�
 ```
 mail-system/v8/
 ├── build/
-│   ├── CMakeFiles/
-│   ├── build/          # 中间产物 (object files, etc.)
+│   ├── CMakeFiles/     # 中间产物 (object files, etc.)
+│   ├── smtpsServer     # SMTP 服务器可执行文件
+│   ├── imapsServer     # IMAP 服务器可执行文件
 │   └── ...
 ├── test/
-│   └── smtpsServer     # 最终可执行文件
+│   ├── unit/           # C++ 单元测试
+│   ├── bench/          # 性能基准
+│   ├── e2e/            # Python 端到端测试
+│   └── server/         # 服务器入口 main()
 ├── CMakeLists.txt
 └── build.sh
 ```
@@ -168,8 +172,8 @@ make -j$(nproc)
 ./build/smtpsServer -c config/smtpsConfig.json
 
 # 另一个终端：Python 冒烟测试
-cd test
-uv run cl.py --mode mta-relay --messages 10 --concurrency 2 --verbose
+cd test/scripts
+python3 cl.py --mode mta-relay --messages 10 --concurrency 2 --verbose
 ```
 
 ### 性能压测（C++ smtp_client，推荐）
@@ -177,7 +181,7 @@ uv run cl.py --mode mta-relay --messages 10 --concurrency 2 --verbose
 # 启动服务器
 ./build/smtpsServer -c config/smtpsConfig.json
 
-# 全矩阵压测（详见 test/bench-report.md）
+# 全矩阵压测（详见 test/bench/bench-report.md）
 ./build/smtp_client --pipe --reuse --t 32 --msgs 50000   # 最大吞吐
 ./build/smtp_client --seq --reuse --t 16 --msgs 5000     # MTA 中继模拟
 ./build/smtp_client --pipe --t 4 --msgs 5000             # pipeline per-conn

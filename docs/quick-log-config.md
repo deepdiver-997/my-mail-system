@@ -6,7 +6,7 @@
 
 ```bash
 # 默认构建（生产环境推荐）
-cmake -B build && make -j4
+cmake -B build && cmake --build build -j4
 
 # 调试构建（开发环境）
 cmake -DENABLE_DEBUG_LOGS=ON -B build && make -j4
@@ -14,7 +14,7 @@ cmake -DENABLE_DEBUG_LOGS=ON -B build && make -j4
 
 ### 2. 运行配置
 
-日志系统在 `test/smtps_test.cpp` 中自动初始化：
+日志系统在 `test/server/smtps_test.cpp` 中自动初始化：
 
 ```cpp
 Logger::get_instance().init(
@@ -76,7 +76,7 @@ grep -c "error" logs/mail_system.log
 #define ENABLE_DATABASE_DEBUG_LOG 1
 
 # 重新编译
-cmake -B build && make -j4
+cmake -B build && cmake --build build -j4
 
 # 运行
 ./build/smtpsServer
@@ -89,7 +89,7 @@ tail -f logs/mail_system.log | grep DATABASE
 
 ```bash
 # 正常编译（调试日志全部关闭）
-cmake -B build && make -j4
+cmake -B build && cmake --build build -j4
 
 # 运行
 ./build/smtpsServer
@@ -107,7 +107,7 @@ tail -f logs/mail_system.log | grep -E "(error|critical)"
 #define ENABLE_SMTP_DEBUG_LOG 0
 
 # 重新编译并运行
-cmake -B build && make -j4
+cmake -B build && cmake --build build -j4
 ./build/smtpsServer
 
 # 查看 SQL 执行日志
@@ -135,7 +135,7 @@ tail -f logs/mail_system.log | grep DB_QUERY
 ### 8. 日志文件位置
 
 - **默认**：`logs/mail_system.log`（相对于项目根目录）
-- **修改**：编辑 `test/smtps_test.cpp` 中的 `init()` 调用
+- **修改**：编辑 `test/server/smtps_test.cpp` 中的 `init()` 调用
 - **文件大小**：默认 5MB，修改 `init()` 的第二个参数
 - **文件数量**：默认 3 个，修改 `init()` 的第三个参数
 

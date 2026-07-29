@@ -2,6 +2,34 @@
 
 ProtoRelay is a C++20 mail relay core focused on SMTP protocol execution and delivery pipeline foundations.
 
+## Framework / Application Separation
+
+The codebase is structured as a reusable framework + application:
+
+```
+include/framework/          # 可复用框架（与邮件协议无关）
+├── server_base.h           #   服务器生命周期、配置、DB/存储/分片初始化
+├── tcp_server_base.h       #   TCP/SSL 多协议监听器模板
+├── session_base.h          #   异步读写 + FSM 集成 + 超时管理
+├── fsm_base.h              #   通用状态机 (std::map dispatch)
+├── fast_fsm_base.h         #   编译期数组 O(1) dispatch 变体
+├── connection/             #   IConnection 抽象 + TCP/SSL 实现
+├── thread_pool/            #   IO + Worker 线程池
+├── metrics_server.h        #   嵌入式 Prometheus 指标
+└── intrusion_detector.h    #   基于 IP 的失败尝试跟踪与封禁
+
+include/mail_system/back/   # 邮件系统（框架的成熟应用）
+├── mailServer/             #   SMTP/IMAP 协议服务器 + FSM 状态机
+├── db/                     #   数据库抽象层 (IDBConnection/DBPool)
+├── storage/                #   存储提供者 (local/s3/hdfs/null)
+├── outbound/               #   出站投递引擎 (MX路由/DNS/DKIM)
+├── persist_storage/        #   持久化队列 + Bloom 去重
+├── inbound/                #   SPF/DKIM/DMARC 入站验证
+└── ...
+```
+
+邮件系统目前是框架上最成熟的应用。框架组件可在其他协议服务中复用。
+
 ## Current Implemented Scope
 
 At this stage, ProtoRelay intentionally focuses on core SMTP capabilities:
@@ -70,16 +98,16 @@ Operational note:
 
 - `after_enqueue` improves throughput and tail latency, but `250 OK` no longer guarantees durable persistence.
 - `after_persist` is safer for durability, but throughput is bounded by persistence completion latency.
-- **Full benchmark matrix (C++ `smtp_client`)**: see `test/bench-report.md`
-  - pipe+reuse (null storage + null DB): **72303 msg/s** @ 32 threads — **纯 FSM 上限**
-  - pipe+reuse (real disk + MySQL): **12502 msg/s** @ 32 threads
-  - seq+reuse (traditional MTA): **11147 msg/s** @ 16 threads
-  - port 587 TLS+AUTH: ~349 msg/s (TLS dominates)
-  - localhost per-conn limited by ephemeral port pool (~16384); see bench-report
+- **Full benchmark matrix (C++ `smtp_client`)**: see `test/bench/bench-report.md`
+  - seq+reuse (local file storage, no DB): **18,278 msg/s** @ 8 threads
+  - pipe+reuse (null storage + null DB): **72,303 msg/s** @ 32 threads — 纯 FSM+TCP 上限
+  - pipe+reuse (real disk + MySQL, refactor前): **12,502 msg/s** @ 32 threads
+  - FSM mock (零 I/O, refactor后): **15,913 msg/s** @ 4 threads (旧: 4,127)
+  - localhost per-conn limited by ephemeral port pool (~16384); `--local-ips` 绕过
 - M2 Pro (12-core) macOS single-machine figures, not a production SLA
 - **72303 msg/s 不含任何磁盘/数据库开销**（null storage + null DB），仅 FSM + TCP loopback
 - Use `"storage": {"provider": "null"}` + `"use_database": false` for ceiling benchmarks
-- C++ `smtp_client` is the primary bench tool; Python `cl.py` for TLS/AUTH smoke tests
+- C++ `smtp_client` is the primary bench tool; `test/scripts/cl.py` for TLS/AUTH smoke tests
 
 ### Performance Tuning Notes
 

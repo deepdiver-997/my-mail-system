@@ -30,7 +30,7 @@ Current implementation status:
 ```text
 +--------------------------------------------------------------+
 | Application Entry                                             |
-| test/smtps_test.cpp → build/smtpsServer                       |
+| test/server/smtps_test.cpp → build/smtpsServer                |
 +-------------------------------+------------------------------+
                                 |
 +-------------------------------v------------------------------+
@@ -401,7 +401,7 @@ Failure policy:
 - Invalid critical config causes immediate startup failure.
 - Feature mismatch (for example, `hdfs_web` with build-time OFF) fails early and explicitly.
 
-Local benchmark note (see `test/bench-report.md` for full matrix):
+Local benchmark note (see `test/bench/bench-report.md` for full matrix):
 
 - C++ `smtp_client` null storage + null DB: **72303 msg/s** — **纯 FSM 上限**（零磁盘/DB 开销）
 - Real disk (local) + MySQL: **12502 msg/s** — FSM + 磁盘写 + DB 事务
@@ -468,7 +468,7 @@ Expected extension directions:
 ## 11. Related Docs
 
 - `README.md` / `README_zh.md`
-- `test/bench-report.md`
+- `test/bench/bench-report.md`
 - `docs/framework-refactor.md` — framework extraction history (2026-07)
 - `docs/sharding-refactor.md`
 - `docs/smtp-outbound-client-design.md`

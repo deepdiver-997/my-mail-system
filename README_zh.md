@@ -2,6 +2,34 @@
 
 ProtoRelay 是一个基于 C++20 的邮件中继核心，当前聚焦在 SMTP 协议执行与投递链路基础能力。
 
+## 框架 / 应用分离
+
+代码库按可复用框架 + 应用分层组织：
+
+```
+include/framework/          # 可复用框架（与邮件协议无关）
+├── server_base.h           #   服务器生命周期、配置、DB/存储/分片初始化
+├── tcp_server_base.h       #   TCP/SSL 多协议监听器模板
+├── session_base.h          #   异步读写 + FSM 集成 + 超时管理
+├── fsm_base.h              #   通用状态机 (std::map dispatch)
+├── fast_fsm_base.h         #   编译期数组 O(1) dispatch 变体
+├── connection/             #   IConnection 抽象 + TCP/SSL 实现
+├── thread_pool/            #   IO + Worker 线程池
+├── metrics_server.h        #   嵌入式 Prometheus 指标
+└── intrusion_detector.h    #   基于 IP 的失败尝试跟踪与封禁
+
+include/mail_system/back/   # 邮件系统（框架的成熟应用）
+├── mailServer/             #   SMTP/IMAP 协议服务器 + FSM 状态机
+├── db/                     #   数据库抽象层 (IDBConnection/DBPool)
+├── storage/                #   存储提供者 (local/s3/hdfs/null)
+├── outbound/               #   出站投递引擎 (MX路由/DNS/DKIM)
+├── persist_storage/        #   持久化队列 + Bloom 去重
+├── inbound/                #   SPF/DKIM/DMARC 入站验证
+└── ...
+```
+
+邮件系统目前是框架上最成熟的应用。框架组件可在其他协议服务中复用。
+
 ## 当前已实现范围
 
 目前项目有意保持边界清晰，重点完成 SMTP 核心三件事：
@@ -70,16 +98,16 @@ ProtoRelay 按模块抽象构建，而不是把逻辑耦合在单体里：
 
 - `after_enqueue` 更适合追求吞吐和低尾延迟的场景，但 `250 OK` 不再等价于“已经可靠持久化”
 - `after_persist` 更保守，适合优先保证持久化语义的场景，但吞吐会受到持久化完成时延影响
-- **全矩阵压测（C++ `smtp_client`）**：详见 `test/bench-report.md`
-  - pipe+reuse（null storage + null DB）：**72303 msg/s** @ 32 线程 — **纯 FSM 上限**
-  - pipe+reuse（真实磁盘 + MySQL）：**12502 msg/s** @ 32 线程
-  - seq+reuse（传统 MTA 中继）：**11147 msg/s** @ 16 线程
-  - port 587 TLS+AUTH：约 349 msg/s（TLS 主导）
-  - localhost per-conn 受临时端口池限制（~16384 个），详见 bench-report
+- **全矩阵压测（C++ `smtp_client`）**：详见 `test/bench/bench-report.md`
+  - seq+reuse（local file storage, 无 DB）：**18,278 msg/s** @ 8 线程
+  - pipe+reuse（null storage + null DB）：**72,303 msg/s** @ 32 线程 — 纯 FSM+TCP 上限
+  - pipe+reuse（真实磁盘 + MySQL, 重构前）：**12,502 msg/s** @ 32 线程
+  - FSM mock（零 I/O, 重构后）：**15,913 msg/s** @ 4 线程 (旧: 4,127)
+  - localhost per-conn 受临时端口池限制（~16384 个）；`--local-ips` 可绕过
 - M2 Pro (12 核) macOS 单机测试结果，不等同于生产 SLA
 - **72303 msg/s 不含磁盘/数据库开销**（null storage + null DB），仅 FSM + TCP loopback
 - 压测天花板配置：`"storage": {"provider": "null"}` + `"use_database": false`
-- C++ `smtp_client` 是主要压测工具；Python `cl.py` 保留用于 TLS/AUTH 冒烟测试
+- C++ `smtp_client` 是主要压测工具；`test/scripts/cl.py` 保留用于 TLS/AUTH 冒烟测试
 
 ### 性能调优要点
 
