@@ -247,7 +247,6 @@ set(COMMON_SRCS
     src/mail_system/back/storage/distributed_file_storage_provider.cpp
     src/mail_system/back/storage/local_file_storage_provider.cpp
     src/mail_system/back/outbound/outbox_repository.cpp
-    src/mail_system/back/outbound/smtp_outbound_client.cpp
     src/mail_system/back/outbound/outbound_utils.cpp
     src/mail_system/back/outbound/mx_routing_utils.cpp
     src/mail_system/back/outbound/cares_dns_resolver.cpp
@@ -376,13 +375,6 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     )
     target_include_directories(fsm_bench PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(fsm_bench)
-
-    add_executable(outbound_smtp_test
-        ${COMMON_SRCS}
-        test/unit/outbound_smtp_bench.cpp
-    )
-    target_include_directories(outbound_smtp_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
-    setup_mail_target(outbound_smtp_test)
 
     add_executable(smtps_fsm_test
         ${COMMON_SRCS}

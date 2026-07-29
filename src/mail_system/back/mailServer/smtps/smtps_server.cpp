@@ -32,35 +32,7 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
             LOG_SERVER_INFO("PersistentQueue created for SMTP server");
         }
 
-        if (!m_outboundInterruptFlag) {
-            m_outboundInterruptFlag = std::make_shared<std::atomic<bool>>(true);
-        }
-
-        if (!m_outboundClient) {
-            outbound::OutboundConfig oc;
-            oc.helo_domain           = cfg->outbound_helo_domain;
-            oc.mail_from_domain      = cfg->outbound_mail_from_domain;
-            oc.rewrite_header_from   = cfg->outbound_rewrite_header_from;
-            oc.dkim_enabled          = cfg->outbound_dkim_enabled;
-            oc.dkim_selector         = cfg->outbound_dkim_selector;
-            oc.dkim_domain           = cfg->outbound_dkim_domain;
-            oc.dkim_private_key_file = cfg->outbound_dkim_private_key_file;
-            oc.ports                 = cfg->outbound_ports;
-            oc.max_attempts          = cfg->outbound_max_attempts;
-            oc.busy_sleep_ms         = static_cast<int>(cfg->outbound_poll_busy_sleep_ms);
-            oc.backoff_base_ms       = static_cast<int>(cfg->outbound_poll_backoff_base_ms);
-            oc.backoff_max_ms        = static_cast<int>(cfg->outbound_poll_backoff_max_ms);
-            oc.backoff_shift_cap     = cfg->outbound_poll_backoff_shift_cap;
-
-            m_outboundClient = std::make_shared<outbound::SmtpOutboundClient>(
-                m_shardRouter, m_ioThreadPool, m_workerThreadPool,
-                std::make_shared<outbound::CaresDnsResolver>(),
-                m_outboundInterruptFlag, std::move(oc), m_domain);
-            m_persistentQueue->set_outbound_client(m_outboundClient);
-            m_outboundClient->inject_metrics(get_metrics());
-            m_outboundClient->start();
-            LOG_SERVER_INFO("Outbound client created and started for SMTP server");
-        }
+        // 旧 SmtpOutboundClient 已移除，出站投递由 OutboundServer (m_outboundServer) 接管
     } else {
         LOG_SERVER_WARN("No database pool — SMTP outbound delivery disabled");
     }
@@ -83,7 +55,6 @@ SmtpsServer::~SmtpsServer() {
 
 void SmtpsServer::stop(ServerState state) {
     if (m_outboundServer) { m_outboundServer->stop(); LOG_SERVER_INFO("OutboundServer stopped"); }
-    if (m_outboundClient) { m_outboundClient->stop(); LOG_SERVER_INFO("Outbound client stopped"); }
     if (m_persistentQueue) {
         m_persistentQueue->shutdown();
         m_persistentQueue.reset();

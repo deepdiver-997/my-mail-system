@@ -7,7 +7,6 @@
 #include "mail_system/back/mailServer/session/smtps_session.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
-#include "mail_system/back/outbound/smtp_outbound_client.h"
 #include "mail_system/back/outbound/outbound_server.h"
 
 namespace mail_system {
@@ -40,10 +39,8 @@ private:
 
 public:
     std::shared_ptr<persist_storage::PersistentQueue> m_persistentQueue;
-    std::shared_ptr<outbound::SmtpOutboundClient> m_outboundClient;
-    std::shared_ptr<std::atomic<bool>> m_outboundInterruptFlag;
 
-    // 新 outbound 引擎（可选注入，为 null 则不启用）
+    // 新 outbound 引擎（可选注入，为 null 则不启用出站投递）
     std::shared_ptr<outbound::OutboundServer> m_outboundServer;
 };
 

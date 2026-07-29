@@ -439,18 +439,8 @@ bool SmtpsSession<ConnectionType>::check_mail_persist_status() {
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::transfer_mail_ownership_to_outbound() {
-    if (!this->m_server || !static_cast<SmtpsServer*>(this->m_server)->m_outboundClient || !this->get_mail()) {
-        return;
-    }
-
-    auto owned_mail = this->get_mail_ptr();
-    if (!owned_mail) {
-        return;
-    }
-
-    if (!static_cast<SmtpsServer*>(this->m_server)->m_outboundClient->accept_mail_ownership(std::move(owned_mail))) {
-        LOG_SESSION_WARN("Failed to transfer mail ownership to outbound client");
-    }
+    // 旧 SmtpOutboundClient 已移除，热投递暂由 PersistentQueue 接管
+    // TODO: 接入新 OutboundServer 的 submit() 接口
 }
 
 template <typename ConnectionType>

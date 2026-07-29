@@ -415,32 +415,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
 
         if (lc.auth_policy == InboundAuthPolicy::AUTO &&
             !ctx->is_trusted_server && !ctx->ehlo_domain.empty()) {
-            auto outbound = static_cast<SmtpsServer*>(session->get_server())->m_outboundClient;
-            if (outbound) {
-                auto resolver = outbound->get_dns_resolver();
-                if (resolver) {
-                    const auto client_ip = session->get_client_ip();
-                    if (client_ip == "127.0.0.1" || client_ip == "::1" ||
-                        client_ip.compare(0, 3, "10.") == 0 ||
-                        client_ip.compare(0, 8, "192.168.") == 0 ||
-                        (client_ip.compare(0, 4, "172.") == 0)) {
-                        // private/localhost IPs are implicitly trusted
-                        ctx->is_trusted_server = true;
-                    } else {
-                        auto hostnames = resolver->resolve_ptr_cached(client_ip);
-                        for (const auto& h : hostnames) {
-                            if (h == ctx->ehlo_domain ||
-                                (h.size() > ctx->ehlo_domain.size() &&
-                                 h[h.size() - ctx->ehlo_domain.size() - 1] == '.' &&
-                                 h.compare(h.size() - ctx->ehlo_domain.size(),
-                                           ctx->ehlo_domain.size(), ctx->ehlo_domain) == 0)) {
-                                ctx->is_trusted_server = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+            // TODO: re-enable EHLO/PTR verification after adding DNS resolver to OutboundServer
         }
 
         bool require_auth = false;
@@ -478,20 +453,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         std::string spf_reject_reason;
         if (!cfg->perf_mode && cfg->inbound_spf_mode != "off" &&
             !ctx->sender_address.empty() && ctx->sender_address != "<>") {
-            auto outbound = static_cast<SmtpsServer*>(session->get_server())->m_outboundClient;
-            if (outbound) {
-                auto resolver = outbound->get_dns_resolver();
-                if (resolver) {
-                    auto spf = inbound::InboundVerifier::check_spf_only(
-                        *resolver, session->get_client_ip(),
-                        ctx->sender_address, ctx->ehlo_domain);
-                    ctx->spf_checked = true;
-                    ctx->spf_result = spf.result;
-                    ctx->spf_reason = spf.reason;
-                    if (cfg->inbound_spf_mode == "hard" && spf.result == "fail")
-                        spf_reject_reason = spf.reason;
-                }
-            }
+            // TODO: re-enable SPF via OutboundServer DNS resolver
         }
 
         if (!spf_reject_reason.empty()) {
@@ -612,61 +574,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
             }
         }
 
-        auto outbound = static_cast<SmtpsServer*>(session->get_server())->m_outboundClient;
-        if (outbound) {
-            auto resolver = outbound->get_dns_resolver();
-            if (resolver) {
-                bool any_hard = (cfg->inbound_spf_mode == "hard" ||
-                                cfg->inbound_dkim_mode == "hard" ||
-                                cfg->inbound_dmarc_mode == "hard");
-                bool spf_done = ctx->spf_checked;
-                inbound::SpfResult stored_spf;
-                if (spf_done) { stored_spf.result = ctx->spf_result; stored_spf.reason = ctx->spf_reason; }
-
-                inbound::VerificationResult result;
-                    inbound::InboundVerifier verifier(*resolver);
-                    verifier.verify_all(client_ip, mail_from, helo, headers, raw_body, *cfg, result,
-                                        spf_done ? &stored_spf : nullptr);
-                    ctx->verification_run = true;
-
-                    if (any_hard) {
-                        std::string reject_reason;
-                        if (cfg->inbound_spf_mode == "hard" && result.spf_hard_fail())
-                            reject_reason = "5.7.1 SPF failed: " + result.spf.reason;
-                        else if (cfg->inbound_dkim_mode == "hard" && result.dkim_hard_fail())
-                            reject_reason = "5.7.1 DKIM failed: " + result.dkim.reason;
-                        else if (cfg->inbound_dmarc_mode == "hard" && result.dmarc_hard_fail())
-                            reject_reason = "5.7.1 DMARC failed: " + result.dmarc.reason;
-
-                        if (!reject_reason.empty()) {
-                            smtp_session->discard_current_mail();
-                            session->do_async_write("550 " + reject_reason + "\r\n",
-                                [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
-                            return;
-                        }
-                    }
-
-                    std::string mf_domain = inbound::InboundVerifier::extract_domain(mail_from);
-                    ctx->auth_results_header = inbound::InboundVerifier::build_auth_results_header(
-                        cfg->system_domain, result, mf_domain);
-                    if (!ctx->auth_results_header.empty())
-                        ctx->header_buffer = ctx->auth_results_header + "\r\n" + ctx->header_buffer;
-            }
-        }
-    }
-
-    // SPF-only auth results header
-    if (ctx->spf_checked && !ctx->verification_run && !ctx->spf_result.empty()) {
-        inbound::VerificationResult spf_only;
-        spf_only.spf.result = ctx->spf_result;
-        spf_only.spf.reason = ctx->spf_reason;
-        spf_only.dkim.result = "none";
-        spf_only.dmarc.result = "none";
-        std::string mf_domain = inbound::InboundVerifier::extract_domain(ctx->sender_address);
-        ctx->auth_results_header = inbound::InboundVerifier::build_auth_results_header(
-            cfg->system_domain, spf_only, mf_domain);
-        if (!ctx->auth_results_header.empty())
-            ctx->header_buffer = ctx->auth_results_header + "\r\n" + ctx->header_buffer;
+        // TODO: re-enable DKIM/DMARC via OutboundServer DNS resolver
     }
 
     auto submit_result = smtp_session->submit_mail_to_queue();
