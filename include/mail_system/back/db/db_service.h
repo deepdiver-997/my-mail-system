@@ -85,6 +85,15 @@ public:
                                ExecuteCallback cb) {
         if (cb) cb(execute(sql, params));
     }
+    virtual void async_begin_transaction(ExecuteCallback cb) {
+        if (cb) cb(begin_transaction());
+    }
+    virtual void async_commit(ExecuteCallback cb) {
+        if (cb) cb(commit());
+    }
+    virtual void async_rollback(ExecuteCallback cb) {
+        if (cb) cb(rollback());
+    }
     // ──────────────────────────────────────────────────────────
 };
 

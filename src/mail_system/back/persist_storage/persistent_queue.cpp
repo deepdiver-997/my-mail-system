@@ -349,228 +349,224 @@ bool PersistentQueue::process_task() {
             return true;
         }
 
-    worker_pool_->submit([this, ticket, mail_data = std::move(mail_data)]() mutable {
-        std::string error;
+    worker_pool_->submit([this, ticket, mail_ptr = std::shared_ptr<mail>(std::move(mail_data))]() mutable {
         const auto finish = [this]() {
             inflight_mail_count_.fetch_sub(1, std::memory_order_relaxed);
             push_queue_metrics();
         };
 
-        if (!mail_data) {
+        if (!mail_ptr) { finish(); return; }
+        if (ticket.is_cancel_requested()) {
+            mail_ptr->persist_status = PersistStatus::CANCELLED;
+            cleanup_mail_files(mail_ptr.get());
             finish();
             return;
         }
+
+        mail_ptr->persist_status = PersistStatus::PROCESSING;
 
         if (ticket.is_cancel_requested()) {
-            mail_data->persist_status = PersistStatus::CANCELLED;
-            cleanup_mail_files(mail_data.get());
+            mail_ptr->persist_status = PersistStatus::CANCELLED;
+            cleanup_mail_files(mail_ptr.get());
             finish();
             return;
         }
 
-        mail_data->persist_status = PersistStatus::PROCESSING;
-
-        if (ticket.is_cancel_requested()) {
-            mail_data->persist_status = PersistStatus::CANCELLED;
-            cleanup_mail_files(mail_data.get());
-            finish();
-            return;
-        }
-
-        std::vector<outbound::OutboxRecord> reserved_records;
-        if (persist_mail_transactional(mail_data.get(),
-                                       /*reserve_owner=*/"",
-                                       /*reserve_lease_seconds=*/0,
-                                       &reserved_records,
-                                       error)) {
-            const auto mail_id = mail_data->id;
-            if (ticket.is_cancel_requested()) {
-                mail_data->persist_status = PersistStatus::CANCELLED;
-                cleanup_failed_mail(mail_data.get());
-                finish();
-                return;
-            }
-
-            mail_data->persist_status = PersistStatus::SUCCESS;
-            if (mail_data->deduplicated_inbound) {
-                cleanup_mail_files(mail_data.get());
-            } else if (outbound::has_external_recipient(*mail_data, local_domain_) && outbound_server_) {
-                // 将 outbox 记录转为 MailDeliveryTask 提交到 OutboundServer
-                for (auto& rec : reserved_records) {
-                    auto task = std::make_unique<outbound::MailDeliveryTask>();
-                    task->mail_id = rec.mail_id;
-                    task->record_id = rec.id;
-                    task->sender = rec.sender;
-                    task->recipient = rec.recipient;
-                    task->mail_ptr = std::make_shared<mail>(*mail_data);
-                    task->attempt_count = rec.attempt_count;
-                    task->max_attempts = rec.max_attempts;
-                    outbound_server_->submit(std::move(task));
+        auto reserved_records = std::make_shared<std::vector<outbound::OutboxRecord>>();
+        persist_mail_transactional_async(mail_ptr.get(), "", 0,
+            reserved_records.get(),
+            [this, ticket, mail_ptr, reserved_records, finish](bool success, std::string error) {
+                const auto mail_id = mail_ptr->id;
+                if (success) {
+                    if (ticket.is_cancel_requested()) {
+                        mail_ptr->persist_status = PersistStatus::CANCELLED;
+                        cleanup_failed_mail(mail_ptr.get());
+                        finish();
+                        return;
+                    }
+                    mail_ptr->persist_status = PersistStatus::SUCCESS;
+                    if (mail_ptr->deduplicated_inbound) {
+                        cleanup_mail_files(mail_ptr.get());
+                    } else if (outbound::has_external_recipient(*mail_ptr, local_domain_) && outbound_server_) {
+                        for (auto& rec : *reserved_records) {
+                            auto task = std::make_unique<outbound::MailDeliveryTask>();
+                            task->mail_id = rec.mail_id;
+                            task->record_id = rec.id;
+                            task->sender = rec.sender;
+                            task->recipient = rec.recipient;
+                            task->mail_ptr = std::make_shared<mail>(*mail_ptr);
+                            task->attempt_count = rec.attempt_count;
+                            task->max_attempts = rec.max_attempts;
+                            outbound_server_->submit(std::move(task));
+                        }
+                    }
+                    LOG_PERSISTENT_QUEUE_INFO("Successfully processed mail ID {}", mail_id);
+                } else {
+                    mail_ptr->persist_status = PersistStatus::FAILED;
+                    cleanup_failed_mail(mail_ptr.get());
+                    LOG_PERSISTENT_QUEUE_ERROR("Processing failed for mail ID {}: {}", mail_ptr->id, error);
                 }
-            }
-            // 本地收件/入站邮件：保留 body 文件供 IMAP 读取，不清理
-            LOG_PERSISTENT_QUEUE_INFO("Successfully processed mail ID {}", mail_id);
-        } else {
-            mail_data->persist_status = PersistStatus::FAILED;
-            cleanup_failed_mail(mail_data.get());
-            LOG_PERSISTENT_QUEUE_ERROR("Processing failed for mail ID {}: {}", mail_data->id, error);
-        }
-
-        finish();
+                finish();
+            });
     });
 
     return true;
 }
 
-bool PersistentQueue::batch_insert_metadata(mail* mail_data, IDBConnection* conn, std::string& error) {
-    if (!mail_data) {
-        error = "Mail data is null";
-        return false;
-    }
-    if (!conn || !conn->is_connected()) {
-        error = "Database connection is null";
-        return false;
-    }
+void PersistentQueue::batch_insert_metadata_async(mail* mail_data, IDBConnection* conn,
+                                                   PersistCallback cb) {
+    if (!mail_data) { cb(false, "Mail data is null"); return; }
+    if (!conn || !conn->is_connected()) { cb(false, "DB connection is null"); return; }
 
-    try {
-        std::string mail_sql = db::sql::build_insert_mail(mail_data->id,
-                                                           mail_data->subject,
-                                                           mail_data->body_path,
-                                                           mail_data->send_time,
-                                                           conn);
+    std::string mail_sql = db::sql::build_insert_mail(mail_data->id,
+                                                       mail_data->subject,
+                                                       mail_data->body_path,
+                                                       mail_data->send_time,
+                                                       conn);
 
-        if (!conn->execute(mail_sql)) {
-            error = "Failed to insert mail metadata";
-            LOG_PERSISTENT_QUEUE_ERROR("Failed to insert mail metadata with sql: {}", mail_sql);
-            return false;
+    conn->async_execute(mail_sql, [this, mail_data, conn, cb = std::move(cb)](bool ok) mutable {
+        if (!ok) {
+            LOG_PERSISTENT_QUEUE_ERROR("Failed to insert mail metadata for mail ID {}", mail_data->id);
+            cb(false, "Failed to insert mail metadata");
+            return;
         }
 
         std::string recipient_sql = db::sql::build_insert_recipients(*mail_data, local_domain_, conn);
-
-        if (!conn->execute(recipient_sql)) {
-            error = "Failed to insert mail recipients";
-            LOG_PERSISTENT_QUEUE_ERROR("Failed to insert mail recipients with sql: {}", recipient_sql);
-            return false;
-        }
-
-        // 对本域收件人：把邮件关联到用户的收件箱（mail_mailbox 表）
-        // IMAP SELECT INBOX 依赖这个表来列出邮件
-        for (size_t i = 0; i < mail_data->to.size(); ++i) {
-            const std::string& recipient = mail_data->to[i];
-            const auto domain = extract_domain_lower(recipient);
-            auto system_domain = local_domain_;
-            std::transform(system_domain.begin(), system_domain.end(), system_domain.begin(),
-                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-            if (domain.empty() || domain != system_domain) {
-                continue;  // 外域收件人，不需要 mail_mailbox
+        conn->async_execute(recipient_sql, [this, mail_data, conn, cb = std::move(cb)](bool ok2) mutable {
+            if (!ok2) {
+                LOG_PERSISTENT_QUEUE_ERROR("Failed to insert recipients for mail ID {}", mail_data->id);
+                cb(false, "Failed to insert mail recipients");
+                return;
             }
 
-            std::string mailbox_sql = db::sql::build_insert_mailbox_for_recipient(mail_data->id, recipient, conn);
+            // 本域收件人的 mailbox 关联（不影响事务成功/失败）
+            for (size_t i = 0; i < mail_data->to.size(); ++i) {
+                const std::string& recipient = mail_data->to[i];
+                const auto domain = extract_domain_lower(recipient);
+                auto system_domain = local_domain_;
+                std::transform(system_domain.begin(), system_domain.end(), system_domain.begin(),
+                               [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                if (domain.empty() || domain != system_domain) continue;
 
-            if (!conn->execute(mailbox_sql)) {
-                LOG_PERSISTENT_QUEUE_WARN("Failed to insert mail_mailbox for mail_id={} recipient={}",
-                                          mail_data->id, recipient);
-                // 不影响整体事务 —— 外发仍然需要正常出队
+                std::string mailbox_sql = db::sql::build_insert_mailbox_for_recipient(
+                    mail_data->id, recipient, conn);
+                // mailbox 插入非关键路径，同步执行即可
+                conn->execute(mailbox_sql);
             }
-        }
 
-        LOG_PERSISTENT_QUEUE_INFO("Successfully inserted metadata for mail ID {} with {} recipients",
-                                 mail_data->id, mail_data->to.size());
-        return true;
-    } catch (const std::exception& e) {
-        error = std::string("Exception during metadata insertion: ") + e.what();
-        LOG_PERSISTENT_QUEUE_ERROR("Exception during metadata insertion for mail ID {}: {}",
-                                  mail_data->id, e.what());
-        return false;
-    }
+            LOG_PERSISTENT_QUEUE_INFO("Successfully inserted metadata for mail ID {}", mail_data->id);
+            cb(true, "");
+        });
+    });
 }
 
 #if ENABLE_INBOUND_DEDUP_CHECK
-bool PersistentQueue::is_probable_duplicate_mail(mail* mail_data, IDBConnection* conn) {
+void PersistentQueue::is_probable_duplicate_mail_async(mail* mail_data, IDBConnection* conn,
+                                                       std::function<void(bool)> cb) {
     if (!mail_data || !conn || !conn->is_connected() || mail_data->to.empty()) {
-        return false;
+        cb(false); return;
     }
 
-    // 1. Bloom filter: 快速内存去重（无锁，10 分钟窗口）
+    // 异步遍历收件人的辅助函数
+    auto make_recipient_checker = [mail_data, conn](auto cb_copy) {
+        auto idx = std::make_shared<size_t>(0);
+        auto check_next = std::make_shared<std::function<void()>>();
+        *check_next = [mail_data, conn, idx, cb_copy = std::move(cb_copy), check_next]() mutable {
+            if (*idx >= mail_data->to.size()) { cb_copy(true); return; }
+            const auto& r = mail_data->to[(*idx)++];
+            conn->async_query(db::sql::build_dedup_by_subject_sender_recipient(
+                mail_data->subject, mail_data->from, r, kInboundDedupWindowSeconds, conn),
+                [cb_copy, check_next](auto rc) mutable {
+                    if (!(rc && rc->get_row_count() > 0)) { cb_copy(false); return; }
+                    (*check_next)();
+                });
+        };
+        return check_next;
+    };
+
+    // Bloom filter 快速路径（同步，无 DB 访问）
     if (!mail_data->source_message_id.empty()) {
-        // 为每个收件人构造唯一 key，全命中才判定重复
         bool all_seen = true;
         for (const auto& r : mail_data->to) {
             std::string key = mail_data->from + "\n" + r + "\n" + mail_data->source_message_id;
             if (!g_dedup_filter.test_and_set(key)) all_seen = false;
         }
-        if (all_seen) return true;
+        if (all_seen) { cb(true); return; }
 
-        // 2. DB 回退：跨进程/重启后的去重
+        // DB 回退：跨进程去重
         std::string sql = db::sql::build_dedup_by_subject_sender(
             mail_data->subject, mail_data->from, kInboundDedupWindowSeconds, conn);
-        auto result = conn->query(sql);
-        if (result && result->get_row_count() > 0) {
-            for (const auto& r : mail_data->to) {
-                auto rc = conn->query(db::sql::build_dedup_by_subject_sender_recipient(
-                    mail_data->subject, mail_data->from, r, kInboundDedupWindowSeconds, conn));
-                if (!(rc && rc->get_row_count() > 0)) return false;
+        conn->async_query(sql, [mail_data, conn, cb = std::move(cb), make_recipient_checker](auto result) mutable {
+            if (!(result && result->get_row_count() > 0)) {
+                if (mail_data->subject.empty()) { cb(false); return; }
+                (*make_recipient_checker(cb))();
+                return;
             }
-            return true;
-        }
+            // 路径 2: 逐收件人确认
+            (*make_recipient_checker(cb))();
+        });
+        return;
     }
 
-    // 3. 无 Message-ID 时的回退：sender+subject+recipient DB 查询
-    if (mail_data->subject.empty()) return false;
-    for (const auto& r : mail_data->to) {
-        auto rc = conn->query(db::sql::build_dedup_by_subject_sender_recipient(
-            mail_data->subject, mail_data->from, r, kInboundDedupWindowSeconds, conn));
-        if (!(rc && rc->get_row_count() > 0)) return false;
-    }
-    return true;
+    // 无 Message-ID：直接路径 3 fallback
+    if (mail_data->subject.empty()) { cb(false); return; }
+    auto idx = std::make_shared<size_t>(0);
+    auto check_next = std::make_shared<std::function<void()>>();
+    *check_next = [mail_data, conn, idx, cb = std::move(cb), check_next]() mutable {
+        if (*idx >= mail_data->to.size()) { cb(true); return; }
+        const auto& r = mail_data->to[(*idx)++];
+        conn->async_query(db::sql::build_dedup_by_subject_sender_recipient(
+            mail_data->subject, mail_data->from, r, kInboundDedupWindowSeconds, conn),
+            [cb, check_next](auto rc) mutable {
+                if (!(rc && rc->get_row_count() > 0)) { cb(false); return; }
+                (*check_next)();
+            });
+    };
+    (*check_next)();
 }
 #endif
 
-bool PersistentQueue::is_duplicate_by_source_message_id(mail* mail_data, IDBConnection* conn) {
-    if (!mail_data || !conn || !conn->is_connected() || mail_data->source_message_id.empty() || mail_data->to.empty()) {
-        return false;
+void PersistentQueue::is_duplicate_by_source_message_id_async(mail* mail_data, IDBConnection* conn,
+                                                               std::function<void(bool)> cb) {
+    if (!mail_data || !conn || !conn->is_connected() ||
+        mail_data->source_message_id.empty() || mail_data->to.empty()) {
+        cb(false);
+        return;
     }
 
-    for (const auto& recipient_raw : mail_data->to) {
+    auto idx = std::make_shared<size_t>(0);
+    auto check_next = std::make_shared<std::function<void()>>();
+    *check_next = [mail_data, conn, idx, cb = std::move(cb), check_next]() mutable {
+        if (*idx >= mail_data->to.size()) { cb(true); return; }
+
+        const auto& recipient_raw = mail_data->to[(*idx)++];
         const std::string sql = db::sql::build_dedup_by_message_id(
             mail_data->from, recipient_raw, mail_data->source_message_id, conn);
-        auto result = conn->query(sql);
-        if (!(result && result->get_row_count() > 0)) {
-            return false;
-        }
-    }
+        conn->async_query(sql, [cb, check_next](std::shared_ptr<IDBResult> result) mutable {
+            if (!(result && result->get_row_count() > 0)) { cb(false); return; }
+            (*check_next)();
+        });
+    };
 
-    return true;
+    (*check_next)();
 }
 
-bool PersistentQueue::batch_insert_attachments(mail* mail_data, IDBConnection* conn, std::string& error) {
-    if (!mail_data || mail_data->attachments.empty()) {
-        return true;
-    }
-    if (!conn || !conn->is_connected()) {
-        error = "Database connection is null";
-        return false;
-    }
+void PersistentQueue::batch_insert_attachments_async(mail* mail_data, IDBConnection* conn,
+                                                      PersistCallback cb) {
+    if (!mail_data || mail_data->attachments.empty()) { cb(true, ""); return; }
+    if (!conn || !conn->is_connected()) { cb(false, "DB connection is null"); return; }
 
-    try {
-        std::string sql = db::sql::build_insert_attachments(mail_data->id, mail_data->attachments, conn);
-
-        if (!conn->execute(sql)) {
-            error = "Failed to insert mail's attachment metadata";
-            LOG_PERSISTENT_QUEUE_ERROR("Failed to insert attachment metadata for mail ID {} with sql: {}",
-                                      mail_data->id, sql);
-            return false;
+    std::string sql = db::sql::build_insert_attachments(mail_data->id, mail_data->attachments, conn);
+    conn->async_execute(sql, [mail_data, cb = std::move(cb)](bool ok) mutable {
+        if (!ok) {
+            LOG_PERSISTENT_QUEUE_ERROR("Failed to insert attachment metadata for mail ID {}", mail_data->id);
+            cb(false, "Failed to insert attachment metadata");
+            return;
         }
-
-        LOG_PERSISTENT_QUEUE_INFO("Successfully inserted {} attachments for mail ID {}", 
+        LOG_PERSISTENT_QUEUE_INFO("Successfully inserted {} attachments for mail ID {}",
                                  mail_data->attachments.size(), mail_data->id);
-        return true;
-    } catch (const std::exception& e) {
-        error = std::string("Exception during attachment insertion: ") + e.what();
-        LOG_PERSISTENT_QUEUE_ERROR("Exception during attachment insertion for mail ID {}: {}", 
-                                  mail_data->id, e.what());
-        return false;
-    }
+        cb(true, "");
+    });
 }
 
 void PersistentQueue::worker_loop() {
@@ -581,154 +577,185 @@ void PersistentQueue::worker_loop() {
     // 不在这里打印退出日志，因为可能在析构阶段调用，此时 Logger 可能已 shutdown
 }
 
-bool PersistentQueue::enqueue_outbox_tasks(mail* mail_data,
-                                           IDBConnection* conn,
-                                           const std::string& reserve_owner,
-                                           int reserve_lease_seconds,
-                                           std::vector<outbound::OutboxRecord>* reserved_records,
-                                           std::string& error) {
+void PersistentQueue::enqueue_outbox_tasks_async(mail* mail_data,
+                                                  IDBConnection* conn,
+                                                  const std::string& reserve_owner,
+                                                  int reserve_lease_seconds,
+                                                  std::vector<outbound::OutboxRecord>* reserved_records,
+                                                  PersistCallback cb) {
     if (!mail_data || !conn || !conn->is_connected()) {
-        error = "Mail data or connection is null";
-        return false;
+        cb(true, "");  // 无可出队的外域收件人视为成功
+        return;
     }
 
-    bool inserted_any = false;
     const bool reserve_for_local = !reserve_owner.empty() && reserve_lease_seconds > 0;
+    auto idx = std::make_shared<size_t>(0);
 
-    for (const auto& recipient : mail_data->to) {
-        const auto recipient_domain = extract_domain_lower(recipient);
-        auto local_domain = local_domain_;
-        std::transform(local_domain.begin(), local_domain.end(), local_domain.begin(),
-                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        if (recipient_domain.empty() || recipient_domain == local_domain) {
-            continue;
+    // 异步迭代收件人列表
+    auto process_next = std::make_shared<std::function<void()>>();
+    *process_next = [this, mail_data, conn, reserve_for_local, reserve_owner,
+                     reserve_lease_seconds, reserved_records, idx,
+                     cb = std::move(cb), process_next]() mutable {
+        // 跳过本域收件人
+        while (*idx < mail_data->to.size()) {
+            const auto& recipient = mail_data->to[*idx];
+            const auto recv_domain = extract_domain_lower(recipient);
+            auto local_domain = local_domain_;
+            std::transform(local_domain.begin(), local_domain.end(), local_domain.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            if (!recv_domain.empty() && recv_domain != local_domain) break;
+            (*idx)++;
         }
 
+        if (*idx >= mail_data->to.size()) { cb(true, ""); return; }
+
+        const auto& recipient = mail_data->to[(*idx)++];
         std::string sql = reserve_for_local
             ? db::sql::build_insert_outbox_reserved(mail_data->id, mail_data->from, recipient,
                                                      reserve_owner, reserve_lease_seconds, conn)
             : db::sql::build_insert_outbox_pending(mail_data->id, mail_data->from, recipient, 8, conn);
 
-        if (!conn->execute(sql)) {
-            error = "Failed to insert outbox row";
-            LOG_PERSISTENT_QUEUE_ERROR("Failed to insert outbox row for mail ID {} recipient {}: {}",
-                                      mail_data->id,
-                                      recipient,
-                                      conn->get_last_error());
-            return false;
-        }
-
-        inserted_any = true;
-        if (reserved_records) {
-            auto result = conn->query(db::sql::build_select_last_insert_id());
-            if (!(result && result->get_row_count() > 0)) {
-                error = "Failed to fetch LAST_INSERT_ID for outbox row";
-                return false;
-            }
-            auto row = result->get_row(0);
-            auto it = row.find("id");
-            if (it == row.end()) {
-                error = "LAST_INSERT_ID result missing id";
-                return false;
+        conn->async_execute(sql, [this, mail_data, conn, recipient, reserved_records,
+                                  reserve_for_local, cb, process_next](bool ok) mutable {
+            if (!ok) {
+                LOG_PERSISTENT_QUEUE_ERROR("Failed to insert outbox row for mail ID {} recipient {}",
+                                          mail_data->id, recipient);
+                cb(false, "Failed to insert outbox row");
+                return;
             }
 
-            outbound::OutboxRecord record;
-            record.id = static_cast<std::uint64_t>(std::stoull(it->second));
-            record.mail_id = mail_data->id;
-            record.sender = mail_data->from;
-            record.recipient = recipient;
-            record.body_path = mail_data->body_path;
-            record.attempt_count = reserve_for_local ? 1 : 0;
-            record.max_attempts = 8;
-            reserved_records->push_back(std::move(record));
-        }
-    }
+            if (reserved_records) {
+                conn->async_query(db::sql::build_select_last_insert_id(),
+                    [this, mail_data, recipient, reserved_records, reserve_for_local,
+                     cb, process_next](std::shared_ptr<IDBResult> result) mutable {
+                        if (!(result && result->get_row_count() > 0)) {
+                            cb(false, "Failed to fetch LAST_INSERT_ID");
+                            return;
+                        }
+                        auto row = result->get_row(0);
+                        auto it = row.find("id");
+                        if (it == row.end()) { cb(false, "LAST_INSERT_ID missing id"); return; }
 
-    if (!inserted_any) {
-        return true;
-    }
-
-    return true;
-}
-
-bool PersistentQueue::persist_mail_transactional(mail* mail_data,
-                                                 const std::string& reserve_owner,
-                                                 int reserve_lease_seconds,
-                                                 std::vector<outbound::OutboxRecord>* reserved_records,
-                                                 std::string& error) {
-    if (!mail_data) {
-        error = "Mail data is null";
-        return false;
-    }
-
-    int shard = shard_from_mail(mail_data);
-    auto scoped = m_shardRouter->get_db_pool(shard)->acquire_connection();
-    if (!scoped.is_valid()) {
-        error = "Failed to get database connection";
-        LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for message-id dedup check, mail_id={}",
-                                   mail_data->id);
-        return false;
-    }
-    auto* conn_ptr = scoped.operator->();
-
-    if (is_duplicate_by_source_message_id(mail_data, conn_ptr)) {
-        mail_data->deduplicated_inbound = true;
-        LOG_PERSISTENT_QUEUE_INFO("Message-ID dedup hit, skip all persistence for mail_id={}, message_id=[{}]",
-                                  mail_data->id,
-                                  mail_data->source_message_id);
-        return true;
-    }
-
-    if (!conn_ptr->begin_transaction()) {
-        error = "Failed to begin transaction";
-        return false;
-    }
-
-    const auto rollback = [&]() {
-        if (!conn_ptr->rollback()) {
-            LOG_PERSISTENT_QUEUE_WARN("Failed to rollback transaction for mail_id={}", mail_data->id);
-        }
+                        outbound::OutboxRecord record;
+                        record.id = static_cast<std::uint64_t>(std::stoull(it->second));
+                        record.mail_id = mail_data->id;
+                        record.sender = mail_data->from;
+                        record.recipient = recipient;
+                        record.body_path = mail_data->body_path;
+                        record.attempt_count = reserve_for_local ? 1 : 0;
+                        record.max_attempts = 8;
+                        reserved_records->push_back(std::move(record));
+                        (*process_next)();
+                    });
+            } else {
+                (*process_next)();
+            }
+        });
     };
 
-    if (!batch_insert_metadata(mail_data, conn_ptr, error)) {
-        rollback();
-        return false;
+    (*process_next)();
+}
+
+void PersistentQueue::persist_mail_transactional_async(mail* mail_data,
+                                                       const std::string& reserve_owner,
+                                                       int reserve_lease_seconds,
+                                                       std::vector<outbound::OutboxRecord>* reserved_records,
+                                                       PersistCallback cb) {
+    if (!mail_data) { cb(false, "Mail data is null"); return; }
+
+    int shard = shard_from_mail(mail_data);
+    auto scoped_raw = m_shardRouter->get_db_pool(shard)->acquire_connection();
+    if (!scoped_raw.is_valid()) {
+        cb(false, "Failed to get database connection");
+        return;
     }
 
-    if (!batch_insert_attachments(mail_data, conn_ptr, error)) {
-        rollback();
-        return false;
-    }
+    // shared_ptr 保持连接存活跨越整个回调链
+    auto scoped = std::make_shared<ScopedConnection>(std::move(scoped_raw));
+    auto* conn = scoped->operator->();
 
-    if (!enqueue_outbox_tasks(mail_data, conn_ptr, reserve_owner, reserve_lease_seconds, reserved_records, error)) {
-        rollback();
-        return false;
-    }
+    // Step 1: 去重检查
+    is_duplicate_by_source_message_id_async(mail_data, conn,
+        [this, mail_data, reserve_owner, reserve_lease_seconds, reserved_records,
+         scoped, cb = std::move(cb)](bool is_dup) mutable {
+            auto* conn = scoped->operator->();
 
-    if (!conn_ptr->commit()) {
-        error = "Failed to commit transaction";
-        rollback();
-        return false;
-    }
+            if (is_dup) {
+                mail_data->deduplicated_inbound = true;
+                LOG_PERSISTENT_QUEUE_INFO("Message-ID dedup hit, skip persistence for mail_id={}",
+                                          mail_data->id);
+                cb(true, "");
+                return;
+            }
 
-    // 跨分片本域投递：写入收件人所在分片（独立事务）
-    for (size_t i = 0; i < mail_data->to.size(); ++i) {
-        const auto& recipient = mail_data->to[i];
-        const auto domain = extract_domain_lower(recipient);
-        if (domain.empty()) continue;
-        auto local_lower = local_domain_;
-        std::transform(local_lower.begin(), local_lower.end(), local_lower.begin(),
-                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        if (domain != local_lower) continue;  // 外域走 outbox，不在此处理
+            // Step 2: begin transaction
+            conn->async_begin_transaction([this, mail_data, reserve_owner, reserve_lease_seconds,
+                                           reserved_records, scoped, cb = std::move(cb)](bool ok) mutable {
+                auto* conn = scoped->operator->();
+                if (!ok) { cb(false, "Failed to begin transaction"); return; }
 
-        const uint64_t recipient_id = i < mail_data->ids.size() ? mail_data->ids[i] : 0;
-        if (!persist_to_recipient_shard(mail_data, recipient, recipient_id, shard)) {
-            LOG_PERSISTENT_QUEUE_WARN("Failed to persist mail_id={} to recipient_shard for recipient={}",
-                                      mail_data->id, recipient);
-        }
-    }
+                auto do_rollback = [conn, mail_data]() {
+                    conn->async_rollback([](bool) {});
+                    LOG_PERSISTENT_QUEUE_WARN("Transaction rolled back for mail_id={}", mail_data->id);
+                };
 
-    return true;
+                // Step 3: insert metadata
+                batch_insert_metadata_async(mail_data, conn,
+                    [this, mail_data, reserve_owner, reserve_lease_seconds, reserved_records,
+                     scoped, do_rollback, cb = std::move(cb)](bool ok, std::string err) mutable {
+                        auto* conn = scoped->operator->();
+                        if (!ok) { do_rollback(); cb(false, err); return; }
+
+                        // Step 4: insert attachments
+                        batch_insert_attachments_async(mail_data, conn,
+                            [this, mail_data, reserve_owner, reserve_lease_seconds, reserved_records,
+                             scoped, do_rollback, cb = std::move(cb)](bool ok, std::string err) mutable {
+                                auto* conn = scoped->operator->();
+                                if (!ok) { do_rollback(); cb(false, err); return; }
+
+                                // Step 5: enqueue outbox
+                                enqueue_outbox_tasks_async(mail_data, conn,
+                                    reserve_owner, reserve_lease_seconds, reserved_records,
+                                    [this, mail_data, scoped, do_rollback,
+                                     cb = std::move(cb)](bool ok, std::string err) mutable {
+                                        auto* conn = scoped->operator->();
+                                        if (!ok) { do_rollback(); cb(false, err); return; }
+
+                                        // Step 6: commit
+                                        conn->async_commit([this, mail_data, scoped,
+                                                            cb = std::move(cb)](bool ok) mutable {
+                                            auto* conn = scoped->operator->();
+                                            if (!ok) {
+                                                conn->async_rollback([](bool) {});
+                                                cb(false, "Failed to commit transaction");
+                                                return;
+                                            }
+
+                                            // Step 7: cross-shard local delivery (sync, separate conn)
+                                            int shard = shard_from_mail(mail_data);
+                                            for (size_t i = 0; i < mail_data->to.size(); ++i) {
+                                                const auto& recipient = mail_data->to[i];
+                                                const auto domain = extract_domain_lower(recipient);
+                                                if (domain.empty()) continue;
+                                                auto local_lower = local_domain_;
+                                                std::transform(local_lower.begin(), local_lower.end(),
+                                                               local_lower.begin(),
+                                                               [](unsigned char ch) {
+                                                                   return static_cast<char>(std::tolower(ch));
+                                                               });
+                                                if (domain != local_lower) continue;
+                                                const uint64_t rid = i < mail_data->ids.size()
+                                                    ? mail_data->ids[i] : 0;
+                                                persist_to_recipient_shard(mail_data, recipient, rid, shard);
+                                            }
+
+                                            cb(true, "");
+                                        });
+                                    });
+                            });
+                    });
+            });
+        });
 }
 
 bool PersistentQueue::persist_to_recipient_shard(mail* mail_data,

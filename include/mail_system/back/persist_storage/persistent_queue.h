@@ -88,30 +88,37 @@ public:
 
     void inject_metrics(std::weak_ptr<MetricsServer> m) { metrics_ = std::move(m); }
 
+    // 持久化回调: void(bool success, std::string error)
+    using PersistCallback = std::function<void(bool, std::string)>;
+
 private:
     void push_queue_metrics();
     // ---- 工作线程 ----
     void worker_loop();
     bool process_task();
 
-    // ---- 持久化内部方法（接受裸 MySQLConnection*，由入口统一管理连接） ----
-    bool persist_mail_transactional(mail* mail_data,
+    // ---- 持久化内部方法（async 回调链，ScopedConnection 由顶层持有） ----
+    void persist_mail_transactional_async(mail* mail_data,
+                                          const std::string& reserve_owner,
+                                          int reserve_lease_seconds,
+                                          std::vector<outbound::OutboxRecord>* reserved_records,
+                                          PersistCallback cb);
+    void batch_insert_metadata_async(mail* mail_data, class IDBConnection* conn,
+                                     PersistCallback cb);
+    void batch_insert_attachments_async(mail* mail_data, class IDBConnection* conn,
+                                        PersistCallback cb);
+    void enqueue_outbox_tasks_async(mail* mail_data,
+                                    class IDBConnection* conn,
                                     const std::string& reserve_owner,
                                     int reserve_lease_seconds,
                                     std::vector<outbound::OutboxRecord>* reserved_records,
-                                    std::string& error);
-    bool batch_insert_metadata(mail* mail_data, class IDBConnection* conn, std::string& error);
-    bool batch_insert_attachments(mail* mail_data, class IDBConnection* conn, std::string& error);
-    bool enqueue_outbox_tasks(mail* mail_data,
-                              class IDBConnection* conn,
-                              const std::string& reserve_owner,
-                              int reserve_lease_seconds,
-                              std::vector<outbound::OutboxRecord>* reserved_records,
-                              std::string& error);
+                                    PersistCallback cb);
 #if ENABLE_INBOUND_DEDUP_CHECK
-    bool is_probable_duplicate_mail(mail* mail_data, class IDBConnection* conn);
+    void is_probable_duplicate_mail_async(mail* mail_data, class IDBConnection* conn,
+                                          std::function<void(bool)> cb);
 #endif
-    bool is_duplicate_by_source_message_id(mail* mail_data, class IDBConnection* conn);
+    void is_duplicate_by_source_message_id_async(mail* mail_data, class IDBConnection* conn,
+                                                  std::function<void(bool)> cb);
 
     // ---- 清理 ----
     void cleanup_mail_files(mail* mail_data);
