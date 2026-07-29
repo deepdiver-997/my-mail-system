@@ -303,6 +303,53 @@ do_async_read 入口
 - **安全关闭流程**：`work_guard.reset() → io_context->stop() → join listener thread → close acceptors → stop subsystems → stop thread pools`
 - **perf_mode**：一键跳过 SPF/DKIM/DMARC/DNSBL，自动覆写连接数/队列上限
 
+#### 阶段 H：异步数据库接口与暂停流水线（2026-07-28 ~ 07-29）
+
+```
+IDBConnection 异步接口:
+  ┌─────────────────────────────────────────────┐
+  │ async_query(sql, params, callback)          │  ← 默认同步回调
+  │ async_execute(sql, params, callback)        │     子类可重写为非阻塞
+  │ async_begin_transaction(callback)           │
+  │ async_commit(callback)                      │
+  │ async_rollback(callback)                    │
+  └─────────────────────────────────────────────┘
+
+OutboundServer 事件驱动拉取:
+  轮询常驻线程 → 水位预占 + CAS + 回调链
+  try_pull(): 水位检查 → CAS抢占 → 预占BATCH_SIZE → do_claim_batch
+                 │                                          │
+      completion_cb ──→ try_pull()          on_claim_complete: 修正水位
+      submit() ──────→ try_pull()               ├─ 有数据 → 分发 → 续拉/释放
+      retry_timer ───→ 重新拉取                 └─ 无数据 → 指数退避(5→60s)
+
+PersistentQueue 异步事务链:
+  persist_mail_transactional_async()
+    ├─ is_duplicate_async()
+    ├─ async_begin_transaction()
+    ├─ batch_insert_metadata_async()     ← 3层async_execute链
+    ├─ batch_insert_attachments_async()
+    ├─ enqueue_outbox_tasks_async()      ← 递归迭代收件人列表
+    └─ async_commit()
+    shared_ptr<ScopedConnection> 穿越回调链保持连接存活
+
+FSM 暂停流水线 (paused gate):
+  SessionBase 新增 paused_ 标志:
+  handle_read 循环: while(buffer && !paused) { handle_read; process_read; }
+  FSM handler: set_paused(true) → async DB → return (不阻塞IO线程)
+  async回调: 发送响应 → drain_buffered_commands() (清paused + 排空缓冲命令)
+
+  ⚠️ 设了paused的路径必须回调drain, 否则session永久卡死
+```
+
+**关键变化**：
+- **`IDBConnection` 异步接口**：4 个 async 方法 + 3 个事务方法，默认同步实现，为未来非阻塞 MySQL 预留接口
+- **`OutboundServer` 消除常驻线程**：`poll_loop` 改为事件驱动水位预占，`completion_cb`/`submit()`/退避定时器触发 `try_pull()`
+- **`PersistentQueue` 异步事务链**：`persist_mail_transactional` 改为 callback 链式调用，`shared_ptr<ScopedConnection>` 保持连接生命周期
+- **FSM 暂停流水线**：`SessionBase::paused_` 标志位，DB 查询期间暂停流水线消费，回调中 `drain_buffered_commands()` 恢复
+- **SMTP/IMAP FSM handler 改造**：`auth_user → auth_user_async`(callback)，IMAP `handle_create/delete/rename` 改为 paused 模式
+- **sync-bridge helpers**：`sq()`/`se()` 封装 async API → sync 结果，供非关键路径使用
+
 ---
 
 ## 模块演进图

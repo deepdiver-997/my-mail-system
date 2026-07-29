@@ -1,5 +1,11 @@
 # SMTP Outbound Client 设计表
 
+> **实现状态 (2026-07-29)**: 本文档为原始 MVP 设计。实际实现已演进：
+> - `OutboundOrchestrator` → `OutboundServer`（事件驱动，消除常驻轮询线程）
+> - 轮询 + 通知混合 → 纯事件驱动（completion_cb + submit + 退避定时器）
+> - 水位预占 + CAS 单拉取周期替代定时轮询
+> - 详见 `ARCHITECTURE.md` §4.2 和 `architecture-evolution.md` §阶段H
+
 ## 1. 设计范围
 
 本文档定义 Mail System V8 的出站投递模块（SMTP Client）的最小可行设计（MVP）。

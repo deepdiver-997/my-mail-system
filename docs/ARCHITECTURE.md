@@ -140,12 +140,46 @@ The outbound engine uses the same FsmBase + SessionBase pattern as inbound:
 
 - `OutboundSmtpFsm` — 12-state SMTP client state machine (INIT → CONNECT → EHLO → MAIL → RCPT → DATA → ... → CLOSED)
 - `OutboundSmtpSession` — manages one MX TCP connection, pipeline delivery with in_callback queue
-- `OutboundServer` — MX connection pool, CAS-based DB task pulling, `OutboxRepository` integration
+- `OutboundServer` — MX connection pool, event-driven watermark-based task pulling
+- `OutboxRepository` — stateless DB access for outbox table
 
-Design highlights:
+### 4.2.1 Event-Driven Pull with Watermark Pre-allocation
 
-- **Connection reuse**: up to 100 mails per TCP connection, RSET between mails
-- **Load-aware pulling**: atomic `pending_count_` counter with CAS `try_pull()` — only one thread pulls from DB at a time
+The previous design used a `poll_loop()` that permanently occupied a worker thread,
+polling on a 30-second interval. The new design is fully event-driven:
+
+```
+try_pull() 入口:
+  1. pending_count >= LOW_WATERMARK(16)? → return (快速路径, 无CAS开销)
+  2. CAS(is_pulling_) → 失败则return (已有一个拉取周期在进行)
+  3. pending_count += BATCH_SIZE(32)     (预占水位, 防止重复拉取)
+  4. do_claim_batch() → worker池
+
+on_claim_complete(records):
+  5. pending_count -= (BATCH_SIZE - records.size())  (修正预占)
+  6. records为空? → schedule_retry (5s→10s→20s→...→60s 指数退避)
+  7. 加载邮件 → 分发到MX session
+  8. pending < LOW_WATERMARK? → 链式续拉(不释放is_pulling_)
+     else → is_pulling_ = false         (水位够了, 释放拉取周期)
+```
+
+Triggers (all call `try_pull()` as lightweight probe):
+- **completion_cb**: fires on each successful/failed delivery
+- **submit()**: fires when new mail arrives locally
+- **retry timer**: fires after exponential backoff when DB is empty
+
+Idle MX connection eviction runs on an independent 30-second `steady_timer`.
+
+### 4.2.2 MX Connection Pool
+
+- Up to 4 concurrent sessions per MX domain (`DEFAULT_MAX_SESSIONS_PER_MX`)
+- Session selection: prefer shortest queue (load-aware routing)
+- Idle eviction: 120 seconds of inactivity with no queued/active tasks
+- Global cap: 256 MX entries (`DEFAULT_MAX_MX_ENTRIES`), LRU eviction on overflow
+- Connection reuse: up to 100 mails per TCP connection, RSET between mails
+
+### 4.2.3 Related Components
+
 - **Bloom dedup**: lock-free 1024-bit filter replaces `mutex + unordered_map` for inbound duplicate detection
 - **PersistentQueue** persists mail metadata + outbox records in one transaction, then submits `MailDeliveryTask` to `OutboundServer`
 
@@ -174,23 +208,42 @@ Build-time gating:
 
 ## 4.4 Database Access
 
-Responsibilities:
+### 4.4.1 Connection Model
 
-- Connection pool lifecycle and query execution isolation.
-- Persist user/mail metadata and queue/outbox related records.
-- Support for distributed database pool scenarios where configured.
+- **`IDBConnection`**: abstract interface — `query()`, `execute()`, `begin_transaction()`, `commit()`, `rollback()`, `escape_string()`
+- **`DBPool::acquire_connection()`** → `ScopedConnection` (RAII): auto-returns on destruction
+- **`IShardRouter`**: routes `email → shard_index`, each shard has independent `DBPool`
+- **`OutboxRepository`**: stateless utility; receives `DBPool&` at call time, never holds a pool
 
-Connection ownership model:
+### 4.4.2 Async Database Interface (db_service.h)
 
-- Raw connections restricted to subclasses and friend classes only.
-- External users must acquire connections through `ConnectionGuard` (RAII), which automatically returns the connection to the pool on destruction.
-- Empty `initialize_script` config gracefully skipped (no pool shutdown).
+`IDBConnection` provides async variants of all data operations with default
+synchronous implementations:
 
-Reliability practices:
+```
+// 异步查询（默认同步执行 + 同步回调，子类可重写为非阻塞）
+virtual void async_query(sql, params, QueryCallback);    // → shared_ptr<IDBResult>
+virtual void async_execute(sql, params, ExecuteCallback); // → bool
+virtual void async_begin_transaction(ExecuteCallback);     // → bool
+virtual void async_commit(ExecuteCallback);                // → bool
+virtual void async_rollback(ExecuteCallback);              // → bool
+```
 
-- RAII for connection ownership.
-- Startup-time config validation for DB connection settings.
-- Error reporting through module-specific log channels.
+Default behavior: callback fires before `async_xxx` returns (= synchronous).
+Subclasses (e.g., a future non-blocking MySQL implementation) override these
+to post work to a thread pool or integrate with OS async I/O.
+
+**Callback types** (in `db_service.h`):
+```cpp
+using QueryCallback   = std::function<void(std::shared_ptr<IDBResult>)>;
+using ExecuteCallback = std::function<void(bool success)>;
+```
+
+### 4.4.3 Async Adoption Strategy
+
+1. **Leaf-level**: FSMs call `conn->async_query/execute()` via `sq()`/`se()` sync-bridge helpers (callbacks fire immediately with default impl, ready for future non-blocking override).
+2. **Transaction flow**: `PersistentQueue::persist_mail_transactional_async()` chains async callbacks through `begin → insert_metadata → insert_attachments → enqueue_outbox → commit`. `shared_ptr<ScopedConnection>` keeps the connection alive across the callback chain.
+3. **FSM handlers**: use the **paused pipeline** pattern (see §5.2) to initiate async DB and return without blocking the IO thread.
 
 ## 4.5 Logging Subsystem
 
@@ -258,10 +311,51 @@ A companion FastAPI service (`register-service/`) provides invite-code-based acc
 
 ## 5. Concurrency Model
 
-- I/O threads handle socket readiness and async operations.
-- Worker threads execute heavier business tasks.
-- Outbound delivery runs as a background worker loop with adaptive polling.
-- Shared resources (queue/storage/db) are synchronized by adapter internals.
+### 5.1 Thread Pools
+
+- **IO threads** (`IOThreadPool`): round-robin socket dispatch. Handle `async_read`/`async_write` callbacks. Should never block — heavy work must be delegated.
+- **Worker threads** (`BoostThreadPool`): CPU-intensive or blocking tasks (DB queries, file I/O, DNS resolution, MIME parsing). `PersistentQueue` and `OutboundServer` post work here.
+- **Listener thread**: dedicated thread for TCP/SSL acceptors.
+
+### 5.2 Paused Pipeline Gate (Async DB from IO Thread)
+
+FSM handlers run on the IO thread. To avoid blocking IO while waiting for
+a database response, handlers use a `paused` flag on `SessionBase`:
+
+```
+handle_read 回调:
+  while (has_buffered_input() && !is_paused()) {  // ← paused 时停止消费
+      handle_read(extract_one_line());
+      process_read();
+  }
+
+FSM handler (e.g., AUTH):
+  1. session->set_paused(true)          // 闸门关闭
+  2. conn->async_query(sql, callback)   // 发起异步DB
+  3. return                              // IO线程继续处理其他session
+
+async回调 (当前同步默认, 在async_query返回前触发):
+  4. send_response()
+  5. session->drain_buffered_commands()  // 清paused + 排空积累的命令
+```
+
+**Critical invariant**: any code path that calls `set_paused(true)` MUST call
+`drain_buffered_commands()` in its callback. Failing to do so leaves the session
+permanently stalled — `do_async_read` returns immediately because the buffer has
+data, but the while-loop refuses to consume it.
+
+### 5.3 Outbound Delivery
+
+- **Event-driven**: no permanent worker thread. `try_pull()` is triggered by delivery completion and new mail submission.
+- **CAS single-puller**: `compare_exchange_strong` on `is_pulling_` ensures only one thread executes DB claim at a time.
+- **Watermark pre-allocation**: adds `BATCH_SIZE` to `pending_count_` before DB claim, corrects afterwards. Prevents redundant `try_pull()` calls during the DB round-trip.
+- **Retry backoff**: when `claim_batch` returns empty, an exponential backoff timer (5s→60s) on the IO context retries without releasing `is_pulling_`.
+
+### 5.4 PersistentQueue
+
+- **Lock-free queue**: `boost::lockfree::queue<capacity<16384>>` for multi-producer (SMTP sessions) single-consumer (worker thread).
+- **Worker thread**: dequeues tasks and submits DB work to `BoostThreadPool`.
+- **Async transaction chain**: `persist_mail_transactional_async` chains `begin → metadata → attachments → outbox → commit` via nested async callbacks. `shared_ptr<ScopedConnection>` keeps the DB connection alive across the chain.
 
 ## 6. Configuration and Startup
 
