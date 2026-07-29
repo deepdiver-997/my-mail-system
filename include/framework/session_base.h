@@ -2,8 +2,8 @@
 #define SESSION_BASE_H
 
 #include "mail_system/back/common/logger.h"
-#include "mail_system/back/mailServer/connection/i_connection.h"
-#include "mail_system/back/mailServer/server_base.h"
+#include "framework/connection/i_connection.h"
+#include "framework/server_base.h"
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <chrono>

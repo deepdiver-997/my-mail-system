@@ -1,7 +1,7 @@
 #ifndef SMTPS_FSM_H
 #define SMTPS_FSM_H
 
-#include "mail_system/back/mailServer/server_config.h"
+#include "framework/server_config.h"
 #include "mail_system/back/entities/mail.h"
 #include <cstddef>
 #include <fstream>

@@ -7,7 +7,7 @@
 #include <map>
 #include "server_config.h"
 #include "intrusion_detector.h"
-#include "mail_system/back/thread_pool/thread_pool_base.h"
+#include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/db_service.h"
 #include "mail_system/back/db/mysql_pool.h"
@@ -16,7 +16,7 @@
 #include "mail_system/back/common/lru_cache.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/router/i_shard_router.h"
-#include "mail_system/back/mailServer/metrics_server.h"
+#include "framework/metrics_server.h"
 
 namespace mail_system {
 

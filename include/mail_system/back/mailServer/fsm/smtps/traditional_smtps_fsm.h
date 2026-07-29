@@ -1,13 +1,13 @@
 #ifndef TRADITIONAL_SMTPS_FSM_H
 #define TRADITIONAL_SMTPS_FSM_H
 
-#include "mail_system/back/mailServer/session/session_base.h"
-#include "mail_system/back/mailServer/fsm/fsm_base.h"
+#include "framework/session_base.h"
+#include "framework/fsm_base.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/db_service.h"
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/db/sql_queries.h"
-#include "mail_system/back/thread_pool/thread_pool_base.h"
+#include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/auth_cache.h"

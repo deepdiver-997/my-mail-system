@@ -2,9 +2,9 @@
 #undef NDEBUG
 #include <cassert>  // 在 #undef NDEBUG 后重新包含，确保 assert 生效
 #include "mail_system/back/mailServer/smtps_server.h"
-#include "mail_system/back/mailServer/server_config.h"
-#include "mail_system/back/thread_pool/io_thread_pool.h"
-#include "mail_system/back/thread_pool/boost_thread_pool.h"
+#include "framework/server_config.h"
+#include "framework/thread_pool/io_thread_pool.h"
+#include "framework/thread_pool/boost_thread_pool.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/common/logger.h"

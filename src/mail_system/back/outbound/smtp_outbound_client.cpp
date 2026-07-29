@@ -1,13 +1,13 @@
 #include "mail_system/back/outbound/smtp_outbound_client.h"
 
-#include "mail_system/back/mailServer/metrics_server.h"
+#include "framework/metrics_server.h"
 #include "mail_system/back/outbound/cares_dns_resolver.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/outbound/mx_routing_utils.h"
 #include "mail_system/back/outbound/outbound_utils.h"
 #include "mail_system/back/outbound/smtp_outbound_transaction.h"
 #include "mail_system/back/outbound/smtp_transport_utils.h"
-#include "mail_system/back/thread_pool/io_thread_pool.h"
+#include "framework/thread_pool/io_thread_pool.h"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ip/tcp.hpp>

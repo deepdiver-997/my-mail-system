@@ -240,9 +240,9 @@ set(COMMON_SRCS
     src/mail_system/back/db/mysql_pool.cpp
     src/mail_system/back/db/mysql_service.cpp
     src/mail_system/back/db/sql_queries.cpp
-    src/mail_system/back/mailServer/server_base.cpp
-    src/mail_system/back/thread_pool/boost_thread_pool.cpp
-    src/mail_system/back/thread_pool/io_thread_pool.cpp
+    src/framework/server_base.cpp
+    src/framework/thread_pool/boost_thread_pool.cpp
+    src/framework/thread_pool/io_thread_pool.cpp
     src/mail_system/back/algorithm/snow.cpp
     src/mail_system/back/storage/distributed_file_storage_provider.cpp
     src/mail_system/back/storage/local_file_storage_provider.cpp

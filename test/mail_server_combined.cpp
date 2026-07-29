@@ -19,8 +19,8 @@
 #include "mail_system/back/db/db_service.h"
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/db/distributed_mysql_pool.h"
-#include "mail_system/back/thread_pool/io_thread_pool.h"
-#include "mail_system/back/thread_pool/boost_thread_pool.h"
+#include "framework/thread_pool/io_thread_pool.h"
+#include "framework/thread_pool/boost_thread_pool.h"
 #include "mail_system/back/cli/help_text.h"
 #include "mail_system/back/common/logger.h"
 #include <iostream>

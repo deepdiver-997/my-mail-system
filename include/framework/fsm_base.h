@@ -1,7 +1,7 @@
 #ifndef MAIL_SYSTEM_FSM_BASE_H
 #define MAIL_SYSTEM_FSM_BASE_H
 
-#include "mail_system/back/mailServer/session/session_base.h"
+#include "framework/session_base.h"
 #include <functional>
 #include <map>
 #include <memory>

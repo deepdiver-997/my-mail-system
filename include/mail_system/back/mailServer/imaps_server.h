@@ -1,7 +1,7 @@
 #ifndef IMAPS_SERVER_H
 #define IMAPS_SERVER_H
 
-#include "mail_system/back/mailServer/tcp_server_base.h"
+#include "framework/tcp_server_base.h"
 #include "mail_system/back/mailServer/fsm/imaps/imaps_fsm.hpp"
 #include "mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.h"
 #include "mail_system/back/mailServer/session/imaps_session.h"

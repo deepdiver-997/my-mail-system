@@ -1,6 +1,6 @@
 #ifndef MOCK_CONNECTION_H
 #define MOCK_CONNECTION_H
-#include "mail_system/back/mailServer/connection/i_connection.h"
+#include "framework/connection/i_connection.h"
 
 namespace mail_system {
 

@@ -2,9 +2,9 @@
 #define IMAPS_SESSION_H
 
 #include "mail_system/back/common/logger.h"
-#include "mail_system/back/mailServer/connection/tcp_connection.h"
-#include "mail_system/back/mailServer/connection/ssl_connection.h"
-#include "mail_system/back/mailServer/session/session_base.h"
+#include "framework/connection/tcp_connection.h"
+#include "framework/connection/ssl_connection.h"
+#include "framework/session_base.h"
 #include "mail_system/back/mailServer/fsm/imaps/imaps_fsm.hpp"
 #include "mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.h"
 #include <algorithm>

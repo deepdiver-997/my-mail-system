@@ -7,7 +7,7 @@
 #include "mail_system/back/outbound/outbox_repository.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/router/i_shard_router.h"
-#include "mail_system/back/thread_pool/thread_pool_base.h"
+#include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/common/logger.h"
 #include <boost/lockfree/queue.hpp>
 #include <atomic>

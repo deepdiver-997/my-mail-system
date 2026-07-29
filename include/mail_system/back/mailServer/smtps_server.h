@@ -1,7 +1,7 @@
 #ifndef SMTPS_SERVER_H
 #define SMTPS_SERVER_H
 
-#include "mail_system/back/mailServer/tcp_server_base.h"
+#include "framework/tcp_server_base.h"
 #include "mail_system/back/mailServer/fsm/smtps/smtps_fsm.hpp"
 #include "mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.h"
 #include "mail_system/back/mailServer/session/smtps_session.h"

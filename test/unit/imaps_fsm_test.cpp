@@ -3,9 +3,9 @@
 #include <cassert>
 #include <cstdlib>
 #include "mail_system/back/mailServer/imaps_server.h"
-#include "mail_system/back/mailServer/server_config.h"
-#include "mail_system/back/thread_pool/io_thread_pool.h"
-#include "mail_system/back/thread_pool/boost_thread_pool.h"
+#include "framework/server_config.h"
+#include "framework/thread_pool/io_thread_pool.h"
+#include "framework/thread_pool/boost_thread_pool.h"
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/common/logger.h"
 #include "mock_connection.h"

@@ -1,7 +1,7 @@
 #include "mail_system/back/inbound/inbound_verifier.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/mail_crypto.h"
-#include "mail_system/back/mailServer/server_config.h"
+#include "framework/server_config.h"
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>

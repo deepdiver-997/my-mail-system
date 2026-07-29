@@ -2,9 +2,9 @@
 #define MAIL_SYSTEM_TCP_SERVER_BASE_H
 
 #include "server_base.h"
-#include "mail_system/back/thread_pool/io_thread_pool.h"
-#include "mail_system/back/mailServer/connection/tcp_connection.h"
-#include "mail_system/back/mailServer/connection/ssl_connection.h"
+#include "framework/thread_pool/io_thread_pool.h"
+#include "framework/connection/tcp_connection.h"
+#include "framework/connection/ssl_connection.h"
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 

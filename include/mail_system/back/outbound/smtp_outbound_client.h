@@ -7,7 +7,7 @@
 namespace mail_system { class MetricsServer; }
 #include "mail_system/back/outbound/outbox_repository.h"
 #include "mail_system/back/router/i_shard_router.h"
-#include "mail_system/back/thread_pool/thread_pool_base.h"
+#include "framework/thread_pool/thread_pool_base.h"
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
