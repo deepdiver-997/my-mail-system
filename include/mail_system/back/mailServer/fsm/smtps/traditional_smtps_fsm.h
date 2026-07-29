@@ -13,7 +13,7 @@
 #include "mail_system/back/common/auth_cache.h"
 #include "mail_system/back/common/bcrypt.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
-#include "mail_system/back/mailServer/fsm/smtps/smtps_fsm.hpp"
+#include "mail_system/back/mailServer/fsm/smtps/smtps_types.hpp"
 #include "mail_system/back/router/i_shard_router.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/algorithm/smtp_utils.h"

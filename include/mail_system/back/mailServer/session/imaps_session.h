@@ -5,7 +5,7 @@
 #include "framework/connection/tcp_connection.h"
 #include "framework/connection/ssl_connection.h"
 #include "framework/session_base.h"
-#include "mail_system/back/mailServer/fsm/imaps/imaps_fsm.hpp"
+#include "mail_system/back/mailServer/fsm/imaps/imap_types.hpp"
 #include "mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.h"
 #include <algorithm>
 #include <cctype>

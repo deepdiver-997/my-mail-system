@@ -1,6 +1,7 @@
 #ifndef OUTBOUND_SMTP_FSM_HPP
 #define OUTBOUND_SMTP_FSM_HPP
 
+#include "mail_system/back/entities/mail.h"
 #include <cstdint>
 #include <string>
 #include <memory>
@@ -14,9 +15,9 @@ namespace outbound {
 struct MailDeliveryTask {
     uint64_t mail_id;
     uint64_t record_id;        // mail_outbox.id
-    std::string sender;
-    std::string recipient;
-    std::string body_path;      // 邮件正文文件路径
+    std::string sender;        // 信封 MAIL FROM（已由 router 解析到本 MX）
+    std::string recipient;     // 信封 RCPT TO（单个收件人，已去重分派）
+    std::shared_ptr<struct mail> mail_ptr;  // 邮件对象（多个 session 共享，只读）
     int attempt_count;
     int max_attempts;
 };

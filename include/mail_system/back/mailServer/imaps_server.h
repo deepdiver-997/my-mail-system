@@ -2,7 +2,7 @@
 #define IMAPS_SERVER_H
 
 #include "framework/tcp_server_base.h"
-#include "mail_system/back/mailServer/fsm/imaps/imaps_fsm.hpp"
+#include "mail_system/back/mailServer/fsm/imaps/imap_types.hpp"
 #include "mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.h"
 #include "mail_system/back/mailServer/session/imaps_session.h"
 #include "mail_system/back/entities/mail.h"

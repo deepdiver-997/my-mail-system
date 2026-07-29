@@ -1,6 +1,6 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/common/logger.h"
-#include "mail_system/back/mailServer/fsm/smtps/smtps_fsm.hpp"
+#include "mail_system/back/mailServer/fsm/smtps/smtps_types.hpp"
 
 #include <algorithm>
 #include <cctype>

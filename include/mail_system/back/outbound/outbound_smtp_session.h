@@ -4,7 +4,7 @@
 #include "framework/session_base.h"
 #include "framework/fsm_base.h"
 #include "framework/connection/tcp_connection.h"
-#include "mail_system/back/outbound/outbound_smtp_fsm.hpp"
+#include "mail_system/back/outbound/outbound_types.hpp"
 #include "mail_system/back/common/logger.h"
 #include <queue>
 #include <mutex>
@@ -207,7 +207,7 @@ private:
         next_sender_ = current_task_->sender;
         next_recipient_ = current_task_->recipient;
 
-        auto self = this->template shared_from_this();
+        auto self = this->shared_from_this();
         this->do_async_write("MAIL FROM:<" + next_sender_ + ">\r\n",
             [self](std::shared_ptr<SessionBase<ConnectionType>>, const boost::system::error_code&) mutable {
                 self->fsm_->process_event(self, OutboundSmtpEvent::MAIL_250);

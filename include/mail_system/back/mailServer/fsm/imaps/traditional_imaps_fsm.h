@@ -8,7 +8,7 @@
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/db/sql_queries.h"
 #include "framework/thread_pool/thread_pool_base.h"
-#include "mail_system/back/mailServer/fsm/imaps/imaps_fsm.hpp"
+#include "mail_system/back/mailServer/fsm/imaps/imap_types.hpp"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/lru_cache.h"
 #include "mail_system/back/common/auth_cache.h"

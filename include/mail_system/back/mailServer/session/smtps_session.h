@@ -7,7 +7,7 @@
 #include "framework/session_base.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/entities/usr.h"
-#include "mail_system/back/mailServer/fsm/smtps/smtps_fsm.hpp"
+#include "mail_system/back/mailServer/fsm/smtps/smtps_types.hpp"
 #include "mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/algorithm/snow.h"

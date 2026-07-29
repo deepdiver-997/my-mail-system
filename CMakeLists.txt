@@ -402,6 +402,9 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
 
     add_executable(smtp_client test/bench/smtp_client.cpp)
     target_compile_features(smtp_client PRIVATE cxx_std_17)
+
+    add_executable(outbound_smoke test/outbound_smoke.cpp)
+    setup_mail_target(outbound_smoke)
 endif()
 
 if(NOT BUILD_OBJECT_ONLY)
