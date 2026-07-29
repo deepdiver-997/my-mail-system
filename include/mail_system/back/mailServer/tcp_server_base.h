@@ -2,6 +2,7 @@
 #define MAIL_SYSTEM_TCP_SERVER_BASE_H
 
 #include "server_base.h"
+#include "mail_system/back/thread_pool/io_thread_pool.h"
 #include "mail_system/back/mailServer/connection/tcp_connection.h"
 #include "mail_system/back/mailServer/connection/ssl_connection.h"
 #include <boost/asio.hpp>
@@ -167,7 +168,11 @@ void TcpServerBase<TcpSession, SslSession>::do_tcp_accept(
 {
     if (get_state() != ServerState::Running) return;
 
-    auto sock = std::make_unique<boost::asio::ip::tcp::socket>(*m_ioContext);
+    // 从 IO 线程池获取 io_context 做负载分散，避免所有连接挤在主线程的 io_context 上
+    auto& pool_io = static_cast<IOThreadPool*>(m_ioThreadPool.get())->get_io_context();
+    auto sock = std::make_unique<boost::asio::ip::tcp::socket>(pool_io);
+    // 预先取裸指针：lambda 捕获时 sock 被 move 进闭包，取地址发生在捕获之前，
+    // 否则某些平台/编译器会先移动 sock 再取地址导致 psock 指向已移动的对象
     auto* psock = sock.get();
 
     acceptor->async_accept(*psock, [this, acceptor, lc,
@@ -208,7 +213,9 @@ void TcpServerBase<TcpSession, SslSession>::do_ssl_accept(
 {
     if (get_state() != ServerState::Running) return;
 
-    auto sock = std::make_unique<boost::asio::ip::tcp::socket>(*m_ioContext);
+    // 从 IO 线程池获取 io_context 做负载分散（同上）
+    auto& pool_io = static_cast<IOThreadPool*>(m_ioThreadPool.get())->get_io_context();
+    auto sock = std::make_unique<boost::asio::ip::tcp::socket>(pool_io);
     auto ssl_sock = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(
         std::move(*sock), get_ssl_context());
     auto& lowest = ssl_sock->next_layer();
