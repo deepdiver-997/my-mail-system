@@ -83,8 +83,9 @@ public:
     // 获取事件名称
     static std::string get_event_name(SmtpsEvent event);
 
-    bool auth_user(SessionBase<ConnectionType>* session, const std::string& mail_address,
-                   const std::string& password, int& out_shard);
+    using AuthCallback = std::function<void(bool ok, int shard)>;
+    void auth_user_async(SessionBase<ConnectionType>* session, const std::string& mail_address,
+                         const std::string& password, AuthCallback cb);
 
     void get_mail_data(SessionBase<ConnectionType>* session, std::string& mail_data);
     void get_mail_data(std::shared_ptr<SessionBase<ConnectionType>> session, std::string& mail_data);

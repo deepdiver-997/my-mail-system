@@ -106,6 +106,12 @@ public:
     // ── 4. 命令缓冲与流水线 ────────────────────────────────────
     std::string pop_buffered_line();
 
+    // 暂停流水线消费（DB 异步查询期间）
+    bool is_paused() const { return paused_; }
+    void set_paused(bool v) { paused_ = v; }
+    // 排空暂停期间积累的缓冲命令
+    void drain_buffered_commands();
+
     virtual bool        has_buffered_input() const;
     virtual std::string extract_one_line();
     virtual std::string take_buffered_input();
@@ -151,6 +157,7 @@ protected:
     std::string pending_write_buf_;
     mutable std::string client_address_;
     bool closed_ = false;
+    bool paused_ = false;
     bool session_authenticated_ = false;
     int  auth_attempt_count_ = 0;
     SessionError last_error_ = SessionError::None;

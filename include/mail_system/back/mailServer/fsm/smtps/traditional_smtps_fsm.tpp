@@ -9,6 +9,32 @@
 
 namespace mail_system {
 
+// sync-bridge: 通过 async API 同步获取结果（默认同步实现，回调在返回前触发）
+namespace {
+inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql,
+                                      const std::vector<std::string>& params) {
+    std::shared_ptr<IDBResult> r;
+    c->async_query(sql, params, [&r](auto res) { r = std::move(res); });
+    return r;
+}
+inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql) {
+    std::shared_ptr<IDBResult> r;
+    c->async_query(sql, [&r](auto res) { r = std::move(res); });
+    return r;
+}
+inline bool se(class IDBConnection* c, const std::string& sql,
+                const std::vector<std::string>& params) {
+    bool ok = false;
+    c->async_execute(sql, params, [&ok](bool r) { ok = r; });
+    return ok;
+}
+inline bool se(class IDBConnection* c, const std::string& sql) {
+    bool ok = false;
+    c->async_execute(sql, [&ok](bool r) { ok = r; });
+    return ok;
+}
+} // namespace
+
 // ========== 工具函数实现 ==========
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::cleanup_streamed_attachments(SmtpsContext* ctx) {
@@ -270,26 +296,26 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                 username += "@" + cfg->system_domain;
                 ctx->client_username = username;
             }
-            int shard = 0;
-            if (this->auth_user(session.get(), username, password, shard)) {
-                ctx->is_authenticated = true; ctx->shard_index = shard;
-                session->do_async_write("235 Authentication successful\r\n",
-                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                        if (ec) { LOG_SMTP_DETAIL_ERROR("AUTH success write: {}", ec.message()); return; }
-                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
-                        s->do_async_read();
-                    });
-                return;
-            }
+            this->auth_user_async(session.get(), username, password,
+                [session, ctx](bool ok, int shard) {
+                    if (ok) {
+                        ctx->is_authenticated = true; ctx->shard_index = shard;
+                        session->do_async_write("235 Authentication successful\r\n",
+                            [session](auto s, auto& ec) {
+                                if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
+                                s->drain_buffered_commands();
+                            });
+                    } else {
+                        if (session->record_auth_failure_and_check()) { session->close(); return; }
+                        session->do_async_write("535 Authentication failed\r\n",
+                            [session](auto s, auto& ec) {
+                                if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                                s->drain_buffered_commands();
+                            });
+                    }
+                });
+            return;
         }
-        if (session->record_auth_failure_and_check()) { session->close(); return; }
-        session->do_async_write("535 Authentication failed\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                if (ec) return;
-                s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                s->do_async_read();
-            });
-        return;
     }
 
     // AUTH PLAIN 1-step
@@ -319,23 +345,23 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                 username += "@" + cfg->system_domain;
                 ctx->client_username = username;
             }
-            int shard = 0;
-            if (this->auth_user(session.get(), username, password, shard)) {
-                ctx->is_authenticated = true; ctx->shard_index = shard;
-                session->do_async_write("235 Authentication successful\r\n",
-                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                        if (ec) return;
-                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
-                        s->do_async_read();
-                    });
-                return;
-            }
-            if (session->record_auth_failure_and_check()) { session->close(); return; }
-            session->do_async_write("535 Authentication failed\r\n",
-                [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                    if (ec) return;
-                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                    s->do_async_read();
+            this->auth_user_async(session.get(), username, password,
+                [session, ctx](bool ok, int shard) {
+                    if (ok) {
+                        ctx->is_authenticated = true; ctx->shard_index = shard;
+                        session->do_async_write("235 Authentication successful\r\n",
+                            [session](auto s, auto& ec) {
+                                if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
+                                s->drain_buffered_commands();
+                            });
+                    } else {
+                        if (session->record_auth_failure_and_check()) { session->close(); return; }
+                        session->do_async_write("535 Authentication failed\r\n",
+                            [session](auto s, auto& ec) {
+                                if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                                s->drain_buffered_commands();
+                            });
+                    }
                 });
             return;
         }
@@ -382,25 +408,25 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
         username += "@" + cfg->system_domain;
         static_cast<SmtpsContext*>(session->get_context())->client_username = username;
     }
-    int shard = 0;
-    if (this->auth_user(session.get(), username, password, shard)) {
-        static_cast<SmtpsContext*>(session->get_context())->is_authenticated = true;
-        static_cast<SmtpsContext*>(session->get_context())->shard_index = shard;
-        session->do_async_write("235 Authentication successful\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                if (ec) return;
-                s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
-                s->do_async_read();
-            });
-    } else {
-        if (session->record_auth_failure_and_check()) { session->close(); return; }
-        session->do_async_write("535 Authentication failed\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                if (ec) return;
-                s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                s->do_async_read();
-            });
-    }
+    this->auth_user_async(session.get(), username, password,
+        [session](bool ok, int shard) {
+            auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+            if (ok) {
+                ctx->is_authenticated = true; ctx->shard_index = shard;
+                session->do_async_write("235 Authentication successful\r\n",
+                    [session](auto s, auto& ec) {
+                        if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
+                        s->drain_buffered_commands();
+                    });
+            } else {
+                if (session->record_auth_failure_and_check()) { session->close(); return; }
+                session->do_async_write("535 Authentication failed\r\n",
+                    [session](auto s, auto& ec) {
+                        if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                        s->drain_buffered_commands();
+                    });
+            }
+        });
 }
 
 template <typename ConnectionType>
@@ -729,43 +755,63 @@ std::string TraditionalSmtpsFsm<ConnectionType>::get_event_name(SmtpsEvent event
 }
 
 template <typename ConnectionType>
-bool TraditionalSmtpsFsm<ConnectionType>::auth_user(
+void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
     SessionBase<ConnectionType>* session, const std::string& mail_address,
-    const std::string& password, int& out_shard)
+    const std::string& password, AuthCallback cb)
 {
-    if (!session) { LOG_AUTH_ERROR("Session is null in auth_user"); return false; }
+    if (!session) { LOG_AUTH_ERROR("Session is null in auth_user"); cb(false, 0); return; }
 
-    // shard router
     int shard = 0;
     if (m_shardRouter) { int r = m_shardRouter->route(mail_address); if (r >= 0) shard = r; }
-    out_shard = shard;
 
-    // 查缓存
+    // 查缓存 —— 命中则同步回调，无需暂停流水线
     AuthCacheEntry ce;
     if (m_authCache->lookup(mail_address, ce)) {
-        if (ce.status != 1) return false;
-        out_shard = ce.shard;
-        if (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
-            return bcrypt_verify(password, ce.password_hash);
-        return ce.password_hash == password;
+        if (ce.status != 1) { cb(false, 0); return; }
+        shard = ce.shard;
+        bool ok = (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
+                      ? bcrypt_verify(password, ce.password_hash)
+                      : (ce.password_hash == password);
+        cb(ok, shard);
+        return;
     }
 
-    // 缓存未命中，查 DB → 写入缓存
-    auto conn = acquire_connection(shard);
-    if (!conn.is_valid()) { LOG_AUTH_ERROR("Failed to get DB connection"); return false; }
+    // 缓存未命中，查 DB
+    auto conn_raw = acquire_connection(shard);
+    if (!conn_raw.is_valid()) { LOG_AUTH_ERROR("Failed to get DB connection"); cb(false, 0); return; }
+    auto conn = std::make_shared<ScopedConnection>(std::move(conn_raw));
+
+    // 暂停流水线：DB 查询期间不消费新命令
+    // 注意：调用者必须在回调中调用 session->drain_buffered_commands()
+    session->set_paused(true);
 
     std::string sql = db::sql::build_auth_user_query();
-    auto result = conn->query(sql, {mail_address});
-    if (!result || result->get_row_count() == 0) { LOG_AUTH_WARN("User not found: {}", mail_address); return false; }
-    int status = std::stoi(result->get_value(0, "status"));
-    if (status != 1) { LOG_AUTH_WARN("User account disabled: {}", mail_address); return false; }
-    std::string stored = result->get_value(0, "password");
-    m_authCache->store(mail_address, {stored, status, 0, shard});
-    bool ok = (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2')
-                    ? bcrypt_verify(password, stored)
-                    : (stored == password);
-    if (ok) conn->execute(db::sql::build_update_last_login(), {mail_address});
-    return ok;
+    (*conn)->async_query(sql, {mail_address},
+        [this, session, mail_address, password, shard, conn,
+         cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
+            if (!result || result->get_row_count() == 0) {
+                LOG_AUTH_WARN("User not found: {}", mail_address);
+                cb(false, 0);
+                return;
+            }
+            int status = std::stoi(result->get_value(0, "status"));
+            if (status != 1) {
+                LOG_AUTH_WARN("User account disabled: {}", mail_address);
+                cb(false, 0);
+                return;
+            }
+            std::string stored = result->get_value(0, "password");
+            m_authCache->store(mail_address, {stored, status, 0, shard});
+            bool ok = (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2')
+                          ? bcrypt_verify(password, stored)
+                          : (stored == password);
+            if (ok) {
+                (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
+                                       [cb = std::move(cb), ok, shard](bool) { cb(ok, shard); });
+            } else {
+                cb(false, 0);
+            }
+        });
 }
 
 template <typename ConnectionType>
@@ -789,7 +835,7 @@ void TraditionalSmtpsFsm<ConnectionType>::get_mail_data(
 
     // 使用参数化查询
     std::string sql = "SELECT subject, body FROM mails WHERE sender = ? ORDER BY send_time DESC LIMIT 1";
-    auto result = conn->query(sql, {sender});
+    auto result = sq(conn.operator->(), sql, {sender});
     if (result && result->get_row_count() > 0) {
         std::string subject = result->get_value(0, "subject");
         std::string body = result->get_value(0, "body");
@@ -839,7 +885,7 @@ std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_mail_metadata_async(
             mail_data.id, mail_data.subject, body_path,
             mail_data.status, conn_ptr);
         LOG_DATABASE_DEBUG("Executing SQL: {}", mail_sql);
-        if (!conn_ptr->execute(mail_sql)) {
+        if (!se(conn_ptr,mail_sql)) {
             LOG_DATABASE_ERROR("Failed to insert mail metadata. Error: {}", conn_ptr->get_last_error());
             return false;
         }
@@ -848,10 +894,10 @@ std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_mail_metadata_async(
         std::string recipient_sql = db::sql::build_insert_recipients_simple(
             mail_data, conn_ptr);
         LOG_DATABASE_DEBUG("Executing SQL: {}", recipient_sql);
-        if (!recipient_sql.empty() && !conn_ptr->execute(recipient_sql)) {
+        if (!recipient_sql.empty() && !se(conn_ptr,recipient_sql)) {
             LOG_DATABASE_ERROR("Failed to insert mail recipients. Error: {}", conn_ptr->get_last_error());
             // 如果插入收件人失败，删除已插入的邮件元数据
-            conn_ptr->execute(db::sql::build_delete_mail_by_id(mail_data.id));
+            se(conn_ptr,db::sql::build_delete_mail_by_id(mail_data.id));
             return false;
         }
 
@@ -860,7 +906,7 @@ std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_mail_metadata_async(
             std::string att_sql = db::sql::build_insert_attachments(
                 mail_data.id, mail_data.attachments, conn_ptr);
             LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
-            if (!conn_ptr->execute(att_sql)) {
+            if (!se(conn_ptr,att_sql)) {
                 LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", conn_ptr->get_last_error());
                 success = false;
             }
@@ -899,7 +945,7 @@ std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_attachment_metadata_
         std::string att_sql = db::sql::build_insert_attachment_single(
             mail_id, att, conn_ptr);
         LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
-        if (!conn_ptr->execute(att_sql)) {
+        if (!se(conn_ptr,att_sql)) {
             LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", conn_ptr->get_last_error());
             return false;
         }
@@ -922,7 +968,7 @@ void TraditionalSmtpsFsm<ConnectionType>::remove_metadata_by_file_path(
     // 注意：数据库中 body_path 字段存储的是文件路径
     std::string sql = "DELETE FROM mails WHERE body_path = ?";
     for (const auto& file_path : file_paths) {
-        if (!conn->execute(sql, {file_path})) {
+        if (!se(conn.operator->(), sql, {file_path})) {
             LOG_DATABASE_ERROR("Failed to delete mail metadata for file path: {}", file_path);
         }
     }

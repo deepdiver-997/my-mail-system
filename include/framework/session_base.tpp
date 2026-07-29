@@ -137,8 +137,8 @@ void SessionBase<ConnectionType>::do_async_read() {
             self->command_read_buffer_.append(
                 self->read_buffer_.data(), bytes);
 
-            // 流水线消费：每次从缓冲区取一行，传给 handle_read 处理
-            while (self->has_buffered_input()) {
+            // 流水线消费：paused 时停止消费，等待 DB 回调排空
+            while (self->has_buffered_input() && !self->is_paused()) {
                 self->handle_read(self->extract_one_line());
                 self->process_read();
             }
@@ -185,6 +185,15 @@ std::string SessionBase<ConnectionType>::pop_buffered_line() {
     std::string line = command_read_buffer_.substr(0, nl + 1);
     command_read_buffer_.erase(0, nl + 1);
     return line;
+}
+
+template <typename ConnectionType>
+void SessionBase<ConnectionType>::drain_buffered_commands() {
+    paused_ = false;
+    while (has_buffered_input()) {
+        handle_read(extract_one_line());
+        process_read();
+    }
 }
 
 template <typename ConnectionType>

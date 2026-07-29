@@ -9,6 +9,32 @@
 
 namespace mail_system {
 
+// sync-bridge: 通过 async API 同步获取结果（默认同步实现，回调在返回前触发）
+namespace {
+inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql,
+                                      const std::vector<std::string>& params) {
+    std::shared_ptr<IDBResult> r;
+    c->async_query(sql, params, [&r](auto res) { r = std::move(res); });
+    return r;
+}
+inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql) {
+    std::shared_ptr<IDBResult> r;
+    c->async_query(sql, [&r](auto res) { r = std::move(res); });
+    return r;
+}
+inline bool se(class IDBConnection* c, const std::string& sql,
+                const std::vector<std::string>& params) {
+    bool ok = false;
+    c->async_execute(sql, params, [&ok](bool r) { ok = r; });
+    return ok;
+}
+inline bool se(class IDBConnection* c, const std::string& sql) {
+    bool ok = false;
+    c->async_execute(sql, [&ok](bool r) { ok = r; });
+    return ok;
+}
+} // namespace
+
 // ====================================================================
 // 工具方法
 // ====================================================================
@@ -1748,13 +1774,14 @@ void TraditionalImapsFsm<ConnectionType>::handle_create(
         return;
     }
 
-    if (conn->execute(
-            db::sql::build_imap_create_mailbox(),
-            {std::to_string(ctx->user_id), mailbox_name})) {
-        send_tagged(session, tag, "OK", "CREATE completed");
-    } else {
-        send_tagged(session, tag, "NO", "CREATE failed (maybe already exists)");
-    }
+    session->set_paused(true);
+    conn->async_execute(db::sql::build_imap_create_mailbox(),
+                        {std::to_string(ctx->user_id), mailbox_name},
+                        [this, session, tag](bool ok) {
+                            if (ok) send_tagged(session, tag, "OK", "CREATE completed");
+                            else send_tagged(session, tag, "NO", "CREATE failed (maybe already exists)");
+                            session->drain_buffered_commands();
+                        });
 }
 
 // ---------- DELETE ----------
@@ -1784,31 +1811,42 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
         return;
     }
 
-    auto conn = this->acquire_connection(ctx->shard_index);
-    if (!conn.is_valid()) {
+    auto conn_raw = this->acquire_connection(ctx->shard_index);
+    if (!conn_raw.is_valid()) {
         send_tagged(session, tag, "NO", "Server error");
         return;
     }
+    auto conn = std::make_shared<ScopedConnection>(std::move(conn_raw));
 
     // Check if it's a system mailbox
-    auto result = conn->query(
-        db::sql::build_imap_check_mailbox_is_system(),
-        {std::to_string(mailbox_id)});
-    if (result && result->get_row_count() > 0) {
-        if (result->get_value(0, "is_system") == "1") {
-            send_tagged(session, tag, "NO", "Cannot delete system mailbox");
-            return;
-        }
-    }
-
-    if (conn->execute(db::sql::build_imap_delete_mailbox_messages(),
-                            {std::to_string(mailbox_id)}) &&
-        conn->execute(db::sql::build_imap_delete_mailbox(),
-                            {std::to_string(mailbox_id)})) {
-        send_tagged(session, tag, "OK", "DELETE completed");
-    } else {
-        send_tagged(session, tag, "NO", "DELETE failed");
-    }
+    session->set_paused(true);
+    (*conn)->async_query(db::sql::build_imap_check_mailbox_is_system(),
+                         {std::to_string(mailbox_id)},
+                         [this, session, tag, mailbox_id, conn]
+                         (std::shared_ptr<IDBResult> result) mutable {
+                             if (result && result->get_row_count() > 0 &&
+                                 result->get_value(0, "is_system") == "1") {
+                                 send_tagged(session, tag, "NO", "Cannot delete system mailbox");
+                                 session->drain_buffered_commands();
+                                 return;
+                             }
+                             // 删除消息 + 删除邮箱
+                             (*conn)->async_execute(db::sql::build_imap_delete_mailbox_messages(),
+                                                    {std::to_string(mailbox_id)},
+                                                    [this, session, tag, mailbox_id, conn]
+                                                    (bool ok1) mutable {
+                                                        (*conn)->async_execute(
+                                                            db::sql::build_imap_delete_mailbox(),
+                                                            {std::to_string(mailbox_id)},
+                                                            [this, session, tag, ok1](bool ok2) {
+                                                                if (ok1 && ok2)
+                                                                    send_tagged(session, tag, "OK", "DELETE completed");
+                                                                else
+                                                                    send_tagged(session, tag, "NO", "DELETE failed");
+                                                                session->drain_buffered_commands();
+                                                            });
+                                              });
+                      });
 }
 
 // ---------- RENAME ----------
@@ -1862,12 +1900,14 @@ void TraditionalImapsFsm<ConnectionType>::handle_rename(
         return;
     }
 
-    if (conn->execute(db::sql::build_imap_rename_mailbox(),
-                            {new_name, std::to_string(mailbox_id)})) {
-        send_tagged(session, tag, "OK", "RENAME completed");
-    } else {
-        send_tagged(session, tag, "NO", "RENAME failed");
-    }
+    session->set_paused(true);
+    conn->async_execute(db::sql::build_imap_rename_mailbox(),
+                        {new_name, std::to_string(mailbox_id)},
+                        [this, session, tag](bool ok) {
+                            if (ok) send_tagged(session, tag, "OK", "RENAME completed");
+                            else send_tagged(session, tag, "NO", "RENAME failed");
+                            session->drain_buffered_commands();
+                        });
 }
 
 // ---------- SUBSCRIBE ----------
@@ -2220,13 +2260,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
     int copied = 0;
     for (uint64_t mid : mail_ids) {
         // 检查是否已在目标邮箱
-        auto existing = db_conn->query(
+        auto existing = sq(db_conn.operator->(),
             db::sql::build_imap_copy_check_exists(),
             {std::to_string(mid), std::to_string(target_id), std::to_string(ctx->user_id)});
         if (existing && existing->get_row_count() > 0) continue; // 已存在
 
         int64_t mmid = algorithm::get_snowflake_generator().next_id();
-        if (db_conn->execute(
+        if (se(db_conn.operator->(),
                 db::sql::build_imap_copy_insert_mailbox(),
                 {std::to_string(mmid), std::to_string(mid), std::to_string(target_id),
                  std::to_string(ctx->user_id)})) {
@@ -2402,7 +2442,7 @@ bool TraditionalImapsFsm<ConnectionType>::auth_user(
     }
 
     std::string sql = db::sql::build_auth_user_query();
-    auto result = conn->query(sql, {mail_address});
+    auto result = sq(conn.operator->(),sql, {mail_address});
     if (!result || result->get_row_count() == 0) {
         LOG_AUTH_WARN("User not found: {}", mail_address);
         return false;
@@ -2430,7 +2470,7 @@ bool TraditionalImapsFsm<ConnectionType>::auth_user(
 
     if (ok) {
         out_user_id = user_id;
-        conn->execute(db::sql::build_update_last_login(), {mail_address});
+        se(conn.operator->(),db::sql::build_update_last_login(), {mail_address});
     }
     return ok;
 }
@@ -2446,7 +2486,7 @@ bool TraditionalImapsFsm<ConnectionType>::get_mailboxes(
         return false;
     }
 
-    auto result = conn->query(
+    auto result = sq(conn.operator->(),
         db::sql::build_imap_list_mailboxes(),
         {std::to_string(user_id)});
     if (!result) {
@@ -2477,7 +2517,7 @@ uint64_t TraditionalImapsFsm<ConnectionType>::find_mailbox_id(
         if (!decoded.empty()) name_utf8 = decoded;
     }
 
-    auto result = conn->query(
+    auto result = sq(conn.operator->(),
         db::sql::build_imap_get_mailbox_by_name(),
         {std::to_string(user_id), name_utf8});
     if (result && result->get_row_count() > 0) {
@@ -2487,7 +2527,7 @@ uint64_t TraditionalImapsFsm<ConnectionType>::find_mailbox_id(
     std::string upper = name_utf8;
     std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
     if (upper == "INBOX") {
-        result = conn->query(
+        result = sq(conn.operator->(),
             db::sql::build_imap_get_inbox_id(),
             {std::to_string(user_id)});
         if (result && result->get_row_count() > 0) {
@@ -2510,7 +2550,7 @@ bool TraditionalImapsFsm<ConnectionType>::get_mailbox_mails(
 
     std::string sql = db::sql::build_imap_get_mailbox_mails();
 
-    auto result = conn->query(sql, {
+    auto result = sq(conn.operator->(),sql, {
         std::to_string(mailbox_id),
         std::to_string(user_id)
     });
@@ -2545,7 +2585,7 @@ bool TraditionalImapsFsm<ConnectionType>::get_mail_info(
         return false;
     }
 
-    auto result = conn->query(
+    auto result = sq(conn.operator->(),
         "SELECT id, subject, body_path, UNIX_TIMESTAMP(send_time) AS send_time FROM mails WHERE id = ?",
         {std::to_string(mail_id)});
 
@@ -2567,7 +2607,7 @@ std::string TraditionalImapsFsm<ConnectionType>::get_mail_sender(uint64_t mail_i
     if (!conn.is_valid()) {
         return "";
     }
-    auto result = conn->query(
+    auto result = sq(conn.operator->(),
         "SELECT sender FROM mail_recipients WHERE mail_id = ? LIMIT 1",
         {std::to_string(mail_id)});
     if (result && result->get_row_count() > 0) {
@@ -2584,7 +2624,7 @@ std::vector<std::string> TraditionalImapsFsm<ConnectionType>::get_mail_recipient
     if (!conn.is_valid()) {
         return recipients;
     }
-    auto result = conn->query(
+    auto result = sq(conn.operator->(),
         "SELECT recipient FROM mail_recipients WHERE mail_id = ?",
         {std::to_string(mail_id)});
     if (result) {
@@ -2602,7 +2642,7 @@ std::string TraditionalImapsFsm<ConnectionType>::get_user_email(uint64_t user_id
     if (!conn.is_valid()) {
         return "";
     }
-    auto result = conn->query(
+    auto result = sq(conn.operator->(),
         "SELECT mail_address FROM users WHERE id = ?",
         {std::to_string(user_id)});
     if (result && result->get_row_count() > 0) {
@@ -2620,7 +2660,7 @@ bool TraditionalImapsFsm<ConnectionType>::update_mail_seen(
         return false;
     }
     int new_status = seen ? 0 : 1;
-    return conn->execute(
+    return se(conn.operator->(),
         "UPDATE mail_recipients SET status = ? WHERE mail_id = ? AND recipient = ?",
         {std::to_string(new_status), std::to_string(mail_id), recipient});
 }
@@ -2633,7 +2673,7 @@ bool TraditionalImapsFsm<ConnectionType>::update_mail_deleted(
     if (!conn.is_valid()) {
         return false;
     }
-    return conn->execute(
+    return se(conn.operator->(),
         db::sql::build_imap_update_mail_flag_deleted(),
         {deleted ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
 }
@@ -2646,7 +2686,7 @@ bool TraditionalImapsFsm<ConnectionType>::update_mail_flagged(
     if (!conn.is_valid()) {
         return false;
     }
-    return conn->execute(
+    return se(conn.operator->(),
         db::sql::build_imap_update_mail_flag_starred(),
         {flagged ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
 }
@@ -2685,7 +2725,7 @@ uint64_t TraditionalImapsFsm<ConnectionType>::create_mail(
     auto ts = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    if (!conn->execute(
+    if (!se(conn.operator->(),
             "INSERT INTO mails (id, subject, body_path, send_time) VALUES (?, ?, ?, ?)",
             {std::to_string(mail_id),
              subject.empty() ? "(无主题)" : subject,
@@ -2706,14 +2746,14 @@ bool TraditionalImapsFsm<ConnectionType>::link_mail_to_mailbox(
     if (!conn.is_valid()) return false;
 
     int64_t rid = algorithm::get_snowflake_generator().next_id();
-    bool ok = conn->execute(
+    bool ok = se(conn.operator->(),
         "INSERT INTO mail_recipients (id, mail_id, sender, recipient, status) "
         "VALUES (?, ?, ?, ?, ?)",
         {std::to_string(rid), std::to_string(mail_id),
          sender, recipient, std::to_string(status)});
     if (!ok) return false;
 
-    return conn->execute(
+    return se(conn.operator->(),
         "INSERT INTO mail_mailbox (id, mail_id, mailbox_id, user_id, is_starred, "
         "is_important, is_deleted, add_time) VALUES (?, ?, ?, ?, 0, 0, 0, NOW())",
         {std::to_string(algorithm::get_snowflake_generator().next_id()),
@@ -2854,7 +2894,7 @@ size_t TraditionalImapsFsm<ConnectionType>::get_mailbox_count(
     if (!conn.is_valid()) {
         return 0;
     }
-    auto result = conn->query(
+    auto result = sq(conn.operator->(),
         db::sql::build_imap_select_status_total(),
         {std::to_string(mailbox_id), std::to_string(user_id)});
     if (result && result->get_row_count() > 0) {
@@ -2871,7 +2911,7 @@ size_t TraditionalImapsFsm<ConnectionType>::get_mailbox_unseen_count(
     if (!conn.is_valid()) {
         return 0;
     }
-    auto result = conn->query(
+    auto result = sq(conn.operator->(),
         db::sql::build_imap_mailbox_unseen_count(),
         {std::to_string(user_id), std::to_string(mailbox_id), std::to_string(user_id)});
     if (result && result->get_row_count() > 0) {
@@ -2888,7 +2928,7 @@ uint64_t TraditionalImapsFsm<ConnectionType>::get_mailbox_uidnext(
     if (!conn.is_valid()) {
         return 1;
     }
-    auto result = conn->query(
+    auto result = sq(conn.operator->(),
         db::sql::build_imap_mailbox_uidnext(),
         {std::to_string(mailbox_id), std::to_string(user_id)});
     if (result && result->get_row_count() > 0) {
@@ -2905,7 +2945,7 @@ void TraditionalImapsFsm<ConnectionType>::expunge_mailbox(
     if (!conn.is_valid()) {
         return;
     }
-    conn->execute(
+    se(conn.operator->(),
         db::sql::build_imap_expunge_delete_mailbox(),
         {std::to_string(mailbox_id), std::to_string(user_id)});
 }
@@ -2919,7 +2959,7 @@ std::vector<uint64_t> TraditionalImapsFsm<ConnectionType>::get_expunged_ids(
     if (!conn.is_valid()) {
         return ids;
     }
-    auto result = conn->query(
+    auto result = sq(conn.operator->(),
         db::sql::build_imap_expunge_select_ids(),
         {std::to_string(mailbox_id), std::to_string(user_id)});
     if (result) {
