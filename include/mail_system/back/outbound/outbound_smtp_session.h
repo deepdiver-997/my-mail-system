@@ -100,8 +100,13 @@ public:
         return queue_.size();
     }
 
+    // 投递完成回调: void(uint64_t record_id, bool success)
+    using CompletionCb = std::function<void(uint64_t, bool)>;
+    void set_completion_cb(CompletionCb cb) { completion_cb_ = std::move(cb); }
+
     const std::string& mx_host() const { return mx_host_; }
     bool is_connected() const { return this->connection_ && this->connection_->is_open(); }
+    bool has_active_task() const { return current_task_ != nullptr; }
 
     // ── SessionBase 接口 ──────────────────────────────────────
     void handle_read(const std::string& data) override {
@@ -344,6 +349,9 @@ private:
     void handle_accept_250(std::shared_ptr<SessionBase<ConnectionType>> session) {
         auto self = std::static_pointer_cast<OutboundSmtpSession>(session);
         LOG_SMTP_INFO("Outbound: mail {} accepted by {}", self->current_task_->mail_id, self->mx_host_);
+        if (self->completion_cb_) {
+            self->completion_cb_(self->current_task_->record_id, true);
+        }
         self->current_task_.reset();
 
         if (self->mails_sent_on_conn_ >= MAX_MAILS_PER_CONNECTION) {
@@ -367,6 +375,7 @@ private:
 
     void handle_perm_error(std::shared_ptr<SessionBase<ConnectionType>>) {
         LOG_SMTP_WARN("Outbound: 5xx perm error for {} to {}", current_task_->mail_id, mx_host_);
+        if (completion_cb_) completion_cb_(current_task_->record_id, false);
         current_task_.reset();
         deliver_next();
     }
@@ -390,6 +399,7 @@ private:
     mutable std::mutex queue_mu_;
     std::queue<std::unique_ptr<MailDeliveryTask>> queue_;
     bool in_callback_ = false;
+    CompletionCb completion_cb_;
 
     std::unique_ptr<MailDeliveryTask> current_task_;
     int mails_sent_on_conn_ = 0;
