@@ -20,8 +20,6 @@
 #include "mail_system/back/db/mysql_pool.h"
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/entities/mail.h"
-#include "mail_system/back/persist_storage/persistent_queue.h"
-#include "mail_system/back/outbound/smtp_outbound_client.h"
 #include "mail_system/back/common/lru_cache.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/router/i_shard_router.h"
@@ -105,7 +103,7 @@ protected:
     // 停止服务器：释放 work guard、关闭 acceptor、停止 io_context、
     // 等待 listener 线程退出、停止 outbound/queue/thread pools。
     // 仅从 ~ServerBase() 调用，外部应使用 request_stop() + 析构。
-    void stop(ServerState state = ServerState::Pausing);
+    virtual void stop(ServerState state = ServerState::Pausing);
 
     // 启动所有 listener 的异步 accept 循环。
     virtual void start_all_tcp_acceptors();
@@ -129,9 +127,6 @@ public:
 public:
     std::shared_ptr<mail_system::ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<mail_system::ThreadPoolBase> m_workerThreadPool;
-    std::shared_ptr<persist_storage::PersistentQueue> m_persistentQueue;
-    std::shared_ptr<outbound::SmtpOutboundClient> m_outboundClient;
-    std::shared_ptr<std::atomic<bool>> m_outboundInterruptFlag;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
 
     void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = cache; }
@@ -208,16 +203,6 @@ public:
         add_counter("protorelay_mails_accepted_total", nullptr,
                     "Total mails accepted",
                     mails_accepted_total_.load(std::memory_order_relaxed));
-
-        // ---- 队列 ----
-        if (m_persistentQueue) {
-            add_gauge("protorelay_queue_inflight", nullptr,
-                      "Current inflight persist tasks",
-                      m_persistentQueue->inflight_count());
-            add_gauge("protorelay_queue_depth", nullptr,
-                      "Pending tasks in persist queue",
-                      m_persistentQueue->queue_size());
-        }
 
         // ---- 监听器 ----
         for (auto& [port, lc] : m_listener_configs) {
@@ -328,16 +313,6 @@ public:
             out.append("}");
         }
         out.append("],");
-
-        // 队列
-        out.append("\"queue\":{");
-        if (m_persistentQueue) {
-            out.append("\"inflight\":").append(std::to_string(m_persistentQueue->inflight_count()));
-            out.append(",\"depth\":").append(std::to_string(m_persistentQueue->queue_size()));
-        } else {
-            out.append("\"inflight\":0,\"depth\":0");
-        }
-        out.append("}");
 
         out.append("}");
         return out;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mail_system/back/mailServer/smtps_server.h"
+
 namespace mail_system {
 
 template <typename ConnectionType>
@@ -17,7 +19,7 @@ SmtpsSession<ConnectionType>::SmtpsSession(
     , buffer_(new char[INITIAL_BUFFER_SIZE])
     , buffer_used_(0)
     , buffer_expand_count_(0)
-    , persistent_queue_(server->m_persistentQueue) {}
+    , persistent_queue_(static_cast<SmtpsServer*>(server)->m_persistentQueue) {}
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::start(std::shared_ptr<SmtpsSession> self) {
@@ -437,7 +439,7 @@ bool SmtpsSession<ConnectionType>::check_mail_persist_status() {
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::transfer_mail_ownership_to_outbound() {
-    if (!this->m_server || !this->m_server->m_outboundClient || !this->get_mail()) {
+    if (!this->m_server || !static_cast<SmtpsServer*>(this->m_server)->m_outboundClient || !this->get_mail()) {
         return;
     }
 
@@ -446,7 +448,7 @@ void SmtpsSession<ConnectionType>::transfer_mail_ownership_to_outbound() {
         return;
     }
 
-    if (!this->m_server->m_outboundClient->accept_mail_ownership(std::move(owned_mail))) {
+    if (!static_cast<SmtpsServer*>(this->m_server)->m_outboundClient->accept_mail_ownership(std::move(owned_mail))) {
         LOG_SESSION_WARN("Failed to transfer mail ownership to outbound client");
     }
 }

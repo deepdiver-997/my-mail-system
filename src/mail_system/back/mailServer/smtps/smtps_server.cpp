@@ -77,8 +77,19 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
 }
 
 SmtpsServer::~SmtpsServer() {
-    // 确保服务器停止
     stop();
+}
+
+void SmtpsServer::stop(ServerState state) {
+    // 先停 SMTP 专有组件（必须在停线程池之前）
+    if (m_outboundClient) { m_outboundClient->stop(); LOG_SERVER_INFO("Outbound client stopped"); }
+    if (m_persistentQueue) {
+        m_persistentQueue->shutdown();
+        m_persistentQueue.reset();
+        LOG_SERVER_INFO("PersistentQueue shutdown");
+    }
+    // 再调用基类的停止逻辑（线程池等）
+    ServerBase::stop(state);
 }
 
 void SmtpsServer::handle_accept(std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>&& ssl_socket,

@@ -363,7 +363,6 @@ void ServerBase::start() {
     if (m_state.load() != ServerState::Stopped) {
         m_state.store(ServerState::Running);
         start_metrics_server();
-        if (m_outboundInterruptFlag) m_outboundInterruptFlag->store(true);
 
         try {
             if (!has_listener_thread) {
@@ -436,14 +435,6 @@ void ServerBase::stop(ServerState next_state) {
         for (auto& a : m_tcp_acceptors) a->close(ec);
 
         stop_metrics_server();
-        if (m_outboundInterruptFlag) m_outboundInterruptFlag->store(false);
-
-        if (m_outboundClient) { m_outboundClient->stop(); LOG_SERVER_INFO("Outbound client stopped"); }
-        if (m_persistentQueue) {
-            m_persistentQueue->shutdown();
-            m_persistentQueue.reset();  // join worker 线程，必须在停线程池之前
-            LOG_SERVER_INFO("PersistentQueue shutdown");
-        }
 
         if (m_ioThreadPool) m_ioThreadPool->stop();
         if (m_workerThreadPool) m_workerThreadPool->stop();
@@ -569,11 +560,6 @@ void ServerBase::refresh_metrics() {
         }
     }
 
-    // 队列（低频轮询，render 时更新）
-    if (m_persistentQueue) {
-        m_metricsServer->set_gauge("protorelay_queue_inflight", {}, m_persistentQueue->inflight_count());
-        m_metricsServer->set_gauge("protorelay_queue_depth", {}, m_persistentQueue->queue_size());
-    }
 }
 
 bool ServerBase::reload_config(const std::string& json_file) {
@@ -601,13 +587,6 @@ bool ServerBase::reload_config(const std::string& json_file) {
     Logger::get_instance().set_level(Logger::string_to_level(applied->log_level));
     LOG_SERVER_INFO("Config reloaded: log_level={}, auth={}",
                     applied->log_level, inbound_auth_policy_to_string(applied->inbound_auth_policy));
-    if (m_persistentQueue) {
-        persist_storage::PersistentQueuePressureConfig pc;
-        pc.max_inflight_mails = applied->persist_max_inflight_mails;
-        pc.min_available_memory_mb = applied->persist_min_available_memory_mb;
-        pc.min_db_available_connections = applied->persist_min_db_available_connections;
-        m_persistentQueue->set_pressure_config(pc);
-    }
     return true;
 }
 

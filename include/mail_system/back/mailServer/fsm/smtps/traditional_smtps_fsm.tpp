@@ -5,6 +5,7 @@
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
 #include "mail_system/back/mailServer/session/smtps_session.h"
+#include "mail_system/back/mailServer/smtps_server.h"
 
 namespace mail_system {
 
@@ -414,7 +415,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
 
         if (lc.auth_policy == InboundAuthPolicy::AUTO &&
             !ctx->is_trusted_server && !ctx->ehlo_domain.empty()) {
-            auto outbound = session->get_server()->m_outboundClient;
+            auto outbound = static_cast<SmtpsServer*>(session->get_server())->m_outboundClient;
             if (outbound) {
                 auto resolver = outbound->get_dns_resolver();
                 if (resolver) {
@@ -477,7 +478,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         std::string spf_reject_reason;
         if (!cfg->perf_mode && cfg->inbound_spf_mode != "off" &&
             !ctx->sender_address.empty() && ctx->sender_address != "<>") {
-            auto outbound = session->get_server()->m_outboundClient;
+            auto outbound = static_cast<SmtpsServer*>(session->get_server())->m_outboundClient;
             if (outbound) {
                 auto resolver = outbound->get_dns_resolver();
                 if (resolver) {
@@ -611,7 +612,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
             }
         }
 
-        auto outbound = session->get_server()->m_outboundClient;
+        auto outbound = static_cast<SmtpsServer*>(session->get_server())->m_outboundClient;
         if (outbound) {
             auto resolver = outbound->get_dns_resolver();
             if (resolver) {
