@@ -4,12 +4,15 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
+#include <spdlog/fmt/fmt.h>
 #include <memory>
 #include <string>
 #include <vector>
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <cstdio>
+#include <chrono>
 
 namespace mail_system {
 
@@ -186,7 +189,65 @@ inline void set_module_log_level(LogModule module, spdlog::level::level_enum lev
     Logger::get_instance().set_module_level(module, level);
 }
 
+// ---- LOG_PURE: 极简日志，输出 hash|arg1|...|timestamp 到纯日志文件 ----
+// 配合 tools/log_transform.py 使用：构建时脚本将 LOG_* 宏替换为 LOG_PURE，
+// 格式字符串被替换为内容派生 hash (稳定: [LEVEL][MODULE]fmt, 不包含行号)。
+// 运行时只输出 hash + 参数值 + 时间戳。
+// 映射表增量维护，后处理用 tools/log_restore.py 还原可读日志。
+
+/** 获取当前毫秒时间戳，LOG_PURE 自动注入 */
+inline uint64_t log_pure_timestamp_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+}
+
+namespace {
+    // 纯日志文件路径 (线程安全: 在 log_pure_write 懒打开前设置)
+    std::string _log_pure_path = "logs/pure.log";
+}
+
+/** 设置纯日志输出文件路径 (须在首次写日志前调用) */
+inline void log_pure_init(const std::string& path = "logs/pure.log") {
+    _log_pure_path = path;
+}
+
+template <typename... Args>
+inline void log_pure_write(uint64_t hash, Args&&... args) {
+    static thread_local FILE* s_fp = nullptr;
+    static thread_local std::string s_last_path;
+    if (!s_fp || s_last_path != _log_pure_path) {
+        if (s_fp) std::fclose(s_fp);
+        // 确保父目录存在 (ignore 列表跳过了 logs/, 不会自动创建)
+        std::filesystem::path p(_log_pure_path);
+        if (!p.parent_path().empty())
+            std::filesystem::create_directories(p.parent_path());
+        s_fp = std::fopen(_log_pure_path.c_str(), "a");
+        s_last_path = _log_pure_path;
+        if (s_fp) std::setvbuf(s_fp, nullptr, _IOFBF, 64 * 1024);
+    }
+    if (!s_fp) return;
+    fmt::print(s_fp, "0x{:016x}", hash);
+    ((fmt::print(s_fp, "|{}", std::forward<Args>(args))), ...);
+    fmt::print(s_fp, "\n");
+}
+
+inline void log_pure_flush() {
+    static thread_local FILE* s_fp = nullptr;
+    if (!s_fp) {
+        s_fp = std::fopen(_log_pure_path.c_str(), "a");
+        if (s_fp) std::setvbuf(s_fp, nullptr, _IOFBF, 64 * 1024);
+    }
+    if (s_fp) std::fflush(s_fp);
+}
+
 } // namespace mail_system
+
+// LOG_PURE(hash, args...) → 输出 "hash|arg1|...|ts\n"
+// hash: 64位十六进制，由转换脚本根据 [LEVEL][MODULE]fmt 计算 (稳定, 不含行号)
+// 脚本自动在末尾追加 mail_system::log_pure_timestamp_ms()
+#define LOG_PURE(hash, ...) \
+    mail_system::log_pure_write(hash, ##__VA_ARGS__)
 
 // ==================== 模块化日志宏控制 ====================
 
