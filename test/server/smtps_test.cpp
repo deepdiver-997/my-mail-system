@@ -6,6 +6,8 @@
 #include <signal.h>
 #include <string>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <chrono>
 #if ENABLE_DATABASE_QUERY_DEBUG_LOG
 #define ENABLE_DATABASE_QUERY_DEBUG_LOG 0
@@ -78,9 +80,12 @@ bool parse_cli_options(int argc, char* argv[], CliOptions& options, std::string&
 // 全局服务器指针，用于信号处理
 std::unique_ptr<SmtpsServer> g_server = nullptr;
 volatile sig_atomic_t g_signal_flag = 0;
+std::mutex g_signal_mutex;
+std::condition_variable g_signal_cv;
 
 void signal_handler(int signal) {
     g_signal_flag = (signal == SIGHUP) ? 2 : 1;
+    g_signal_cv.notify_one();
 }
 
 int main(int argc, char* argv[]) {
@@ -147,9 +152,10 @@ int main(int argc, char* argv[]) {
         LOG_SERVER_INFO("SMTPS Server is running");
         LOG_SERVER_INFO("Press Ctrl+C to stop");
 
-        // 主循环：轮询信号标志，检测到后从主线程安全关闭
+        // 主循环：等信号或服务器停止，condition_variable 替代忙等
         while (g_server && !g_signal_flag) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            std::unique_lock<std::mutex> lk(g_signal_mutex);
+            g_signal_cv.wait_for(lk, std::chrono::seconds(1));
         }
 
         if (g_signal_flag == 2) {

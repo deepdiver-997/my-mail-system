@@ -28,6 +28,8 @@
 #include <signal.h>
 #include <string>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <chrono>
 #include <cstdlib>
 
@@ -125,9 +127,12 @@ SharedServerResources g_resources;
 
 // 信号安全：只写 volatile sig_atomic_t，让主线程轮询
 volatile sig_atomic_t g_signal_flag = 0;
+std::mutex g_signal_mutex;
+std::condition_variable g_signal_cv;
 
 void signal_handler(int signal) {
     g_signal_flag = (signal == SIGHUP) ? 2 : 1;
+    g_signal_cv.notify_one();
 }
 
 int main(int argc, char* argv[]) {
@@ -257,8 +262,9 @@ int main(int argc, char* argv[]) {
         // ================================================================
         // 8. 主循环：轮询信号标志，安全关闭
         // ================================================================
-        while (!g_signal_flag) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        {
+            std::unique_lock<std::mutex> lk(g_signal_mutex);
+            g_signal_cv.wait(lk, []{ return g_signal_flag != 0; });
         }
 
         if (g_signal_flag == 2) {

@@ -21,7 +21,7 @@ from pathlib import Path
 # ============================================================
 _SRC_EXTS = {'.h', '.hpp', '.cpp', '.cc', '.cxx', '.c', '.tpp', '.ipp', '.inl'}
 _SKIP_FILES = {'logger.h'}  # 不转换 logger.h (宏定义自身)
-_TIMESTAMP_FN = 'mail_system::log_pure_timestamp_ms()'
+_TIMESTAMP_FN = 'pr::log_pure_timestamp_ms()'
 
 _IGNORE_PATTERNS = shutil.ignore_patterns(
     '.git', '__pycache__', '*.pyc', '*.o', '*.a', '*.so', '*.dylib',

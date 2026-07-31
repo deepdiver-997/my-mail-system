@@ -6,6 +6,8 @@
 #include <signal.h>
 #include <string>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <chrono>
 #include <cstdlib>
 
@@ -78,11 +80,12 @@ bool parse_cli_options(int argc, char* argv[], CliOptions& options, std::string&
 // 全局服务器指针，用于信号处理
 std::unique_ptr<ImapsServer> g_server = nullptr;
 volatile sig_atomic_t g_signal_flag = 0;
+std::mutex g_signal_mutex;
+std::condition_variable g_signal_cv;
 
-// 信号处理函数（信号安全，只写 volatile sig_atomic_t）
 void signal_handler(int signal) {
-    // SIGHUP → reload, SIGINT/SIGTERM → stop
     g_signal_flag = (signal == SIGHUP) ? 2 : 1;
+    g_signal_cv.notify_one();
 }
 
 int main(int argc, char* argv[]) {
@@ -150,12 +153,12 @@ int main(int argc, char* argv[]) {
         LOG_SERVER_INFO("IMAPS Server running with {} listener(s)", config.listeners.size());
         LOG_SERVER_INFO("Press Ctrl+C to stop, SIGHUP to reload config");
 
-        // 主循环：轮询信号标志
-        //   signal=1 (SIGINT/SIGTERM) → stop
-        //   signal=2 (SIGHUP) → reload config → continue running
+        // 主循环：condition_variable 等信号，替代忙等
         for (;;) {
-            while (!g_signal_flag) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            {
+                std::unique_lock<std::mutex> lk(g_signal_mutex);
+                g_signal_cv.wait_for(lk, std::chrono::seconds(1), []{ return g_signal_flag != 0; });
+                if (!g_signal_flag) continue;
             }
 
             if (g_signal_flag == 2) {
