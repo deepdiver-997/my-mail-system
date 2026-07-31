@@ -224,7 +224,7 @@ inline void log_pure_write(uint64_t hash, Args&&... args) {
             std::filesystem::create_directories(p.parent_path());
         s_fp = std::fopen(_log_pure_path.c_str(), "a");
         s_last_path = _log_pure_path;
-        if (s_fp) std::setvbuf(s_fp, nullptr, _IOFBF, 64 * 1024);
+        if (s_fp) std::setvbuf(s_fp, nullptr, _IOLBF, 0);
     }
     if (!s_fp) return;
     fmt::print(s_fp, "0x{:016x}", hash);
@@ -236,18 +236,141 @@ inline void log_pure_flush() {
     static thread_local FILE* s_fp = nullptr;
     if (!s_fp) {
         s_fp = std::fopen(_log_pure_path.c_str(), "a");
-        if (s_fp) std::setvbuf(s_fp, nullptr, _IOFBF, 64 * 1024);
+        if (s_fp) std::setvbuf(s_fp, nullptr, _IOLBF, 0);
     }
     if (s_fp) std::fflush(s_fp);
 }
 
 } // namespace mail_system
 
-// LOG_PURE(hash, args...) → 输出 "hash|arg1|...|ts\n"
+// LOG_PURE(hash, args...) → 输出 "0xhash|arg1|...|ts\n"
 // hash: 64位十六进制，由转换脚本根据 [LEVEL][MODULE]fmt 计算 (稳定, 不含行号)
 // 脚本自动在末尾追加 mail_system::log_pure_timestamp_ms()
 #define LOG_PURE(hash, ...) \
     mail_system::log_pure_write(hash, ##__VA_ARGS__)
+
+// ================================================================
+// LOG_LOOK_UP 模式 —— 预处理器分析阶段
+//
+// 当通过 -DLOG_LOOK_UP 编译时，所有 LOG_* 宏展开为带有 \001 分隔符
+// 的标记字符串。tools/log_transform.py 运行 gcc -E 解析这些标记，
+// 提取 (文件, 行号, 模块, 级别, 模板) 五元组，计算 hash 后替换
+// 源码中的 LOG_* 为 LOG_PURE。
+//
+// 开发者无感：正常写 LOG_SERVER_INFO("msg {}", arg) 即可。
+// ================================================================
+#ifdef LOG_LOOK_UP
+
+#define __LOG_MARK(module, level, fmt, ...) \
+    (void)("LUK" "\001" module "\001" level "\001" fmt)
+
+// ── SERVER ──
+#define LOG_SERVER_TRACE(fmt,...)     __LOG_MARK("SERVER","TRACE",fmt)
+#define LOG_SERVER_DEBUG(fmt,...)     __LOG_MARK("SERVER","DEBUG",fmt)
+#define LOG_SERVER_INFO(fmt,...)      __LOG_MARK("SERVER","INFO",fmt)
+#define LOG_SERVER_WARN(fmt,...)      __LOG_MARK("SERVER","WARN",fmt)
+#define LOG_SERVER_ERROR(fmt,...)     __LOG_MARK("SERVER","ERROR",fmt)
+#define LOG_SERVER_CRITICAL(fmt,...)  __LOG_MARK("SERVER","CRITICAL",fmt)
+// ── NETWORK ──
+#define LOG_NETWORK_TRACE(fmt,...)     __LOG_MARK("NETWORK","TRACE",fmt)
+#define LOG_NETWORK_DEBUG(fmt,...)     __LOG_MARK("NETWORK","DEBUG",fmt)
+#define LOG_NETWORK_INFO(fmt,...)      __LOG_MARK("NETWORK","INFO",fmt)
+#define LOG_NETWORK_WARN(fmt,...)      __LOG_MARK("NETWORK","WARN",fmt)
+#define LOG_NETWORK_ERROR(fmt,...)     __LOG_MARK("NETWORK","ERROR",fmt)
+#define LOG_NETWORK_CRITICAL(fmt,...)  __LOG_MARK("NETWORK","CRITICAL",fmt)
+// ── DATABASE ──
+#define LOG_DATABASE_TRACE(fmt,...)     __LOG_MARK("DATABASE","TRACE",fmt)
+#define LOG_DATABASE_DEBUG(fmt,...)     __LOG_MARK("DATABASE","DEBUG",fmt)
+#define LOG_DATABASE_INFO(fmt,...)      __LOG_MARK("DATABASE","INFO",fmt)
+#define LOG_DATABASE_WARN(fmt,...)      __LOG_MARK("DATABASE","WARN",fmt)
+#define LOG_DATABASE_ERROR(fmt,...)     __LOG_MARK("DATABASE","ERROR",fmt)
+#define LOG_DATABASE_CRITICAL(fmt,...)  __LOG_MARK("DATABASE","CRITICAL",fmt)
+// ── DATABASE_QUERY ──
+#define LOG_DB_QUERY_TRACE(fmt,...)     __LOG_MARK("DATABASE_QUERY","TRACE",fmt)
+#define LOG_DB_QUERY_DEBUG(fmt,...)     __LOG_MARK("DATABASE_QUERY","DEBUG",fmt)
+#define LOG_DB_QUERY_INFO(fmt,...)      __LOG_MARK("DATABASE_QUERY","INFO",fmt)
+#define LOG_DB_QUERY_WARN(fmt,...)      __LOG_MARK("DATABASE_QUERY","WARN",fmt)
+#define LOG_DB_QUERY_ERROR(fmt,...)     __LOG_MARK("DATABASE_QUERY","ERROR",fmt)
+#define LOG_DB_QUERY_CRITICAL(fmt,...)  __LOG_MARK("DATABASE_QUERY","CRITICAL",fmt)
+// ── SMTP ──
+#define LOG_SMTP_TRACE(fmt,...)     __LOG_MARK("SMTP","TRACE",fmt)
+#define LOG_SMTP_DEBUG(fmt,...)     __LOG_MARK("SMTP","DEBUG",fmt)
+#define LOG_SMTP_INFO(fmt,...)      __LOG_MARK("SMTP","INFO",fmt)
+#define LOG_SMTP_WARN(fmt,...)      __LOG_MARK("SMTP","WARN",fmt)
+#define LOG_SMTP_ERROR(fmt,...)     __LOG_MARK("SMTP","ERROR",fmt)
+#define LOG_SMTP_CRITICAL(fmt,...)  __LOG_MARK("SMTP","CRITICAL",fmt)
+// ── SMTP_DETAIL ──
+#define LOG_SMTP_DETAIL_TRACE(fmt,...)     __LOG_MARK("SMTP_DETAIL","TRACE",fmt)
+#define LOG_SMTP_DETAIL_DEBUG(fmt,...)     __LOG_MARK("SMTP_DETAIL","DEBUG",fmt)
+#define LOG_SMTP_DETAIL_INFO(fmt,...)      __LOG_MARK("SMTP_DETAIL","INFO",fmt)
+#define LOG_SMTP_DETAIL_WARN(fmt,...)      __LOG_MARK("SMTP_DETAIL","WARN",fmt)
+#define LOG_SMTP_DETAIL_ERROR(fmt,...)     __LOG_MARK("SMTP_DETAIL","ERROR",fmt)
+#define LOG_SMTP_DETAIL_CRITICAL(fmt,...)  __LOG_MARK("SMTP_DETAIL","CRITICAL",fmt)
+// ── SESSION ──
+#define LOG_SESSION_TRACE(fmt,...)     __LOG_MARK("SESSION","TRACE",fmt)
+#define LOG_SESSION_DEBUG(fmt,...)     __LOG_MARK("SESSION","DEBUG",fmt)
+#define LOG_SESSION_INFO(fmt,...)      __LOG_MARK("SESSION","INFO",fmt)
+#define LOG_SESSION_WARN(fmt,...)      __LOG_MARK("SESSION","WARN",fmt)
+#define LOG_SESSION_ERROR(fmt,...)     __LOG_MARK("SESSION","ERROR",fmt)
+#define LOG_SESSION_CRITICAL(fmt,...)  __LOG_MARK("SESSION","CRITICAL",fmt)
+// ── PERSISTENT_QUEUE ──
+#define LOG_PERSISTENT_QUEUE_TRACE(fmt,...)     __LOG_MARK("PERSISTENT_QUEUE","TRACE",fmt)
+#define LOG_PERSISTENT_QUEUE_DEBUG(fmt,...)     __LOG_MARK("PERSISTENT_QUEUE","DEBUG",fmt)
+#define LOG_PERSISTENT_QUEUE_INFO(fmt,...)      __LOG_MARK("PERSISTENT_QUEUE","INFO",fmt)
+#define LOG_PERSISTENT_QUEUE_WARN(fmt,...)      __LOG_MARK("PERSISTENT_QUEUE","WARN",fmt)
+#define LOG_PERSISTENT_QUEUE_ERROR(fmt,...)     __LOG_MARK("PERSISTENT_QUEUE","ERROR",fmt)
+#define LOG_PERSISTENT_QUEUE_CRITICAL(fmt,...)  __LOG_MARK("PERSISTENT_QUEUE","CRITICAL",fmt)
+// ── OUTBOUND ──
+#define LOG_OUTBOUND_TRACE(fmt,...)     __LOG_MARK("OUTBOUND","TRACE",fmt)
+#define LOG_OUTBOUND_DEBUG(fmt,...)     __LOG_MARK("OUTBOUND","DEBUG",fmt)
+#define LOG_OUTBOUND_INFO(fmt,...)      __LOG_MARK("OUTBOUND","INFO",fmt)
+#define LOG_OUTBOUND_WARN(fmt,...)      __LOG_MARK("OUTBOUND","WARN",fmt)
+#define LOG_OUTBOUND_ERROR(fmt,...)     __LOG_MARK("OUTBOUND","ERROR",fmt)
+#define LOG_OUTBOUND_CRITICAL(fmt,...)  __LOG_MARK("OUTBOUND","CRITICAL",fmt)
+// ── INBOUND ──
+#define LOG_INBOUND_TRACE(fmt,...)     __LOG_MARK("INBOUND","TRACE",fmt)
+#define LOG_INBOUND_DEBUG(fmt,...)     __LOG_MARK("INBOUND","DEBUG",fmt)
+#define LOG_INBOUND_INFO(fmt,...)      __LOG_MARK("INBOUND","INFO",fmt)
+#define LOG_INBOUND_WARN(fmt,...)      __LOG_MARK("INBOUND","WARN",fmt)
+#define LOG_INBOUND_ERROR(fmt,...)     __LOG_MARK("INBOUND","ERROR",fmt)
+#define LOG_INBOUND_CRITICAL(fmt,...)  __LOG_MARK("INBOUND","CRITICAL",fmt)
+// ── THREAD_POOL ──
+#define LOG_THREAD_POOL_TRACE(fmt,...)     __LOG_MARK("THREAD_POOL","TRACE",fmt)
+#define LOG_THREAD_POOL_DEBUG(fmt,...)     __LOG_MARK("THREAD_POOL","DEBUG",fmt)
+#define LOG_THREAD_POOL_INFO(fmt,...)      __LOG_MARK("THREAD_POOL","INFO",fmt)
+#define LOG_THREAD_POOL_WARN(fmt,...)      __LOG_MARK("THREAD_POOL","WARN",fmt)
+#define LOG_THREAD_POOL_ERROR(fmt,...)     __LOG_MARK("THREAD_POOL","ERROR",fmt)
+#define LOG_THREAD_POOL_CRITICAL(fmt,...)  __LOG_MARK("THREAD_POOL","CRITICAL",fmt)
+// ── FILE_IO ──
+#define LOG_FILE_IO_TRACE(fmt,...)     __LOG_MARK("FILE_IO","TRACE",fmt)
+#define LOG_FILE_IO_DEBUG(fmt,...)     __LOG_MARK("FILE_IO","DEBUG",fmt)
+#define LOG_FILE_IO_INFO(fmt,...)      __LOG_MARK("FILE_IO","INFO",fmt)
+#define LOG_FILE_IO_WARN(fmt,...)      __LOG_MARK("FILE_IO","WARN",fmt)
+#define LOG_FILE_IO_ERROR(fmt,...)     __LOG_MARK("FILE_IO","ERROR",fmt)
+#define LOG_FILE_IO_CRITICAL(fmt,...)  __LOG_MARK("FILE_IO","CRITICAL",fmt)
+// ── AUTH ──
+#define LOG_AUTH_TRACE(fmt,...)     __LOG_MARK("AUTH","TRACE",fmt)
+#define LOG_AUTH_DEBUG(fmt,...)     __LOG_MARK("AUTH","DEBUG",fmt)
+#define LOG_AUTH_INFO(fmt,...)      __LOG_MARK("AUTH","INFO",fmt)
+#define LOG_AUTH_WARN(fmt,...)      __LOG_MARK("AUTH","WARN",fmt)
+#define LOG_AUTH_ERROR(fmt,...)     __LOG_MARK("AUTH","ERROR",fmt)
+#define LOG_AUTH_CRITICAL(fmt,...)  __LOG_MARK("AUTH","CRITICAL",fmt)
+// ── IMAP ──
+#define LOG_IMAP_TRACE(fmt,...)     __LOG_MARK("IMAP","TRACE",fmt)
+#define LOG_IMAP_DEBUG(fmt,...)     __LOG_MARK("IMAP","DEBUG",fmt)
+#define LOG_IMAP_INFO(fmt,...)      __LOG_MARK("IMAP","INFO",fmt)
+#define LOG_IMAP_WARN(fmt,...)      __LOG_MARK("IMAP","WARN",fmt)
+#define LOG_IMAP_ERROR(fmt,...)     __LOG_MARK("IMAP","ERROR",fmt)
+#define LOG_IMAP_CRITICAL(fmt,...)  __LOG_MARK("IMAP","CRITICAL",fmt)
+// ── IMAP_DETAIL ──
+#define LOG_IMAP_DETAIL_TRACE(fmt,...)     __LOG_MARK("IMAP_DETAIL","TRACE",fmt)
+#define LOG_IMAP_DETAIL_DEBUG(fmt,...)     __LOG_MARK("IMAP_DETAIL","DEBUG",fmt)
+#define LOG_IMAP_DETAIL_INFO(fmt,...)      __LOG_MARK("IMAP_DETAIL","INFO",fmt)
+#define LOG_IMAP_DETAIL_WARN(fmt,...)      __LOG_MARK("IMAP_DETAIL","WARN",fmt)
+#define LOG_IMAP_DETAIL_ERROR(fmt,...)     __LOG_MARK("IMAP_DETAIL","ERROR",fmt)
+#define LOG_IMAP_DETAIL_CRITICAL(fmt,...)  __LOG_MARK("IMAP_DETAIL","CRITICAL",fmt)
+
+#else  // LOG_LOOK_UP — 正常编译模式
 
 // ==================== 模块化日志宏控制 ====================
 
@@ -426,4 +549,5 @@ inline void log_pure_flush() {
 #define LOG_IMAP_DETAIL_ERROR(...)  mail_system::log(mail_system::LogModule::IMAP_DETAIL)->log(_SRC_LOC, spdlog::level::err, __VA_ARGS__)
 #define LOG_IMAP_DETAIL_CRITICAL(...) mail_system::log(mail_system::LogModule::IMAP_DETAIL)->log(_SRC_LOC, spdlog::level::critical, __VA_ARGS__)
 
+#endif // LOG_LOOK_UP
 #endif // MAIL_SYSTEM_LOGGER_H

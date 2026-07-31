@@ -56,14 +56,31 @@ cleanup_root_cmake_artifacts() {
     fi
 }
 
+# ---- pure-log 模式 ----
+# ./build.sh --pure-log Release → 变换 LOG_* 为 LOG_PURE(hash, args, ts)，然后构建
+PURE_LOG_DIR="${PURE_LOG_DIR:-${SCRIPT_DIR}/build/transformed}"
+if [[ "$1" == "--pure-log" ]]; then
+    shift
+    if [ "$#" -lt 1 ]; then
+        echo "Usage: $0 --pure-log <Debug|Release|SafeRelease> [...]"
+        exit 1
+    fi
+    echo -e "${BLUE}[PURE-LOG]${NC} Transforming LOG_* → LOG_PURE ..."
+    python3 "${SCRIPT_DIR}/tools/log_transform.py" "${SCRIPT_DIR}" --out "$PURE_LOG_DIR"
+    echo -e "${BLUE}[PURE-LOG]${NC} Building from transformed sources: $PURE_LOG_DIR"
+    cd "$PURE_LOG_DIR"
+    exec bash build.sh "$@"
+fi
+
 # 使用方法
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 <Debug|Release|SafeRelease> [clean] [jobs] [object-only] [cross-x64] [no-tests]"
+    echo "Usage: $0 [--pure-log] <Debug|Release|SafeRelease> [clean] [jobs] [object-only] [cross-x64] [no-tests]"
     echo "       $0 sync-sysroot [server]"
     echo ""
     echo "Examples:"
     echo "  $0 Debug           # 构建 Debug 版本（无优化，启用所有调试日志）"
     echo "  $0 Release         # 构建 Release 版本（高优化，仅 INFO 级别日志）"
+    echo "  $0 --pure-log Release  # 日志压缩模式：LOG_* → LOG_PURE(hash, args, ts)"
     echo "  $0 SafeRelease     # 低内存兜底构建（2核2G服务器推荐）"
     echo "  $0 Debug clean     # 清理后重新构建 Debug 版本"
     echo "  $0 Release clean   # 清理后重新构建 Release 版本"
@@ -79,6 +96,7 @@ if [ "$#" -lt 1 ]; then
     echo "              ARTIFACT_DIR=<path>, CROSS_CC=<path>, CROSS_CXX=<path>"
     echo "              USE_BOOST_LEGACY_FIND=<ON|OFF>"
     echo "              CROSS_SYSROOT=<path>, CROSS_SYSROOT_SERVER=<ssh-host>"
+    echo "              PURE_LOG_DIR=<path>  # 纯日志变换输出目录"
     echo ""
     exit 1
 fi

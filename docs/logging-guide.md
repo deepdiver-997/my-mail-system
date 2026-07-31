@@ -1,5 +1,8 @@
 # 日志系统配置说明
 
+> **新增**：日志压缩工具链支持构建时将 `LOG_*` 宏替换为 hash+参数的结构化输出，
+> 大幅减小日志体积。详见 [log-transform-toolchain.md](log-transform-toolchain.md)。
+
 ## 概述
 
 项目使用 [spdlog](https://github.com/gabime/spdlog) 作为日志系统，支持模块化日志、多级别控制、文件滚动等功能。

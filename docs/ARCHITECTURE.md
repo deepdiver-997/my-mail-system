@@ -247,7 +247,12 @@ using ExecuteCallback = std::function<void(bool success)>;
 
 ## 4.5 Logging Subsystem
 
-Built on spdlog with module-oriented loggers.
+Built on spdlog with module-oriented loggers (15 modules × 6 levels = 90 macros).
+
+**Log compression toolchain** (see [log-transform-toolchain.md](log-transform-toolchain.md)):
+build-time transformation replaces `LOG_*` macros with `LOG_PURE(hash, args, ts)`,
+outputting compressed `hash|arg|ts` lines. A post-processing restore tool reconstructs
+readable logs from an incremental mapping table.
 
 Runtime controls:
 
