@@ -19,6 +19,8 @@ test/
 │   ├── bench.sh / run_bench_all.sh
 │   └── bench-report.md
 ├── e2e/                         # Python 端到端测试
+│   ├── test_smtp_flow.py        # SMTP 全流程测试 (端口 25/465/587)
+│   ├── test_dual_server.py      # 双服务器互通测试 (带 static route)
 │   ├── test_outbound.py         # 出站投递
 │   ├── test_pipeline.py         # SMTP 流水线
 │   └── test_tcp_sticky.py       # TCP 粘包/截断/延迟
@@ -76,6 +78,52 @@ python3 test/e2e/test_tcp_sticky.py  # TCP 粘包截断测试
 ### 运行性能基准
 ```bash
 cd test/bench && bash bench.sh
+```
+
+## Python E2E 测试
+
+与单元测试不同，E2E 测试启动真实的 `smtpsServer` 进程，通过 TCP 连接验证完整的 SMTP 协议交互。所有测试自动创建临时配置和存储目录，不会污染项目源文件。
+
+### test_smtp_flow.py — SMTP 全流程测试
+
+验证三个端口的不同认证策略和投递流程：
+
+| 端口 | 认证策略 | 测试内容 |
+|------|---------|---------|
+| 25 | `auth_policy: off` | MTA 直投（免认证）：EHLO → MAIL FROM → RCPT TO → DATA |
+| 587 | `auth_policy: on` | 客户端提交：拒绝未认证 MAIL FROM、广告 AUTH |
+| 465 | SSL + AUTH | SSL 握手、拒绝未认证命令 |
+
+**特点**：
+- 自动创建临时配置（`perf_mode=false` 启用安全检查，独立存储路径）
+- 测试后删除临时目录
+- 验证投递后邮件文件确实写入磁盘
+
+```bash
+python3 test/e2e/test_smtp_flow.py
+# 保留临时文件以便调试:
+python3 test/e2e/test_smtp_flow.py --keep-temp
+```
+
+### test_dual_server.py — 双服务器互通测试
+
+启动两个 `smtpsServer` 实例模拟 MTA 间邮件投递：
+
+```
+Server A (:10025) ──static route b.local→127.0.0.1:10026──→ Server B (:10026)
+     │                                                            │
+  smtplib.sendmail()                                        verify_mail() ✓
+```
+
+**流程**：
+1. Server A 配置 `outbound.static_routes: {"b.local": {"host": "127.0.0.1", "port": 10026}}`
+2. Server B 在 10026 端口监听，免认证接受一切
+3. 通过 Server A 投递给 `user@b.local`
+4. Server A 的 static route 跳过 DNS 直接连接 Server B
+5. 验证 Server B 的文件系统收到了邮件
+
+```bash
+python3 test/e2e/test_dual_server.py
 ```
 
 ### 真实 DB 测试后清理

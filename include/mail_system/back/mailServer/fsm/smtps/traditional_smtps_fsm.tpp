@@ -4,6 +4,7 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
+#include <openssl/md5.h>
 #include "mail_system/back/mailServer/session/smtps_session.h"
 #include "mail_system/back/mailServer/smtps_server.h"
 
@@ -11,6 +12,21 @@ namespace mail_system {
 
 // sync-bridge: 通过 async API 同步获取结果（默认同步实现，回调在返回前触发）
 namespace {
+
+// 密码验证：自动检测 bcrypt / MD5 / 明文
+inline bool verify_password(const std::string& input, const std::string& stored) {
+    if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2')
+        return bcrypt_verify(input, stored);
+    if (stored.size() == 32 && std::all_of(stored.begin(), stored.end(),
+            [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) {
+        unsigned char md5[MD5_DIGEST_LENGTH];
+        MD5(reinterpret_cast<const unsigned char*>(input.data()), input.size(), md5);
+        char hex[33];
+        for (int i = 0; i < MD5_DIGEST_LENGTH; ++i) snprintf(hex + i*2, 3, "%02x", md5[i]);
+        return stored == std::string(hex, 32);
+    }
+    return stored == input;
+}
 inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql,
                                       const std::vector<std::string>& params) {
     std::shared_ptr<IDBResult> r;
@@ -794,9 +810,7 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
     if (m_authCache->lookup(mail_address, ce)) {
         if (ce.status != 1) { cb(false, 0); return; }
         shard = ce.shard;
-        bool ok = (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
-                      ? bcrypt_verify(password, ce.password_hash)
-                      : (ce.password_hash == password);
+        bool ok = verify_password(password, ce.password_hash);
         cb(ok, shard);
         return;
     }
@@ -827,9 +841,7 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
             }
             std::string stored = result->get_value(0, "password");
             m_authCache->store(mail_address, {stored, status, 0, shard});
-            bool ok = (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2')
-                          ? bcrypt_verify(password, stored)
-                          : (stored == password);
+            bool ok = verify_password(password, stored);
             if (ok) {
                 (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
                                        [cb = std::move(cb), ok, shard](bool) { cb(ok, shard); });
