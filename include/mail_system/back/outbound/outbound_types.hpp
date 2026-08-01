@@ -2,6 +2,7 @@
 #define OUTBOUND_SMTP_FSM_HPP
 
 #include "mail_system/back/entities/mail.h"
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <memory>
@@ -10,16 +11,34 @@ namespace mail_system {
 namespace outbound {
 
 // ================================================================
+// Session 生命周期状态（独立于 SMTP 协议状态机）
+// ================================================================
+enum class SessionState {
+    INIT,          // 初始，尚未连接
+    CONNECTING,    // DNS/connect 进行中
+    CONNECTED,     // 已连接，空闲等待任务
+    DELIVERING,    // 正在投递中
+    CLOSING,       // 优雅关闭中 (QUIT)
+    CLOSED         // 连接已终止
+};
+
+// ================================================================
 // 投递任务
 // ================================================================
 struct MailDeliveryTask {
+    using Clock = std::chrono::steady_clock;
+
     uint64_t mail_id;
-    uint64_t record_id;        // mail_outbox.id
-    std::string sender;        // 信封 MAIL FROM（已由 router 解析到本 MX）
-    std::string recipient;     // 信封 RCPT TO（单个收件人，已去重分派）
-    std::shared_ptr<struct mail> mail_ptr;  // 邮件对象（多个 session 共享，只读）
-    int attempt_count;
-    int max_attempts;
+    uint64_t record_id;
+    std::string sender;
+    std::string recipient;
+    std::shared_ptr<struct mail> mail_ptr;
+    int attempt_count = 0;
+    int max_attempts = 8;
+    Clock::time_point created_at = Clock::now();
+    std::chrono::seconds ttl = std::chrono::seconds(300);  // 5 分钟过期
+
+    bool expired() const { return Clock::now() - created_at > ttl; }
 };
 
 // ================================================================

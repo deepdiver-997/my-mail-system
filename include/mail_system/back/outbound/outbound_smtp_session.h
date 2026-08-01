@@ -43,16 +43,27 @@ public:
         register_handlers();
     }
 
+    SessionState state() const { return state_; }
+
     // ── 公开接口 ──────────────────────────────────────────────
     void submit(std::unique_ptr<MailDeliveryTask> task) {
         std::lock_guard<std::mutex> lk(queue_mu_);
+        // 丢弃过期任务
+        if (task->expired()) {
+            LOG_SMTP_WARN("Outbound: dropping expired task mail_id={}", task->mail_id);
+            if (completion_cb_) completion_cb_(task->record_id, false);
+            return;
+        }
         queue_.push(std::move(task));
-        // 取消空闲定时器
         idle_timer_.reset();
-        if (!in_callback_) {
-            in_callback_ = true;
+        if (state_ == SessionState::CONNECTED) {
+            state_ = SessionState::DELIVERING;
+            deliver_next_locked();
+        } else if (state_ == SessionState::INIT || state_ == SessionState::CLOSED) {
+            // 新 session 或重连后的 session
             start_delivery_loop();
         }
+        // DELIVERING/CONNECTING/CLOSING 状态：已在处理中，新任务自然排队
     }
 
     size_t queue_size() const {
@@ -145,8 +156,10 @@ private:
     // ── 投递循环 ──────────────────────────────────────────────
     void start_delivery_loop() {
         if (is_connected()) {
-            deliver_next();
+            state_ = SessionState::DELIVERING;
+            deliver_next_locked();
         } else {
+            state_ = SessionState::CONNECTING;
             connect_retries_ = 0;
             connect_to_mx();
         }
@@ -206,24 +219,25 @@ private:
         } else {
             LOG_SMTP_ERROR("Outbound: connect to {} failed after {} retries, giving up",
                            mx_host_, MAX_CONNECT_RETRIES);
-            in_callback_ = false;
+            state_ = SessionState::CLOSED;
         }
     }
 
-    void deliver_next() {
-        std::unique_ptr<MailDeliveryTask> task;
-        {
-            std::lock_guard<std::mutex> lk(queue_mu_);
-            if (queue_.empty()) {
-                // 队列为空：保持连接，启动空闲定时器
-                in_callback_ = false;
-                schedule_idle_timeout();
-                return;
-            }
-            task = std::move(queue_.front());
+    void deliver_next_locked() {
+        // 跳过过期任务
+        while (!queue_.empty() && queue_.front()->expired()) {
+            auto& t = queue_.front();
+            LOG_SMTP_WARN("Outbound: skipping expired task mail_id={}", t->mail_id);
+            if (completion_cb_) completion_cb_(t->record_id, false);
             queue_.pop();
         }
-        current_task_ = std::move(task);
+        if (queue_.empty()) {
+            state_ = SessionState::CONNECTED;
+            schedule_idle_timeout();
+            return;
+        }
+        current_task_ = std::move(queue_.front());
+        queue_.pop();
         mails_sent_on_conn_++;
 
         auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
@@ -248,10 +262,12 @@ private:
     }
 
     void do_graceful_quit() {
-        if (!is_connected()) return;
+        state_ = SessionState::CLOSING;
+        if (!is_connected()) { state_ = SessionState::CLOSED; return; }
         auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
         this->do_async_write("QUIT\r\n",
             [self](auto, const boost::system::error_code&) mutable {
+                self->state_ = SessionState::CLOSED;
                 self->fsm_->process_event(self, OutboundSmtpEvent::QUIT_221);
             });
     }
@@ -292,7 +308,7 @@ private:
 
     void handle_ehlo_250(std::shared_ptr<SessionBase<ConnectionType>> session) {
         auto self = std::static_pointer_cast<OutboundSmtpSession>(session);
-        self->deliver_next();
+        self->deliver_next_locked();
     }
 
     void handle_mail_250(std::shared_ptr<SessionBase<ConnectionType>> session) {
@@ -328,19 +344,21 @@ private:
         }
         // RSET → read response → deliver_next（250 触发 ACCEPT_250 处理器
         // 但 RSET 250 也被 ACCEPT_250 处理 → 直接调用 deliver_next）
-        self->deliver_next();
+        self->deliver_next_locked();
     }
 
     void handle_temp_error(std::shared_ptr<SessionBase<ConnectionType>>) {
         LOG_SMTP_WARN("Outbound: 4xx temp error for {} to {}", current_task_->mail_id, mx_host_);
-        deliver_next();
+        std::lock_guard<std::mutex> lk(queue_mu_);
+        deliver_next_locked();
     }
 
     void handle_perm_error(std::shared_ptr<SessionBase<ConnectionType>>) {
         LOG_SMTP_WARN("Outbound: 5xx perm error for {} to {}", current_task_->mail_id, mx_host_);
         if (completion_cb_) completion_cb_(current_task_->record_id, false);
         current_task_.reset();
-        deliver_next();
+        std::lock_guard<std::mutex> lk(queue_mu_);
+        deliver_next_locked();
     }
 
     void handle_closed(std::shared_ptr<SessionBase<ConnectionType>>) {
@@ -349,7 +367,7 @@ private:
             std::lock_guard<std::mutex> lk(queue_mu_);
             queue_.push(std::move(current_task_));
         }
-        in_callback_ = false;
+        state_ = SessionState::CLOSED;
     }
 
     // ── 成员 ──────────────────────────────────────────────────
@@ -361,7 +379,7 @@ private:
 
     mutable std::mutex queue_mu_;
     std::queue<std::unique_ptr<MailDeliveryTask>> queue_;
-    bool in_callback_ = false;
+    SessionState state_ = SessionState::INIT;
     CompletionCb completion_cb_;
 
     std::unique_ptr<MailDeliveryTask> current_task_;
