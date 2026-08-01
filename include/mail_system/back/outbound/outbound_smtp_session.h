@@ -19,11 +19,20 @@ namespace outbound {
 
 // ================================================================
 // OutboundSmtpSession — 出站 SMTP 会话
+//
+// 连接复用 + 自动重试 + 空闲保持:
+//   - 每连接最多发 MAX_MAILS_PER_CONNECTION 封后优雅退出
+//   - 队列为空时不退出，保持连接等待新任务
+//   - 连接失败自动重试（指数退避，最多 MAX_RETRIES 次）
+//   - 投递完成后 RSET → 链式启动下一封
 // ================================================================
 template <typename ConnectionType = TcpConnection>
 class OutboundSmtpSession : public SessionBase<ConnectionType> {
 public:
     static constexpr int MAX_MAILS_PER_CONNECTION = 100;
+    static constexpr int MAX_CONNECT_RETRIES = 3;
+    static constexpr int CONNECT_BACKOFF_BASE_MS = 500;
+    static constexpr int IDLE_TIMEOUT_SEC = 30;
 
     OutboundSmtpSession(ServerBase* server, const std::string& mx_host, int mx_port = 25)
         : SessionBase<ConnectionType>(nullptr, server)
@@ -36,16 +45,14 @@ public:
 
     // ── 公开接口 ──────────────────────────────────────────────
     void submit(std::unique_ptr<MailDeliveryTask> task) {
-        bool should_start = false;
-        {
-            std::lock_guard<std::mutex> lk(queue_mu_);
-            queue_.push(std::move(task));
-            if (!in_callback_) {
-                in_callback_ = true;
-                should_start = true;
-            }
+        std::lock_guard<std::mutex> lk(queue_mu_);
+        queue_.push(std::move(task));
+        // 取消空闲定时器
+        idle_timer_.reset();
+        if (!in_callback_) {
+            in_callback_ = true;
+            start_delivery_loop();
         }
-        if (should_start) start_delivery_loop();
     }
 
     size_t queue_size() const {
@@ -53,7 +60,6 @@ public:
         return queue_.size();
     }
 
-    // 投递完成回调: void(uint64_t record_id, bool success)
     using CompletionCb = std::function<void(uint64_t, bool)>;
     void set_completion_cb(CompletionCb cb) { completion_cb_ = std::move(cb); }
 
@@ -63,9 +69,7 @@ public:
 
     // ── SessionBase 接口 ──────────────────────────────────────
     void handle_read(const std::string& data) override {
-        // 追加到多行响应缓冲区
         response_buf_ += data;
-        // 检查是否收到完整的 SMTP 响应（最后一行第4字符是空格）
         if (is_response_complete(response_buf_)) {
             OutboundSmtpEvent event = parse_response(response_buf_);
             response_buf_.clear();
@@ -97,29 +101,22 @@ public:
     }
 
 private:
-    // ── 多行 SMTP 响应 ────────────────────────────────────────
-    // SMTP 多行响应格式: "250-xxx\r\n250-xxx\r\n250 yyy\r\n"
-    // 最后一行第4字符是空格，中间行第4字符是 '-'
     static bool is_response_complete(const std::string& buf) {
         if (buf.size() < 5) return false;
-        // 从末尾找最后一个 \r\n 对，检查它前面的行是否以 "ddd " 开头
         auto last_nl = buf.rfind("\r\n");
         if (last_nl == std::string::npos || last_nl < 4) return false;
-        // 找这一行的开头
         auto line_start = buf.rfind("\r\n", last_nl - 1);
         size_t start = (line_start == std::string::npos) ? 0 : line_start + 2;
-        // 检查第4个字符是否是空格
         return (start + 3 < buf.size()) && buf[start + 3] == ' ';
     }
 
     OutboundSmtpEvent parse_response(const std::string& buf) {
         if (buf.size() < 3) return OutboundSmtpEvent::CONNECTION_LOST;
         char c = buf[0];
-        const auto* code = buf.c_str();
         if (c == '2') {
-            if (strncmp(code, "220", 3) == 0) return OutboundSmtpEvent::GREETING_220;
-            if (strncmp(code, "250", 3) == 0) return OutboundSmtpEvent::EHLO_250;
-            if (strncmp(code, "221", 3) == 0) return OutboundSmtpEvent::QUIT_221;
+            if (strncmp(buf.c_str(), "220", 3) == 0) return OutboundSmtpEvent::GREETING_220;
+            if (strncmp(buf.c_str(), "250", 3) == 0) return OutboundSmtpEvent::EHLO_250;
+            if (strncmp(buf.c_str(), "221", 3) == 0) return OutboundSmtpEvent::QUIT_221;
             return OutboundSmtpEvent::ACCEPT_250;
         }
         if (c == '3') return OutboundSmtpEvent::DATA_354;
@@ -128,7 +125,6 @@ private:
         return OutboundSmtpEvent::CONNECTION_LOST;
     }
 
-    // ── 处理器注册 ────────────────────────────────────────────
     void register_handlers() {
         using S = OutboundSmtpState;
         using E = OutboundSmtpEvent;
@@ -148,10 +144,11 @@ private:
 
     // ── 投递循环 ──────────────────────────────────────────────
     void start_delivery_loop() {
-        if (!is_connected()) {
-            connect_to_mx();
-        } else {
+        if (is_connected()) {
             deliver_next();
+        } else {
+            connect_retries_ = 0;
+            connect_to_mx();
         }
     }
 
@@ -164,7 +161,6 @@ private:
             [self, resolver](const boost::system::error_code& ec,
                              boost::asio::ip::tcp::resolver::results_type endpoints) mutable {
                 if (ec || endpoints.empty()) {
-                    LOG_SMTP_ERROR("Outbound: DNS resolve failed for {}: {}", self->mx_host_, ec.message());
                     self->handle_connect_failure();
                     return;
                 }
@@ -176,8 +172,6 @@ private:
                     [self, sock = std::move(sock)](const boost::system::error_code& ec,
                                                    boost::asio::ip::tcp::endpoint) mutable {
                         if (ec) {
-                            LOG_SMTP_ERROR("Outbound: connect to {} failed: {}",
-                                           self->mx_host_, ec.message());
                             self->handle_connect_failure();
                             return;
                         }
@@ -191,12 +185,29 @@ private:
     }
 
     void handle_connect_failure() {
-        // 连接失败：当前邮件放回队列头
+        connect_retries_++;
         if (current_task_) {
             std::lock_guard<std::mutex> lk(queue_mu_);
             queue_.push(std::move(current_task_));
         }
-        in_callback_ = false;
+        if (connect_retries_ < MAX_CONNECT_RETRIES) {
+            // 指数退避重试
+            int delay_ms = CONNECT_BACKOFF_BASE_MS * (1 << (connect_retries_ - 1));
+            LOG_SMTP_INFO("Outbound: connect to {} failed, retry {}/{} in {}ms",
+                          mx_host_, connect_retries_, MAX_CONNECT_RETRIES, delay_ms);
+            auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
+            auto& io_ctx = static_cast<IOThreadPool*>(
+                this->m_server->m_ioThreadPool.get())->get_io_context();
+            retry_timer_ = std::make_shared<boost::asio::steady_timer>(
+                io_ctx, std::chrono::milliseconds(delay_ms));
+            retry_timer_->async_wait([self](const boost::system::error_code& ec) {
+                if (!ec) self->connect_to_mx();
+            });
+        } else {
+            LOG_SMTP_ERROR("Outbound: connect to {} failed after {} retries, giving up",
+                           mx_host_, MAX_CONNECT_RETRIES);
+            in_callback_ = false;
+        }
     }
 
     void deliver_next() {
@@ -204,8 +215,9 @@ private:
         {
             std::lock_guard<std::mutex> lk(queue_mu_);
             if (queue_.empty()) {
+                // 队列为空：保持连接，启动空闲定时器
                 in_callback_ = false;
-                do_graceful_quit();
+                schedule_idle_timeout();
                 return;
             }
             task = std::move(queue_.front());
@@ -221,6 +233,20 @@ private:
             });
     }
 
+    void schedule_idle_timeout() {
+        if (!is_connected()) return;
+        auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
+        auto& io_ctx = static_cast<IOThreadPool*>(
+            this->m_server->m_ioThreadPool.get())->get_io_context();
+        idle_timer_ = std::make_shared<boost::asio::steady_timer>(
+            io_ctx, std::chrono::seconds(IDLE_TIMEOUT_SEC));
+        idle_timer_->async_wait([self](const boost::system::error_code& ec) {
+            if (ec) return;  // 被取消（新任务到达）
+            LOG_SMTP_INFO("Outbound: idle timeout, closing connection to {}", self->mx_host_);
+            self->do_graceful_quit();
+        });
+    }
+
     void do_graceful_quit() {
         if (!is_connected()) return;
         auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
@@ -234,8 +260,6 @@ private:
     std::string load_and_stuff_body() {
         if (!current_task_ || !current_task_->mail_ptr) return ".\r\n";
         const auto& m = *current_task_->mail_ptr;
-
-        // 优先从内存读取，否则从文件读取
         if (!m.body.empty()) return dot_stuff(m.body) + "\r\n.\r\n";
 
         std::ifstream file(m.body_path, std::ios::binary);
@@ -243,33 +267,25 @@ private:
             LOG_SMTP_ERROR("Outbound: cannot open mail body {}", m.body_path);
             return ".\r\n";
         }
-        std::ostringstream ss;
-        ss << file.rdbuf();
+        std::ostringstream ss; ss << file.rdbuf();
         return dot_stuff(ss.str()) + "\r\n.\r\n";
     }
 
-    // dot-stuffing: 行首的 '.' → '..'
     static std::string dot_stuff(const std::string& body) {
         std::string out;
-        out.reserve(body.size() + body.size() / 50);  // 预分配 ~2% 余量
+        out.reserve(body.size() + body.size() / 50);
         for (size_t i = 0; i < body.size(); ++i) {
-            char c = body[i];
-            out.push_back(c);
-            // 行首是 '.' → 双写
-            if (c == '\n' && i + 1 < body.size() && body[i + 1] == '.')
+            out.push_back(body[i]);
+            if (body[i] == '\n' && i + 1 < body.size() && body[i + 1] == '.')
                 out.push_back('.');
         }
-        // 如果整个 body 以 '.' 开头
-        if (!body.empty() && body[0] == '.') {
-            out.insert(0, ".");
-        }
+        if (!body.empty() && body[0] == '.') out.insert(0, ".");
         return out;
     }
 
     // ── 状态处理器 ────────────────────────────────────────────
     void handle_greeting_220(std::shared_ptr<SessionBase<ConnectionType>> session) {
         auto self = std::static_pointer_cast<OutboundSmtpSession>(session);
-        LOG_SMTP_INFO("Outbound: 220 from {}", self->mx_host_);
         self->do_async_write("EHLO " + self->helo_domain_ + "\r\n",
             [self](auto, const boost::system::error_code&) mutable { self->do_async_read(); });
     }
@@ -310,14 +326,9 @@ private:
             self->do_graceful_quit();
             return;
         }
-        // RSET 后发下一封
-        self->do_async_write("RSET\r\n",
-            [self](auto, const boost::system::error_code&) mutable {
-                self->do_async_read();
-                // RSET 的 250 响应也会触发 handle_read，但 RSET 不需要特殊处理
-                // 直接在回调里发下一封
-                self->deliver_next();
-            });
+        // RSET → read response → deliver_next（250 触发 ACCEPT_250 处理器
+        // 但 RSET 250 也被 ACCEPT_250 处理 → 直接调用 deliver_next）
+        self->deliver_next();
     }
 
     void handle_temp_error(std::shared_ptr<SessionBase<ConnectionType>>) {
@@ -346,7 +357,7 @@ private:
     int mx_port_;
     std::string helo_domain_;
     std::shared_ptr<OutboundSmtpFsm<ConnectionType>> fsm_;
-    std::string response_buf_;  // 多行 SMTP 响应缓冲区
+    std::string response_buf_;
 
     mutable std::mutex queue_mu_;
     std::queue<std::unique_ptr<MailDeliveryTask>> queue_;
@@ -355,6 +366,9 @@ private:
 
     std::unique_ptr<MailDeliveryTask> current_task_;
     int mails_sent_on_conn_ = 0;
+    int connect_retries_ = 0;
+    std::shared_ptr<boost::asio::steady_timer> retry_timer_;
+    std::shared_ptr<boost::asio::steady_timer> idle_timer_;
 };
 
 } // namespace outbound
