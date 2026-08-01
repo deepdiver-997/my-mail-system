@@ -918,14 +918,16 @@ void TraditionalImapsFsm<ConnectionType>::handle_logout(
                 LOG_IMAP_ERROR("Error sending LOGOUT reply: {}", ec.message());
                 return;
             }
-            auto timer = std::make_shared<boost::asio::steady_timer>(
-                *static_cast<ImapsServer*>(s->get_server())->get_io_context());
-            timer->expires_after(std::chrono::milliseconds(100));
-            timer->async_wait([s = std::move(s), timer](const boost::system::error_code& ec) mutable {
-                if (!ec) {
-                    s->close();
-                }
-            });
+            auto io_ctx = s->get_server()->get_io_context();
+            if (io_ctx) {
+                auto timer = std::make_shared<boost::asio::steady_timer>(*io_ctx);
+                timer->expires_after(std::chrono::milliseconds(100));
+                timer->async_wait([s = std::move(s), timer](const boost::system::error_code& ec) mutable {
+                    if (!ec) s->close();
+                });
+            } else {
+                s->close();  // no io_context (test mock) → close immediately
+            }
         }
     );
 }

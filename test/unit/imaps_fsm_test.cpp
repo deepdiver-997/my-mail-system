@@ -518,7 +518,7 @@ int main() {
         test_login_wrong_password(fx);
         test_login_many_failures_close(fx);
         test_noop_reply(fx);
-        // test_logout_bye(fx);  // 已知: LOGOUT handler 后 close() 导致 SIGSEGV
+        test_logout_bye(fx);
 
         // ── 未认证拒绝 ──
         test_select_without_login(fx);
@@ -531,7 +531,7 @@ int main() {
         test_invalid_command_in_state(fx);
 
         // ── 无需 DB 的命令 ──
-        // test_logout_without_login(fx);  // 已知: LOGOUT handler 后 close()
+        test_logout_without_login(fx);
         test_check_in_authenticated(fx);
         test_noop_in_selected(fx);
         test_capability_in_authenticated(fx);

@@ -11,6 +11,7 @@
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/db_service.h"
 #include "framework/net/dns_resolver.h"
+#include <boost/asio/io_context.hpp>
 #include "mail_system/back/db/mysql_pool.h"
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/entities/mail.h"
@@ -62,6 +63,9 @@ public:
 
     // reload 运行时配置
     bool reload_config(const std::string& json_file);
+
+    // io_context (TCP 服务器提供，测试 mock 返回 nullptr)
+    virtual std::shared_ptr<boost::asio::io_context> get_io_context() const { return nullptr; }
 
     // ── 共享成员（所有协议共用） ──────────────────────────────
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;

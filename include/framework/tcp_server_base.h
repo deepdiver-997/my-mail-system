@@ -27,7 +27,7 @@ public:
 
     void start() override;
 
-    std::shared_ptr<boost::asio::io_context> get_io_context() { return m_ioContext; }
+    std::shared_ptr<boost::asio::io_context> get_io_context() const override { return m_ioContext; }
     boost::asio::ssl::context& get_ssl_context() { return m_sslContext; }
 
 protected:
