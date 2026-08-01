@@ -2,9 +2,7 @@
 #define MAIL_SYSTEM_CARES_DNS_RESOLVER_H
 
 #include "mail_system/back/outbound/dns_resolver.h"
-
 #include <ares.h>
-#include <atomic>
 #include <chrono>
 #include <mutex>
 #include <unordered_map>
@@ -12,44 +10,29 @@
 namespace mail_system {
 namespace outbound {
 
+// ---- CaresDnsResolver: 基于 c-ares 的异步 DNS 解析器 ----
+//
+// 实现 pr::IDnsResolver 异步接口。c-ares 回调在其内部线程执行，
+// 直接调用用户回调。用户回调中可通过 session->drain_buffered_commands()
+// 恢复 FSM 处理，后续 do_async_read/write 自然回到 IO 线程。
 class CaresDnsResolver : public IDnsResolver {
 public:
     CaresDnsResolver();
     ~CaresDnsResolver() override;
 
-    std::vector<MxRecord> resolve_mx(const std::string& domain) override;
-    std::vector<std::string> resolve_host_addresses(const std::string& host) override;
-    std::vector<std::string> resolve_txt(const std::string& domain) override;
-    std::vector<std::string> resolve_ptr(const std::string& ip) override;
-
-    // 优先走缓存，未命中才真正查询（适合 IO 线程快速调用）
-    std::vector<std::string> resolve_txt_cached(const std::string& domain);
-    std::vector<std::string> resolve_ptr_cached(const std::string& ip) override;
+    // ---- IDnsResolver async 接口 ----
+    void async_resolve_mx(const std::string& domain, MxCallback cb) override;
+    void async_resolve_host(const std::string& host, AddrCallback cb) override;
+    void async_resolve_txt(const std::string& domain, TxtCallback cb) override;
+    void async_resolve_ptr(const std::string& ip, PtrCallback cb) override;
 
 private:
     bool init_channel_locked();
     void destroy_channel_locked();
-    bool run_event_loop_locked(std::atomic<bool>& done,
-                               std::chrono::milliseconds timeout);
 
-    struct TxtCacheEntry {
-        std::vector<std::string> records;
-        std::chrono::steady_clock::time_point expiry;
-    };
-
-    struct PtrCacheEntry {
-        std::vector<std::string> hostnames;
-        std::chrono::steady_clock::time_point expiry;
-    };
-
-private:
     ares_channel channel_{nullptr};
     bool library_inited_{false};
     std::mutex mutex_;
-
-    std::mutex cache_mutex_;
-    std::unordered_map<std::string, TxtCacheEntry> txt_cache_;
-    std::unordered_map<std::string, PtrCacheEntry> ptr_cache_;
 };
 
 } // namespace outbound

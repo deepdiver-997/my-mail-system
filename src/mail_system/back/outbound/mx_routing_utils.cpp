@@ -47,14 +47,15 @@ std::vector<std::string> build_target_hosts(const OutboxRecord& record,
     const auto domain = extract_domain(record.recipient);
 
     if (resolver && !domain.empty()) {
-        auto mx_records = resolver->resolve_mx(domain);
+        SyncDnsWrapper sync(*resolver);
+        auto mx_records = sync.resolve_mx(domain);
         for (const auto& mx : mx_records) {
             auto mx_host = trim_trailing_dot(mx.host);
             if (mx_host.empty()) {
                 continue;
             }
 
-            auto addresses = resolver->resolve_host_addresses(mx_host);
+            auto addresses = sync.resolve_host_addresses(mx_host);
             for (const auto& addr : addresses) {
                 if (!addr.empty() && unique_hosts.insert(addr).second) {
                     if (is_ipv6_literal(addr)) {
@@ -69,7 +70,7 @@ std::vector<std::string> build_target_hosts(const OutboxRecord& record,
         // RFC 5321 implicit MX fallback: when no MX hosts were found,
         // treat the recipient domain itself as the mail host target.
         if (hosts_v4.empty() && hosts_v6.empty()) {
-            auto addresses = resolver->resolve_host_addresses(domain);
+            auto addresses = sync.resolve_host_addresses(domain);
             for (const auto& addr : addresses) {
                 if (!addr.empty() && unique_hosts.insert(addr).second) {
                     if (is_ipv6_literal(addr)) {

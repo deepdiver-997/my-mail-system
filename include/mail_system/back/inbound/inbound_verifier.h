@@ -131,7 +131,7 @@ private:
     static bool is_aligned(const std::string& auth_domain,
                           const std::string& from_domain);
 
-    outbound::IDnsResolver& dns_;
+    outbound::SyncDnsWrapper dns_;
 };
 
 } // namespace inbound

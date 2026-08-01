@@ -1,13 +1,10 @@
 #include "mail_system/back/outbound/cares_dns_resolver.h"
-
 #include "mail_system/back/common/logger.h"
-
 #include <ares.h>
 #include <arpa/inet.h>
 #include <arpa/nameser.h>
 #include <netdb.h>
 #include <algorithm>
-#include <chrono>
 #include <cstring>
 #include <netinet/in.h>
 
@@ -15,260 +12,142 @@ namespace mail_system {
 namespace outbound {
 namespace {
 
-constexpr std::chrono::milliseconds kDefaultDnsTimeout{5000};
+// ---- c-ares 回调上下文：持有用户 callback ----
+template <typename Cb>
+struct QueryContext {
+    Cb callback;
+};
 
-struct MxQueryContext {
+// ---- 提取数据的 c-ares 回调 ----
+void mx_callback(void* arg, int status, int, unsigned char* abuf, int alen) {
+    auto* ctx = static_cast<QueryContext<MxCallback>*>(arg);
+    if (!ctx || !ctx->callback) return;
     std::vector<MxRecord> records;
-    std::atomic<bool>* done{nullptr};
-    int status{ARES_EDESTRUCTION};
-};
-
-struct AddrQueryContext {
-    std::vector<std::string> addresses;
-    std::atomic<bool>* done{nullptr};
-    int status{ARES_EDESTRUCTION};
-};
-
-struct TxtQueryContext {
-    std::vector<std::string> records;
-    std::atomic<bool>* done{nullptr};
-    int status{ARES_EDESTRUCTION};
-};
-
-struct PtrQueryContext {
-    std::vector<std::string> hostnames;
-    std::atomic<bool>* done{nullptr};
-    int status{ARES_EDESTRUCTION};
-};
-
-// 将 IPv4 地址转换为反向查找域名 (e.g. "1.2.3.4" -> "4.3.2.1.in-addr.arpa")
-std::string ipv4_to_ptr_name(const std::string& ip) {
-    struct in_addr addr;
-    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) {
-        return {};
-    }
-    const uint32_t n = ntohl(addr.s_addr);
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%u.%u.%u.%u.in-addr.arpa",
-             (n & 0xFF),
-             (n >> 8) & 0xFF,
-             (n >> 16) & 0xFF,
-             (n >> 24) & 0xFF);
-    return buf;
-}
-
-void mx_query_callback(void* arg, int status, int timeouts, unsigned char* abuf, int alen) {
-    (void)timeouts;
-    auto* ctx = static_cast<MxQueryContext*>(arg);
-    if (!ctx) {
-        return;
-    }
-
-    ctx->status = status;
-    if (status != ARES_SUCCESS) {
-        if (ctx->done) {
-            ctx->done->store(true);
-        }
-        return;
-    }
-
-    struct ares_mx_reply* mx_reply = nullptr;
-
-    // Keep compatibility on current c-ares while isolating deprecated call usage.
+    if (status == ARES_SUCCESS && abuf && alen > 0) {
+        struct ares_mx_reply* reply = nullptr;
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #endif
-    const int parse_status = ares_parse_mx_reply(abuf, alen, &mx_reply);
+        if (ares_parse_mx_reply(abuf, alen, &reply) == ARES_SUCCESS && reply) {
+            for (auto* it = reply; it; it = it->next) {
+                if (it->host && std::strlen(it->host) > 0)
+                    records.push_back({it->host, static_cast<std::uint16_t>(it->priority)});
+            }
+            ares_free_data(reply);
+        }
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
-
-    if (parse_status != ARES_SUCCESS || !mx_reply) {
-        if (ctx->done) {
-            ctx->done->store(true);
-        }
-        return;
     }
-
-    for (auto* it = mx_reply; it != nullptr; it = it->next) {
-        if (!it->host || std::strlen(it->host) == 0) {
-            continue;
-        }
-        ctx->records.push_back(MxRecord{it->host, static_cast<std::uint16_t>(it->priority)});
-    }
-
-    ares_free_data(mx_reply);
-
-    if (ctx->done) {
-        ctx->done->store(true);
-    }
+    std::sort(records.begin(), records.end(),
+              [](auto& a, auto& b) { return a.priority != b.priority ? a.priority < b.priority : a.host < b.host; });
+    ctx->callback(std::move(records));
+    delete ctx;
 }
 
-void addr_query_callback(void* arg, int status, int timeouts, struct ares_addrinfo* result) {
-    (void)timeouts;
-    auto* ctx = static_cast<AddrQueryContext*>(arg);
-    if (!ctx) {
-        return;
-    }
-
-    ctx->status = status;
-    if (status == ARES_SUCCESS && result != nullptr) {
-        for (auto* node = result->nodes; node != nullptr; node = node->ai_next) {
-            if (!node->ai_addr) {
-                continue;
-            }
-
-            char ip_buf[INET6_ADDRSTRLEN] = {0};
-            if (node->ai_family == AF_INET) {
-                auto* addr = reinterpret_cast<sockaddr_in*>(node->ai_addr);
-                if (inet_ntop(AF_INET, &(addr->sin_addr), ip_buf, sizeof(ip_buf)) != nullptr) {
-                    ctx->addresses.emplace_back(ip_buf);
-                }
-            } else if (node->ai_family == AF_INET6) {
-                auto* addr6 = reinterpret_cast<sockaddr_in6*>(node->ai_addr);
-                if (inet_ntop(AF_INET6, &(addr6->sin6_addr), ip_buf, sizeof(ip_buf)) != nullptr) {
-                    ctx->addresses.emplace_back(ip_buf);
-                }
-            }
+void addr_callback(void* arg, int status, int, struct ares_addrinfo* result) {
+    auto* ctx = static_cast<QueryContext<AddrCallback>*>(arg);
+    if (!ctx || !ctx->callback) return;
+    std::vector<std::string> addrs;
+    if (status == ARES_SUCCESS && result) {
+        for (auto* node = result->nodes; node; node = node->ai_next) {
+            if (!node->ai_addr) continue;
+            char buf[INET6_ADDRSTRLEN] = {0};
+            if (node->ai_family == AF_INET)
+                inet_ntop(AF_INET, &((sockaddr_in*)node->ai_addr)->sin_addr, buf, sizeof(buf));
+            else if (node->ai_family == AF_INET6)
+                inet_ntop(AF_INET6, &((sockaddr_in6*)node->ai_addr)->sin6_addr, buf, sizeof(buf));
+            else continue;
+            if (buf[0]) addrs.emplace_back(buf);
         }
-    }
-
-    if (result != nullptr) {
         ares_freeaddrinfo(result);
     }
-
-    if (ctx->done) {
-        ctx->done->store(true);
-    }
+    std::sort(addrs.begin(), addrs.end());
+    addrs.erase(std::unique(addrs.begin(), addrs.end()), addrs.end());
+    ctx->callback(std::move(addrs));
+    delete ctx;
 }
 
-void txt_query_callback(void* arg, int status, int timeouts, unsigned char* abuf, int alen) {
-    (void)timeouts;
-    auto* ctx = static_cast<TxtQueryContext*>(arg);
-    if (!ctx) {
-        return;
-    }
-
-    ctx->status = status;
-    if (status != ARES_SUCCESS) {
-        if (ctx->done) {
-            ctx->done->store(true);
-        }
-        return;
-    }
-
-    struct ares_txt_reply* txt_reply = nullptr;
+void txt_callback(void* arg, int status, int, unsigned char* abuf, int alen) {
+    auto* ctx = static_cast<QueryContext<TxtCallback>*>(arg);
+    if (!ctx || !ctx->callback) return;
+    std::vector<std::string> records;
+    if (status == ARES_SUCCESS && abuf && alen > 0) {
+        struct ares_txt_reply* reply = nullptr;
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #endif
-    const int parse_status = ares_parse_txt_reply(abuf, alen, &txt_reply);
+        if (ares_parse_txt_reply(abuf, alen, &reply) == ARES_SUCCESS && reply) {
+            for (auto* it = reply; it; it = it->next)
+                if (it->txt && it->length > 0)
+                    records.emplace_back(reinterpret_cast<const char*>(it->txt), it->length);
+            ares_free_data(reply);
+        }
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
-
-    if (parse_status == ARES_SUCCESS && txt_reply) {
-        for (auto* it = txt_reply; it != nullptr; it = it->next) {
-            if (!it->txt || it->length == 0) {
-                continue;
-            }
-            // c-ares txt already contains the raw text content,
-            // NOT a length-prefixed segment format.
-            ctx->records.emplace_back(
-                reinterpret_cast<const char*>(it->txt), it->length);
-        }
-        ares_free_data(txt_reply);
     }
-
-    if (ctx->done) {
-        ctx->done->store(true);
-    }
+    ctx->callback(std::move(records));
+    delete ctx;
 }
 
-void ptr_query_callback(void* arg, int status, int timeouts,
-                       unsigned char* abuf, int alen) {
-    (void)timeouts;
-    auto* ctx = static_cast<PtrQueryContext*>(arg);
-    if (!ctx) {
-        return;
-    }
-
-    ctx->status = status;
-    if (status != ARES_SUCCESS) {
-        if (ctx->done) {
-            ctx->done->store(true);
-        }
-        return;
-    }
-
-    struct hostent* host = nullptr;
-    // addr/addrlen/family 在标准 ares_query 回调中不可用, 传 nullptr 跳过验证
+void ptr_callback(void* arg, int status, int, unsigned char* abuf, int alen) {
+    auto* ctx = static_cast<QueryContext<PtrCallback>*>(arg);
+    if (!ctx || !ctx->callback) return;
+    std::vector<std::string> hostnames;
+    if (status == ARES_SUCCESS && abuf && alen > 0) {
+        struct hostent* host = nullptr;
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #endif
-    const int parse_status = ares_parse_ptr_reply(abuf, alen, nullptr, 0, AF_UNSPEC, &host);
+        if (ares_parse_ptr_reply(abuf, alen, nullptr, 0, AF_UNSPEC, &host) == ARES_SUCCESS && host) {
+            if (host->h_name && std::strlen(host->h_name) > 0) hostnames.emplace_back(host->h_name);
+            for (char** a = host->h_aliases; a && *a; ++a)
+                if (*a && std::strlen(*a) > 0) hostnames.emplace_back(*a);
+            ares_free_hostent(host);
+        }
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
-
-    if (parse_status == ARES_SUCCESS && host) {
-        if (host->h_name && std::strlen(host->h_name) > 0) {
-            ctx->hostnames.emplace_back(host->h_name);
-        }
-        for (char** alias = host->h_aliases; alias && *alias; ++alias) {
-            if (*alias && std::strlen(*alias) > 0) {
-                ctx->hostnames.emplace_back(*alias);
-            }
-        }
-        ares_free_hostent(host);
     }
+    ctx->callback(std::move(hostnames));
+    delete ctx;
+}
 
-    if (ctx->done) {
-        ctx->done->store(true);
-    }
+void ipv4_to_ptr(const std::string& ip, char* buf, size_t bufsz) {
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) { buf[0] = 0; return; }
+    uint32_t n = ntohl(addr.s_addr);
+    snprintf(buf, bufsz, "%u.%u.%u.%u.in-addr.arpa",
+             n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, n >> 24);
 }
 
 } // namespace
 
+// ================================================================
 CaresDnsResolver::CaresDnsResolver() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const int lib_status = ares_library_init(ARES_LIB_INIT_ALL);
-    if (lib_status != ARES_SUCCESS) {
-        LOG_OUTBOUND_WARN("DNS(MX): ares_library_init failed, error={}", ares_strerror(lib_status));
-        return;
-    }
-    library_inited_ = true;
-    if (!init_channel_locked()) {
-        LOG_OUTBOUND_WARN("DNS(MX): init channel failed");
+    std::lock_guard lk(mutex_);
+    if (ares_library_init(ARES_LIB_INIT_ALL) == ARES_SUCCESS) {
+        library_inited_ = true;
+        init_channel_locked();
     }
 }
 
 CaresDnsResolver::~CaresDnsResolver() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard lk(mutex_);
     destroy_channel_locked();
-    if (library_inited_) {
-        ares_library_cleanup();
-        library_inited_ = false;
-    }
+    if (library_inited_) { ares_library_cleanup(); library_inited_ = false; }
 }
 
 bool CaresDnsResolver::init_channel_locked() {
-    if (!library_inited_) {
-        return false;
-    }
-
-    if (channel_ != nullptr) {
-        return true;
-    }
-
-    ares_options options{};
-    options.evsys = ARES_EVSYS_DEFAULT;
-    int optmask = ARES_OPT_EVENT_THREAD;
-    const int init_status = ares_init_options(&channel_, &options, optmask);
-    if (init_status != ARES_SUCCESS || channel_ == nullptr) {
-        LOG_OUTBOUND_WARN("DNS(MX): ares_init_options failed, error={}", ares_strerror(init_status));
+    if (!library_inited_ || channel_) return channel_ != nullptr;
+    ares_options opts{};
+    opts.evsys = ARES_EVSYS_DEFAULT;
+    int mask = ARES_OPT_EVENT_THREAD;
+    if (ares_init_options(&channel_, &opts, mask) != ARES_SUCCESS || !channel_) {
         channel_ = nullptr;
         return false;
     }
@@ -276,252 +155,46 @@ bool CaresDnsResolver::init_channel_locked() {
 }
 
 void CaresDnsResolver::destroy_channel_locked() {
-    if (channel_ != nullptr) {
-        ares_destroy(channel_);
-        channel_ = nullptr;
-    }
+    if (channel_) { ares_destroy(channel_); channel_ = nullptr; }
 }
 
-bool CaresDnsResolver::run_event_loop_locked(std::atomic<bool>& done,
-                                             std::chrono::milliseconds timeout) {
-    if (channel_ == nullptr) {
-        return false;
-    }
-
-    const int timeout_ms = timeout.count() <= 0 ? -1 : static_cast<int>(timeout.count());
-    const ares_status_t wait_status = ares_queue_wait_empty(channel_, timeout_ms);
-    if (wait_status != ARES_SUCCESS) {
-        return false;
-    }
-
-    return done.load();
+// ---- async 接口 ----
+void CaresDnsResolver::async_resolve_mx(const std::string& domain, MxCallback cb) {
+    if (domain.empty() || !cb) return;
+    std::lock_guard lk(mutex_);
+    if (!init_channel_locked()) { cb({}); return; }
+    auto* ctx = new QueryContext<MxCallback>{std::move(cb)};
+    ares_query(channel_, domain.c_str(), ns_c_in, ns_t_mx, &mx_callback, ctx);
 }
 
-std::vector<MxRecord> CaresDnsResolver::resolve_mx(const std::string& domain) {
-    std::vector<MxRecord> records;
-    if (domain.empty()) {
-        return records;
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!init_channel_locked()) {
-        LOG_OUTBOUND_WARN("DNS(MX): channel unavailable, domain={}", domain);
-        return records;
-    }
-
-    MxQueryContext ctx;
-    std::atomic<bool> done{false};
-    ctx.done = &done;
-
-    // Keep compatibility with current c-ares package while containing deprecated entry point.
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#endif
-    ares_query(channel_, domain.c_str(), ns_c_in, ns_t_mx, &mx_query_callback, &ctx);
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
-
-    const bool loop_ok = run_event_loop_locked(done, kDefaultDnsTimeout);
-    if (!loop_ok || ctx.status != ARES_SUCCESS) {
-        LOG_OUTBOUND_WARN("DNS(MX): lookup failed, domain={}, status={}, reason={}",
-                        domain,
-                        ctx.status,
-                        ares_strerror(ctx.status));
-        ares_cancel(channel_);
-        return records;
-    }
-
-    std::sort(ctx.records.begin(), ctx.records.end(), [](const MxRecord& a, const MxRecord& b) {
-        if (a.priority != b.priority) {
-            return a.priority < b.priority;
-        }
-        return a.host < b.host;
-    });
-
-    records = std::move(ctx.records);
-    return records;
-}
-
-std::vector<std::string> CaresDnsResolver::resolve_host_addresses(const std::string& host) {
-    std::vector<std::string> addresses;
-    if (host.empty()) {
-        return addresses;
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!init_channel_locked()) {
-        LOG_OUTBOUND_WARN("DNS(A/AAAA): channel unavailable, host={}", host);
-        return addresses;
-    }
-
-    std::atomic<bool> done{false};
-    AddrQueryContext ctx;
-    ctx.done = &done;
-
-    struct ares_addrinfo_hints hints;
-    std::memset(&hints, 0, sizeof(hints));
+void CaresDnsResolver::async_resolve_host(const std::string& host, AddrCallback cb) {
+    if (host.empty() || !cb) return;
+    std::lock_guard lk(mutex_);
+    if (!init_channel_locked()) { cb({}); return; }
+    auto* ctx = new QueryContext<AddrCallback>{std::move(cb)};
+    ares_addrinfo_hints hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-
-    ares_getaddrinfo(channel_, host.c_str(), nullptr, &hints, &addr_query_callback, &ctx);
-
-    const bool loop_ok = run_event_loop_locked(done, kDefaultDnsTimeout);
-    if (!loop_ok || ctx.status != ARES_SUCCESS) {
-        LOG_OUTBOUND_WARN("DNS(A/AAAA): lookup failed, host={}, status={}, reason={}",
-                        host,
-                        ctx.status,
-                        ares_strerror(ctx.status));
-        ares_cancel(channel_);
-        return addresses;
-    }
-
-    std::sort(ctx.addresses.begin(), ctx.addresses.end());
-    ctx.addresses.erase(std::unique(ctx.addresses.begin(), ctx.addresses.end()), ctx.addresses.end());
-    addresses = std::move(ctx.addresses);
-    return addresses;
+    ares_getaddrinfo(channel_, host.c_str(), nullptr, &hints, &addr_callback, ctx);
 }
 
-std::vector<std::string> CaresDnsResolver::resolve_txt(const std::string& domain) {
-    std::vector<std::string> records;
-    if (domain.empty()) {
-        return records;
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!init_channel_locked()) {
-        LOG_OUTBOUND_WARN("DNS(TXT): channel unavailable, domain={}", domain);
-        return records;
-    }
-
-    TxtQueryContext ctx;
-    std::atomic<bool> done{false};
-    ctx.done = &done;
-
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#endif
-    ares_query(channel_, domain.c_str(), ns_c_in, ns_t_txt, &txt_query_callback, &ctx);
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
-
-    const bool loop_ok = run_event_loop_locked(done, kDefaultDnsTimeout);
-    if (!loop_ok || ctx.status != ARES_SUCCESS) {
-        LOG_OUTBOUND_WARN("DNS(TXT): lookup failed, domain={}, status={}, reason={}",
-                        domain,
-                        ctx.status,
-                        ares_strerror(ctx.status));
-        ares_cancel(channel_);
-        return records;
-    }
-
-    records = std::move(ctx.records);
-
-    // 写入缓存（固定 TTL 300 秒，c-ares 的 ares_txt_reply 不暴露 TTL）
-    {
-        constexpr unsigned int kCacheTtlSeconds = 300;
-        std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-        txt_cache_[domain] = {
-            records,
-            std::chrono::steady_clock::now() + std::chrono::seconds(kCacheTtlSeconds)
-        };
-    }
-
-    return records;
+void CaresDnsResolver::async_resolve_txt(const std::string& domain, TxtCallback cb) {
+    if (domain.empty() || !cb) return;
+    std::lock_guard lk(mutex_);
+    if (!init_channel_locked()) { cb({}); return; }
+    auto* ctx = new QueryContext<TxtCallback>{std::move(cb)};
+    ares_query(channel_, domain.c_str(), ns_c_in, ns_t_txt, &txt_callback, ctx);
 }
 
-std::vector<std::string> CaresDnsResolver::resolve_txt_cached(const std::string& domain) {
-    if (domain.empty()) {
-        return {};
-    }
-
-    // 缓存命中则直接返回
-    {
-        std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-        auto it = txt_cache_.find(domain);
-        if (it != txt_cache_.end() && it->second.expiry > std::chrono::steady_clock::now()) {
-            return it->second.records;
-        }
-    }
-
-    // 缓存未命中：真正查询（会更新缓存）
-    return resolve_txt(domain);
-}
-
-std::vector<std::string> CaresDnsResolver::resolve_ptr(const std::string& ip) {
-    std::vector<std::string> hostnames;
-    if (ip.empty()) {
-        return hostnames;
-    }
-
-    const std::string ptr_name = ipv4_to_ptr_name(ip);
-    if (ptr_name.empty()) {
-        return hostnames;
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!init_channel_locked()) {
-        LOG_OUTBOUND_WARN("DNS(PTR): channel unavailable, ip={}", ip);
-        return hostnames;
-    }
-
-    PtrQueryContext ctx;
-    std::atomic<bool> done{false};
-    ctx.done = &done;
-
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#endif
-    ares_query(channel_, ptr_name.c_str(), ns_c_in, ns_t_ptr, &ptr_query_callback, &ctx);
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
-
-    const bool loop_ok = run_event_loop_locked(done, kDefaultDnsTimeout);
-    if (!loop_ok || ctx.status != ARES_SUCCESS) {
-        LOG_OUTBOUND_WARN("DNS(PTR): lookup failed, ip={}, status={}, reason={}",
-                        ip,
-                        ctx.status,
-                        ares_strerror(ctx.status));
-        ares_cancel(channel_);
-        return hostnames;
-    }
-
-    hostnames = std::move(ctx.hostnames);
-
-    // 写入缓存
-    {
-        constexpr unsigned int kCacheTtlSeconds = 300;
-        std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-        ptr_cache_[ip] = {
-            hostnames,
-            std::chrono::steady_clock::now() + std::chrono::seconds(kCacheTtlSeconds)
-        };
-    }
-
-    return hostnames;
-}
-
-std::vector<std::string> CaresDnsResolver::resolve_ptr_cached(const std::string& ip) {
-    if (ip.empty()) {
-        return {};
-    }
-
-    // 缓存命中则直接返回
-    {
-        std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-        auto it = ptr_cache_.find(ip);
-        if (it != ptr_cache_.end() && it->second.expiry > std::chrono::steady_clock::now()) {
-            return it->second.hostnames;
-        }
-    }
-
-    // 缓存未命中：真正查询（会更新缓存）
-    return resolve_ptr(ip);
+void CaresDnsResolver::async_resolve_ptr(const std::string& ip, PtrCallback cb) {
+    if (ip.empty() || !cb) return;
+    char ptr_name[128];
+    ipv4_to_ptr(ip, ptr_name, sizeof(ptr_name));
+    if (!ptr_name[0]) { cb({}); return; }
+    std::lock_guard lk(mutex_);
+    if (!init_channel_locked()) { cb({}); return; }
+    auto* ctx = new QueryContext<PtrCallback>{std::move(cb)};
+    ares_query(channel_, ptr_name, ns_c_in, ns_t_ptr, &ptr_callback, ctx);
 }
 
 } // namespace outbound

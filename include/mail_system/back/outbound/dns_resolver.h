@@ -1,38 +1,57 @@
 #ifndef MAIL_SYSTEM_DNS_RESOLVER_H
 #define MAIL_SYSTEM_DNS_RESOLVER_H
 
-#include <cstdint>
-#include <string>
-#include <vector>
+#include "framework/net/dns_resolver.h"
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
 
 namespace mail_system {
 namespace outbound {
 
-struct MxRecord {
-    std::string host;
-    std::uint16_t priority{0};
-};
+// 向后兼容
+using pr::MxRecord;
+using pr::MxCallback;
+using pr::AddrCallback;
+using pr::TxtCallback;
+using pr::PtrCallback;
+using pr::IDnsResolver;
 
-class IDnsResolver {
+// ---- SyncDnsWrapper: 将异步 IDnsResolver 包装为同步阻塞接口 ----
+// 供不需要异步模式的旧代码使用。
+class SyncDnsWrapper {
 public:
-    virtual ~IDnsResolver() = default;
+    explicit SyncDnsWrapper(IDnsResolver& async_resolver) : resolver_(async_resolver) {}
 
-    // Resolve MX records for a domain, sorted by ascending priority.
-    virtual std::vector<MxRecord> resolve_mx(const std::string& domain) = 0;
-
-    // Resolve hostname to a list of numeric IP addresses (IPv4/IPv6).
-    virtual std::vector<std::string> resolve_host_addresses(const std::string& host) = 0;
-
-    // Resolve TXT records for a domain.
-    virtual std::vector<std::string> resolve_txt(const std::string& domain) = 0;
-
-    // Resolve PTR (reverse DNS) records for an IPv4/IPv6 address.
-    virtual std::vector<std::string> resolve_ptr(const std::string& ip) = 0;
-
-    // 优先走缓存，未命中才真正查询（子类可覆盖；默认无缓存直接查）
-    virtual std::vector<std::string> resolve_ptr_cached(const std::string& ip) {
-        return resolve_ptr(ip);
+    std::vector<MxRecord> resolve_mx(const std::string& domain) {
+        return sync_call<MxRecord>([&](auto cb) { resolver_.async_resolve_mx(domain, cb); });
     }
+    std::vector<std::string> resolve_host_addresses(const std::string& host) {
+        return sync_call<std::string>([&](auto cb) { resolver_.async_resolve_host(host, cb); });
+    }
+    std::vector<std::string> resolve_txt(const std::string& domain) {
+        return sync_call<std::string>([&](auto cb) { resolver_.async_resolve_txt(domain, cb); });
+    }
+    std::vector<std::string> resolve_ptr(const std::string& ip) {
+        return sync_call<std::string>([&](auto cb) { resolver_.async_resolve_ptr(ip, cb); });
+    }
+
+private:
+    template <typename T>
+    std::vector<T> sync_call(std::function<void(std::function<void(std::vector<T>)>)> fn) {
+        std::vector<T> result;
+        std::mutex mtx;
+        std::condition_variable cv;
+        bool done = false;
+        fn([&](std::vector<T> r) {
+            { std::lock_guard lk(mtx); result = std::move(r); done = true; }
+            cv.notify_one();
+        });
+        std::unique_lock lk(mtx);
+        cv.wait(lk, [&]{ return done; });
+        return result;
+    }
+    IDnsResolver& resolver_;
 };
 
 } // namespace outbound
