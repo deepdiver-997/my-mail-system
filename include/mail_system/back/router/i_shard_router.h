@@ -1,14 +1,13 @@
 #ifndef MAIL_SYSTEM_I_SHARD_ROUTER_H
 #define MAIL_SYSTEM_I_SHARD_ROUTER_H
 
+#include "mail_system/back/db/db_pool.h"
 #include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace mail_system {
-
-class DBPool;
 
 namespace storage {
 class IStorageProvider;

@@ -1,21 +1,26 @@
 #ifndef MAIL_SYSTEM_SERVER_CONFIG_H
 #define MAIL_SYSTEM_SERVER_CONFIG_H
 
-#include <thread>
-#include <fstream>
-#include <filesystem>
-#include <string>
-#include <cstdint>
-#include <vector>
-#include <unordered_map>
-#include <nlohmann/json.hpp>
+#include "framework/server_config_base.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/storage/storage_config.h"
 #include "mail_system/back/outbound/outbound_config.h"
+#include <nlohmann/json.hpp>
+#include <string>
+#include <cstdint>
+#include <vector>
 
 namespace mail_system {
 
+// 框架类型向后兼容
+using pr::ListenerType;
+using pr::ListenerConfig;
+using pr::listener_type_to_string;
+using pr::listener_type_from_string;
+using pr::InboundAuthPolicy;
+
+// 邮件特有枚举 (不属于框架通用配置)
 enum class InboundAckMode : int { AFTER_PERSIST = 0, AFTER_ENQUEUE = 1 };
 
 inline const char* inbound_ack_mode_to_string(InboundAckMode mode) {
@@ -31,8 +36,7 @@ inline InboundAckMode inbound_ack_mode_from_string(const std::string& s) {
     return InboundAckMode::AFTER_PERSIST;
 }
 
-enum class InboundAuthPolicy : int { OFF = 0, AUTO = 1, ON = 2 };
-
+// InboundAuthPolicy 转换函数
 inline const char* inbound_auth_policy_to_string(InboundAuthPolicy p) {
     switch (p) {
     case InboundAuthPolicy::AUTO: return "auto";
@@ -48,42 +52,28 @@ inline InboundAuthPolicy inbound_auth_policy_from_string(const std::string& s) {
     return InboundAuthPolicy::OFF;
 }
 
-inline const char* spf_mode_validate(const std::string& s) {
-    if (s == "off" || s == "soft" || s == "hard") return s.c_str();
-    return "off";
-}
-
-// ============================================================
-// 单个监听器配置
-// ============================================================
-enum class ListenerType : int { TCP = 0, SSL = 1 };
-
-inline const char* listener_type_to_string(ListenerType t) {
-    switch (t) {
-    case ListenerType::SSL: return "ssl";
-    case ListenerType::TCP:
-    default: return "tcp";
-    }
-}
-
-inline ListenerType listener_type_from_string(const std::string& s) {
-    if (s == "ssl") return ListenerType::SSL;
-    return ListenerType::TCP;
-}
-
-struct ListenerConfig {
-    ListenerType type = ListenerType::TCP;
-    uint16_t port = 0;
-    InboundAuthPolicy auth_policy = InboundAuthPolicy::OFF;
+// 扩展的 ListenerConfig —— 在框架基类基础上增加邮件特有字段
+struct MailListenerConfig : public pr::ListenerConfig {
     std::string spf_mode   = "off";
     std::string dkim_mode  = "off";
     std::string dmarc_mode = "off";
 
     void show() const {
         LOG_SERVER_INFO("  [{}:{}] auth={} spf={} dkim={} dmarc={}",
-                        listener_type_to_string(type), port,
+                        pr::listener_type_to_string(type), port,
                         inbound_auth_policy_to_string(auth_policy),
                         spf_mode, dkim_mode, dmarc_mode);
+    }
+
+    static MailListenerConfig from_json(const nlohmann::json& item) {
+        MailListenerConfig lc;
+        lc.type   = pr::listener_type_from_string(item.value("type", "tcp"));
+        lc.port   = static_cast<uint16_t>(item.value("port", 0));
+        lc.auth_policy = inbound_auth_policy_from_string(item.value("auth_policy", "off"));
+        lc.spf_mode   = item.value("spf_mode", "off");
+        lc.dkim_mode  = item.value("dkim_mode", "off");
+        lc.dmarc_mode = item.value("dmarc_mode", "off");
+        return lc;
     }
 };
 
@@ -98,11 +88,9 @@ struct ShardRouterConfig {
     size_t shard_count = 1;
     size_t cache_capacity = 100000;
 
-    // static 模式
     std::vector<std::pair<std::string, int>> static_mappings;
     int default_shard = 0;
 
-    // 每个 shard 的资源配置（table/static 模式使用）
     struct ShardEntry {
         std::string db_config_file;
         std::string storage_root;
@@ -126,9 +114,7 @@ struct ShardRouterConfig {
         if (j.contains("mappings") && j["mappings"].is_array()) {
             static_mappings.clear();
             for (auto& m : j["mappings"]) {
-                static_mappings.emplace_back(
-                    m.value("domain", ""),
-                    m.value("shard", 0));
+                static_mappings.emplace_back(m.value("domain", ""), m.value("shard", 0));
             }
         }
 
@@ -147,50 +133,25 @@ struct ShardRouterConfig {
 };
 
 // ============================================================
-// 服务器配置
+// ServerConfig — 邮件服务器配置 (继承框架 ServerConfig)
 // ============================================================
-struct ServerConfig {
-    std::string address;
-
-    // 多监听器配置
-    std::vector<ListenerConfig> listeners;
-
-    // SSL 证书
-    std::string certFile;
-    std::string keyFile;
-    std::string dhFile;
-
-    size_t maxMessageSize;
-    size_t maxConnections;
-
-    size_t io_thread_count;
-    size_t worker_thread_count;
+struct ServerConfig : public pr::ServerConfig {
+    // 扩展的监听器 (取代基类的 ListenerConfig)
+    std::vector<MailListenerConfig> mail_listeners;
 
     bool use_database;
     DBPoolConfig db_pool_config;
 
-    uint32_t connection_timeout;
-    uint32_t read_timeout;
-    uint32_t write_timeout;
-
-    size_t max_auth_attempts;
     bool dnsbl_enabled;
-
-    // 性能测试模式：跳过 SPF/DKIM/DMARC/DNSBL/反垃圾等检查，来者不拒
     bool perf_mode;
-
-    std::string log_level;
-    std::string log_file;
-    bool log_to_console;
-    bool log_to_file;
 
     std::string router_type;
     std::string router_config_file;
     ShardRouterConfig router_config;
 
-    storage::StorageConfig storage;             // 新版嵌套存储配置
-    std::string storage_provider;               // deprecated: use storage.provider
-    std::string mail_storage_path;              // deprecated: use storage.local
+    storage::StorageConfig storage;
+    std::string storage_provider;
+    std::string mail_storage_path;
     std::string attachment_storage_path;
     std::vector<std::string> distributed_storage_roots;
     size_t distributed_storage_replica_count;
@@ -200,7 +161,6 @@ struct ServerConfig {
     uint32_t hdfs_timeout_ms;
     size_t hdfs_replication;
 
-    // S3 / MinIO
     std::string s3_endpoint;
     std::string s3_bucket;
     std::string s3_access_key;
@@ -236,7 +196,6 @@ struct ServerConfig {
     uint16_t metrics_port;
     std::string metrics_bind_address;
 
-    // 全局默认值 — listener 未指定时回退到这些
     InboundAuthPolicy inbound_auth_policy;
     std::string inbound_spf_mode;
     std::string inbound_dkim_mode;
@@ -249,34 +208,10 @@ struct ServerConfig {
     int  intrusion_max_records;
     int  intrusion_ban_threshold;
 
-    // ---- 便捷方法：按端口查 listener 配置 ----
-    std::unordered_map<uint16_t, ListenerConfig> listener_map() const {
-        std::unordered_map<uint16_t, ListenerConfig> m;
-        for (auto& l : listeners) m[l.port] = l;
-        return m;
-    }
-
-    const ListenerConfig* find_listener(uint16_t port) const {
-        for (auto& l : listeners) if (l.port == port) return &l;
-        return nullptr;
-    }
-
     ServerConfig()
-        : address("0.0.0.0")
-        , maxMessageSize(1024 * 1024)
-        , maxConnections(1000)
-        , io_thread_count(std::thread::hardware_concurrency())
-        , worker_thread_count(std::thread::hardware_concurrency())
-        , use_database(false)
-        , connection_timeout(300)
-        , read_timeout(60)
-        , write_timeout(60)
-        , max_auth_attempts(3)
+        : use_database(false)
         , dnsbl_enabled(true)
         , perf_mode(false)
-        , log_level("info")
-        , log_to_console(true)
-        , log_to_file(true)
         , router_type("hash")
         , storage_provider("local")
         , distributed_storage_replica_count(1)
@@ -324,13 +259,11 @@ struct ServerConfig {
         , intrusion_ban_threshold(0)
     {}
 
-    ServerConfig(const ServerConfig&) = default;
-
     void show() const {
         LOG_SERVER_INFO("address={} io_threads={} worker_threads={} maxConn={} use_db={} domain={}",
                         address, io_thread_count, worker_thread_count, maxConnections,
                         use_database, system_domain);
-        for (auto& l : listeners) l.show();
+        for (auto& l : mail_listeners) l.show();
         LOG_SERVER_INFO("router: type={} shards={} cert={} key={}",
                         router_type, router_config.shard_count,
                         certFile.empty() ? "(none)" : certFile,
@@ -343,28 +276,9 @@ struct ServerConfig {
                         outbound_helo_domain, outbound_dkim_enabled);
     }
 
-    bool validate() const {
-        if (listeners.empty()) {
-            LOG_SERVER_ERROR("Error: at least one listener required");
-            return false;
-        }
-        bool has_ssl = false;
-        for (auto& l : listeners) {
-            if (l.port == 0) { LOG_SERVER_ERROR("Error: listener port 0"); return false; }
-            if (l.type == ListenerType::SSL) has_ssl = true;
-        }
-#ifdef USE_SSL
-        if (has_ssl && (certFile.empty() || keyFile.empty())) {
-            LOG_SERVER_ERROR("Error: SSL listener requires certFile/keyFile");
-            return false;
-        }
-#endif
-        if (io_thread_count == 0 || worker_thread_count == 0) {
-            LOG_SERVER_ERROR("Error: thread pool size 0"); return false;
-        }
-        if (connection_timeout == 0 || read_timeout == 0 || write_timeout == 0) {
-            LOG_SERVER_ERROR("Error: timeout 0"); return false;
-        }
+    bool validate() const override {
+        if (!pr::ServerConfig::validate()) return false;
+        if (mail_listeners.empty()) { LOG_SERVER_ERROR("Error: at least one listener required"); return false; }
         if (inbound_persist_wait_timeout_ms == 0) {
             LOG_SERVER_ERROR("Error: inbound_persist_wait_timeout_ms 0"); return false;
         }
@@ -372,12 +286,6 @@ struct ServerConfig {
             LOG_SERVER_ERROR("Error: distributed needs roots"); return false;
         }
         return true;
-    }
-
-    std::string resolve_path(const std::string& config_path, const std::string& relative_path) {
-        if (relative_path.empty()) return "";
-        auto dir = std::filesystem::path(config_path).parent_path();
-        return std::filesystem::absolute((dir / relative_path).lexically_normal()).string();
     }
 
     bool loadFromFile(const std::string& filename) {
@@ -388,45 +296,33 @@ struct ServerConfig {
         }
         nlohmann::json j;
         config_file >> j;
+        std::string base_dir = std::filesystem::path(filename).parent_path().string();
 
-        // --- listeners ---
+        // 1. 加载 framework 级字段
+        pr::ServerConfig::loadFromJson(j, base_dir);
+
+        // 2. 加载邮件特有 listeners (覆盖基类的 listeners)
         if (j.contains("listeners") && j["listeners"].is_array()) {
+            mail_listeners.clear();
             listeners.clear();
             for (auto& item : j["listeners"]) {
-                ListenerConfig lc;
-                lc.type   = listener_type_from_string(item.value("type", "tcp"));
-                lc.port   = static_cast<uint16_t>(item.value("port", 0));
-                lc.auth_policy = inbound_auth_policy_from_string(
-                    item.value("auth_policy", "off"));
-                lc.spf_mode   = item.value("spf_mode", "off");
-                lc.dkim_mode  = item.value("dkim_mode", "off");
-                lc.dmarc_mode = item.value("dmarc_mode", "off");
-                if (lc.port != 0) listeners.push_back(lc);
+                auto lc = MailListenerConfig::from_json(item);
+                if (lc.port != 0) {
+                    mail_listeners.push_back(lc);
+                    listeners.push_back({lc.type, lc.port});
+                }
             }
         }
 
-        // --- common fields ---
-        address           = j.value("address", address);
-        maxMessageSize    = j.value("maxMessageSize", maxMessageSize);
-        maxConnections    = j.value("maxConnections", maxConnections);
-        io_thread_count   = j.value("io_thread_count", io_thread_count);
-        worker_thread_count = j.value("worker_thread_count", worker_thread_count);
-        use_database      = j.value("use_database", use_database);
+        // 3. 加载邮件特有字段
+        use_database = j.value("use_database", use_database);
         if (use_database) {
             std::string db_file = resolve_path(filename, j.value("db_config_file", ""));
             db_pool_config.loadFromJson(db_file);
         }
-        connection_timeout = j.value("connection_timeout", connection_timeout);
-        read_timeout       = j.value("read_timeout", read_timeout);
-        write_timeout      = j.value("write_timeout", write_timeout);
-        max_auth_attempts  = j.value("max_auth_attempts", max_auth_attempts);
-        dnsbl_enabled      = j.value("dnsbl_enabled", dnsbl_enabled);
-        perf_mode          = j.value("perf_mode", perf_mode);
-        log_level          = j.value("log_level", log_level);
-        log_file           = resolve_path(filename, j.value("log_file", log_file));
-        log_to_console     = j.value("log_to_console", log_to_console);
-        log_to_file        = j.value("log_to_file", log_to_file);
-        router_type        = j.value("router_type", router_type);
+        dnsbl_enabled     = j.value("dnsbl_enabled", dnsbl_enabled);
+        perf_mode         = j.value("perf_mode", perf_mode);
+        router_type       = j.value("router_type", router_type);
         router_config_file = resolve_path(filename, j.value("router_config_file", ""));
         if (!router_config_file.empty() && std::filesystem::exists(router_config_file)) {
             router_config.loadFromJson(router_config_file);
@@ -435,9 +331,7 @@ struct ServerConfig {
             router_config.shard_count = 1;
         }
 
-        // 存储配置: "storage": { "provider": "...", "local": {...}, ... }
         if (j.contains("storage") && j["storage"].is_object()) {
-            std::string base_dir = std::filesystem::path(filename).parent_path().string();
             storage = storage::StorageConfig::from_json(j["storage"], base_dir);
         }
 
@@ -481,12 +375,6 @@ struct ServerConfig {
         intrusion_max_records            = j.value("intrusion_max_records", 10000);
         intrusion_ban_threshold          = j.value("intrusion_ban_threshold", 0);
 
-        // SSL certs
-        certFile = resolve_path(filename, j.value("certFile", certFile));
-        keyFile  = resolve_path(filename, j.value("keyFile", keyFile));
-        dhFile   = resolve_path(filename, j.value("dhFile", dhFile));
-
-        // outbound_ports
         if (j.contains("outbound_ports") && j["outbound_ports"].is_array()) {
             outbound_ports.clear();
             for (auto& p : j["outbound_ports"])
@@ -494,7 +382,6 @@ struct ServerConfig {
                     outbound_ports.push_back(static_cast<uint16_t>(p.get<uint32_t>()));
         }
 
-        // distributed_storage_roots
         if (j.contains("distributed_storage_roots") && j["distributed_storage_roots"].is_array()) {
             distributed_storage_roots.clear();
             for (auto& item : j["distributed_storage_roots"]) {
@@ -518,15 +405,10 @@ struct ServerConfig {
         s3_timeout_ms     = j.value("s3_timeout_ms", s3_timeout_ms);
         s3_use_path_style = j.value("s3_use_path_style", s3_use_path_style);
 
-        // 性能测试模式：加载完成后，自动覆写瓶颈参数，实现"一键无限制"
-        if (perf_mode) {
-            apply_perf_mode();
-        }
-
+        if (perf_mode) apply_perf_mode();
         return true;
     }
 
-    // 性能测试模式：自动放宽所有限制，避免配置瓶颈影响网络层极限测试
     void apply_perf_mode() {
         maxConnections               = 100000;
         persist_max_inflight_mails   = 1000000;

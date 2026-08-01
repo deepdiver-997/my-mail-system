@@ -2,6 +2,8 @@
 #define MAIL_SYSTEM_OUTBOX_REPOSITORY_H
 
 #include "mail_system/back/entities/mail.h"
+#include "mail_system/back/db/db_pool.h"
+#include "mail_system/back/db/db_service.h"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -9,8 +11,7 @@
 
 namespace mail_system {
 
-class DBPool;
-class IDBConnection;
+// IDBConnection/DBPool now in pr::, brought into mail_system via db headers
 
 namespace outbound {
 

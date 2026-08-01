@@ -142,7 +142,7 @@ int main(int argc, char* argv[]) {
         LOG_SERVER_INFO("IMAP Server configuration:");
         LOG_SERVER_INFO("  System domain: {}", config.system_domain);
         LOG_SERVER_INFO("  Storage: {} @ {}", config.storage_provider, config.mail_storage_path);
-        for (auto& l : config.listeners)
+        for (auto& l : config.mail_listeners)
             LOG_SERVER_INFO("  Listener: {}:{} auth={}", listener_type_to_string(l.type), l.port,
                            inbound_auth_policy_to_string(l.auth_policy));
 
@@ -150,7 +150,7 @@ int main(int argc, char* argv[]) {
         g_server->m_configFilePath = config_path;
         g_server->start();
 
-        LOG_SERVER_INFO("IMAPS Server running with {} listener(s)", config.listeners.size());
+        LOG_SERVER_INFO("IMAPS Server running with {} listener(s)", config.mail_listeners.size());
         LOG_SERVER_INFO("Press Ctrl+C to stop, SIGHUP to reload config");
 
         // 主循环：condition_variable 等信号，替代忙等

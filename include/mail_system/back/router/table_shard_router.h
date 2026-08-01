@@ -11,8 +11,6 @@
 
 namespace mail_system {
 
-class DBPool;
-
 namespace router {
 
 // ====================================================================
