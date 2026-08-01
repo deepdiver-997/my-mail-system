@@ -506,6 +506,70 @@ TEST(idle_initiated) {
     std::cout << "  [PASS] idle_initiated" << std::endl;
 }
 
+// ========== CONNECT (INIT → greeting) ==========
+
+TEST(connect_greeting) {
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::INIT));
+    fx.fsm->process_event(h.session, ImapEvent::CONNECT, "");
+    auto& w = h.conn->written();
+    assert(HAS(w, "* OK"));
+    std::cout << "  [PASS] connect_greeting" << std::endl;
+}
+
+// ========== AUTHENTICATE (SASL) ==========
+
+TEST(authenticate_not_supported) {
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
+    fx.fsm->process_event(h.session, ImapEvent::AUTHENTICATE, "C001");
+    auto& w = h.conn->written();
+    assert(HAS(w, "NO") || HAS(w, "BAD"));
+    std::cout << "  [PASS] authenticate_unsupported" << std::endl;
+}
+
+// ========== ERROR / TIMEOUT ==========
+
+TEST(error_event) {
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
+    fx.fsm->process_event(h.session, ImapEvent::ERROR, "");
+    auto& w = h.conn->written();
+    assert(!w.empty());
+    std::cout << "  [PASS] error_event" << std::endl;
+}
+
+TEST(timeout_event) {
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
+    fx.fsm->process_event(h.session, ImapEvent::TIMEOUT, "");
+    auto& w = h.conn->written();
+    assert(!w.empty());
+    std::cout << "  [PASS] timeout_event" << std::endl;
+}
+
+// ========== IDLE + DONE (deferred read) ==========
+
+TEST(idle_with_done) {
+    auto h = fx.make_session();
+    auto* ctx = static_cast<ImapContext*>(h.session->get_context());
+    ctx->is_authenticated = true;
+    h.session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
+    // 防止 do_async_read→eof→close 杀死连接
+    h.conn->set_deferred_read(true);
+
+    fx.fsm->process_event(h.session, ImapEvent::IDLE, "I001");
+    auto& w = h.conn->written();
+    assert(HAS(w, "+ idling"));
+
+    // DONE 命令到达 (模拟客户端在 IDLE 中发送)
+    h.conn->clear_written();
+    fx.fsm->process_event(h.session, ImapEvent::DONE, "I001");
+    // handle_done 写入 "I001 OK IDLE terminated"
+    assert(!w.empty());
+    std::cout << "  [PASS] idle_with_done (response: " << w.substr(0, 60) << ")" << std::endl;
+}
+
 int main() {
     std::cout << "IMAP FSM Test Suite\n==================\n";
 
@@ -555,7 +619,16 @@ int main() {
         test_move_no_db(fx);
         test_expunge_no_db(fx);
         test_close_no_db(fx);
-        // test_idle_initiated(fx);  // 已知: IDLE 在 mock 环境下不稳定
+
+        // ── 连接/错误/超时 ──
+        test_connect_greeting(fx);
+        test_authenticate_not_supported(fx);
+        test_error_event(fx);
+        test_timeout_event(fx);
+
+        // ── IDLE/DONE ──
+        test_idle_initiated(fx);
+        test_idle_with_done(fx);
 
         std::cout << "\nAll tests passed.\n";
     } catch (const std::exception& e) {

@@ -25,15 +25,28 @@ public:
     // 将 async_write 的数据同步捕获到外部 string（用于 STARTTLS 等连接被释放后的断言）
     void capture_to(std::string* target) { capture_target_ = target; }
 
+    // ---- IDLE / deferred read support ----
+    void set_deferred_read(bool v) { deferred_read_ = v; }
+    void trigger_deferred_read(const std::string& data) {
+        if (!pending_handler_) return;
+        read_buf_ += data;
+        auto h = std::move(pending_handler_);
+        pending_handler_ = nullptr;
+        async_read(boost::asio::mutable_buffer{}, std::move(h));
+    }
+
     // --- IConnection impl ---
     void async_read(boost::asio::mutable_buffer buf, ReadHandler h) override {
+        if (deferred_read_ && read_buf_.size() <= read_pos_) {
+            pending_handler_ = std::move(h);
+            return;
+        }
         size_t n = std::min(buf.size(), read_buf_.size() - read_pos_);
         if (n > 0) {
             std::memcpy(buf.data(), read_buf_.data() + read_pos_, n);
             read_pos_ += n;
             h(boost::system::error_code(), n);
         } else {
-            // 数据已耗尽 → 模拟对端关闭连接
             h(boost::asio::error::eof, 0);
         }
     }
@@ -65,6 +78,8 @@ private:
     std::string write_buf_;
     bool closed_ = false;
     std::string* capture_target_ = nullptr;
+    bool deferred_read_ = false;
+    std::function<void(boost::system::error_code, size_t)> pending_handler_;
 };
 
 } // namespace mail_system
