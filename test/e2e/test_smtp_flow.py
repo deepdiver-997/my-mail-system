@@ -83,10 +83,9 @@ def main():
     parser.add_argument('--server', default='./build/smtpsServer')
     parser.add_argument('--config', default='config/smtpsConfig.json')
     parser.add_argument('--host', default='127.0.0.1')
-    parser.add_argument('--db-config', default='config/db_config.json')
+    parser.add_argument('--keep-temp', action='store_true', help='keep temp config dir')
     args = parser.parse_args()
 
-    # ---- 定位项目根目录 ----
     script_dir = os.path.dirname(os.path.abspath(__file__))
     proj_root = os.path.normpath(os.path.join(script_dir, '..', '..'))
 
@@ -95,10 +94,35 @@ def main():
 
     if not os.path.exists(server_bin):
         print(f"ERROR: server binary not found: {server_bin}")
-        print("  Build first: ./build.sh Release")
         sys.exit(1)
 
+    # ---- 创建临时配置 (可调节，不污染原始配置) ----
+    import tempfile
+    tmpdir = tempfile.mkdtemp(prefix='smtp_e2e_')
     cfg = load_config(config_path)
+    cfg['perf_mode'] = False                     # 启用安全检查
+    cfg['inbound_spf_mode'] = 'off'              # SPF 需真实 DNS，测试环境关
+    cfg['inbound_dkim_mode'] = 'off'
+    cfg['inbound_dmarc_mode'] = 'off'
+    cfg['log_file'] = os.path.join(tmpdir, 'server.log')
+    cfg['metrics_enabled'] = False
+    # db_config 路径需要是绝对路径 (配置在 tmpdir, db_config 在原项目)
+    db_file = cfg.get('db_config_file', 'config/db_config.json')
+    cfg['db_config_file'] = os.path.join(proj_root, db_file)
+    cert_file = cfg.get('certFile', ''); cfg['certFile'] = os.path.join(proj_root, cert_file) if cert_file and not os.path.isabs(cert_file) else cert_file
+    key_file = cfg.get('keyFile', ''); cfg['keyFile'] = os.path.join(proj_root, key_file) if key_file and not os.path.isabs(key_file) else key_file
+    # 存储路径指向临时目录
+    mail_dir = os.path.join(tmpdir, 'mail')
+    attach_dir = os.path.join(tmpdir, 'attachments')
+    os.makedirs(mail_dir, exist_ok=True)
+    os.makedirs(attach_dir, exist_ok=True)
+    cfg['storage'] = {'provider': 'local', 'local': {
+        'mail_path': mail_dir, 'attachment_path': attach_dir}}
+
+    tmp_config = os.path.join(tmpdir, 'config.json')
+    with open(tmp_config, 'w') as f:
+        json.dump(cfg, f)
+
     host = args.host
     r = TestResult()
     perf_mode = cfg.get('perf_mode', False)
@@ -113,7 +137,14 @@ def main():
     print(f"Listeners: {list(listeners.keys())}")
     print(f"Starting server: {server_bin}")
 
-    proc = start_server(server_bin, proj_root)
+    print(f"Temp config: {tmp_config}")
+    proc = subprocess.Popen(
+        [server_bin, '-c', tmp_config],
+        cwd=proj_root,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        preexec_fn=os.setsid
+    )
+    time.sleep(2)
 
     try:
         # ================================================================
@@ -169,7 +200,7 @@ def main():
             r.skip("Port 465 SSL", "no SSL listener configured")
 
         # ================================================================
-        # Test 4: smtplib E2E 投递
+        # Test 4: smtplib E2E 投递 + 验证持久化
         # ================================================================
         db_cfg = _load_db_config(proj_root, cfg)
         if perf_mode:
@@ -177,12 +208,21 @@ def main():
         elif db_cfg:
             r.test("smtplib auth + send on port 587", lambda:
                 _smtplib_send(host, 587, db_cfg))
+            time.sleep(1)  # wait for async persist
+            r.test("mail file exists on disk", lambda: _verify_mail_on_disk(mail_dir))
         else:
             r.skip("smtplib auth+send", "DB config not found")
 
     finally:
         print("\nStopping server...")
-        stop_server(proc)
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        try: proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL); proc.wait()
+        if not args.keep_temp:
+            import shutil; shutil.rmtree(tmpdir, ignore_errors=True)
+        else:
+            print(f"Temp files kept at: {tmpdir}")
 
     ok = r.summary()
     sys.exit(0 if ok else 1)
@@ -295,6 +335,15 @@ def _load_db_config(proj_root, cfg):
         with open(path) as f:
             return json.load(f)
     return None
+
+def _verify_mail_on_disk(mail_dir):
+    """验证 mail 目录下是否有新写入的邮件文件"""
+    files = [f for f in os.listdir(mail_dir) if os.path.isfile(os.path.join(mail_dir, f))]
+    assert len(files) > 0, f"no mail files found in {mail_dir}"
+    # 检查最新文件大小合理
+    newest = max(files, key=lambda f: os.path.getmtime(os.path.join(mail_dir, f)))
+    size = os.path.getsize(os.path.join(mail_dir, newest))
+    assert size > 50, f"mail file too small ({size} bytes), likely empty"
 
 def _smtplib_send(host, port, db_cfg):
     s = smtplib.SMTP(host, port, timeout=10)

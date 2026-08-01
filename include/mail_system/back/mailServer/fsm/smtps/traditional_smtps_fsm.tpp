@@ -479,7 +479,18 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         std::string spf_reject_reason;
         if (!cfg->perf_mode && cfg->inbound_spf_mode != "off" &&
             !ctx->sender_address.empty() && ctx->sender_address != "<>") {
-            // TODO: re-enable SPF via OutboundServer DNS resolver
+            auto* dns = session->get_server()->get_dns_resolver().get();
+            if (dns) {
+                outbound::SyncDnsWrapper sync(*dns);
+                auto spf = inbound::InboundVerifier::check_spf_only(*dns,
+                    session->get_client_ip(), ctx->sender_address, ctx->ehlo_domain);
+                ctx->spf_checked = true;
+                ctx->spf_result = spf.result;
+                if (spf.result == "fail" &&
+                    cfg->inbound_spf_mode == "hard") {
+                    spf_reject_reason = "SPF hard-fail for " + ctx->sender_address;
+                }
+            }
         }
 
         if (!spf_reject_reason.empty()) {
@@ -600,7 +611,21 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
             }
         }
 
-        // TODO: re-enable DKIM/DMARC via OutboundServer DNS resolver
+        auto* dns = session->get_server()->get_dns_resolver().get();
+        if (dns) {
+            inbound::VerificationResult vr;
+            inbound::InboundVerifier verifier(*dns);
+            inbound::SpfResult pre_spf{ctx->spf_result, ""};
+            verifier.verify_all(client_ip, mail_from, helo, headers, raw_body, *cfg, vr,
+                                ctx->spf_checked ? &pre_spf : nullptr);
+            ctx->dkim_result = vr.dkim.result;
+            ctx->dmarc_result = vr.dmarc.result;
+            if (!ctx->spf_checked) {
+                ctx->spf_result = vr.spf.result;
+                ctx->spf_checked = true;
+            }
+            ctx->verification_run = true;
+        }
     }
 
     auto submit_result = smtp_session->submit_mail_to_queue();

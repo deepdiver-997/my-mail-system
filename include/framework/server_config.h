@@ -309,7 +309,7 @@ struct ServerConfig : public pr::ServerConfig {
                 auto lc = MailListenerConfig::from_json(item);
                 if (lc.port != 0) {
                     mail_listeners.push_back(lc);
-                    listeners.push_back({lc.type, lc.port});
+                    listeners.push_back(lc);  // MailListenerConfig → pr::ListenerConfig slice
                 }
             }
         }

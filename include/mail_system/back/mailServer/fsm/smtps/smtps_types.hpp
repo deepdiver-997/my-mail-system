@@ -90,6 +90,8 @@ struct SmtpsContext {
     bool spf_checked = false;                  // SPF 已在 MAIL FROM 阶段验证
     std::string spf_result;                    // MAIL FROM 阶段的 SPF 结果
     std::string spf_reason;                    // SPF 失败原因
+    std::string dkim_result;                   // DKIM 验证结果
+    std::string dmarc_result;                  // DMARC 验证结果
     int shard_index = 0;                       // 由 shard router 在认证时分配
 
     // 附件缓冲区相关（采用与邮件相同的缓冲策略）
