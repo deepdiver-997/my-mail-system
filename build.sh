@@ -384,6 +384,12 @@ if [[ "$CROSS_X64_LINUX" == "ON" ]]; then
         print_info "cross-x64 mode: forcing -DENABLE_DEBUG_LOGS=OFF (override via EXTRA_CMAKE_ARGS if needed)"
         cmake_args+=( -DENABLE_DEBUG_LOGS=OFF )
     fi
+
+    # cross-x64: override -march=native (invalid for cross-compiler on macOS)
+    cmake_args+=(
+        -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=x86-64-v3"
+        -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -march=x86-64-v3"
+    )
 fi
 
 if [ -n "$GENERATOR" ]; then

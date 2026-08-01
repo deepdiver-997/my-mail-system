@@ -27,12 +27,16 @@ public:
 
     // ---- IDLE / deferred read support ----
     void set_deferred_read(bool v) { deferred_read_ = v; }
+    bool has_pending_read() const { return pending_handler_ != nullptr; }
     void trigger_deferred_read(const std::string& data) {
         if (!pending_handler_) return;
-        read_buf_ += data;
+        append_read_data(data);
         auto h = std::move(pending_handler_);
         pending_handler_ = nullptr;
-        async_read(boost::asio::mutable_buffer{}, std::move(h));
+        // Use a buffer matching the available data size (empty buffer → n=0 → EOF)
+        size_t avail = read_buf_.size() - read_pos_;
+        std::vector<char> tmp(avail);
+        async_read(boost::asio::buffer(tmp), std::move(h));
     }
 
     // --- IConnection impl ---

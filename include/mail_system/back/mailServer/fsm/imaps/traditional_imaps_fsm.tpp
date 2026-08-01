@@ -1271,7 +1271,22 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     bool want_rfc822_size = attrs.find("RFC822.SIZE") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
     bool want_envelope = attrs.find("ENVELOPE") != std::string::npos || attrs.find("ALL") != std::string::npos;
     bool want_body = attrs.find("BODY[]") != std::string::npos || attrs.find("BODY.PEEK[]") != std::string::npos;
-    bool want_body_header = attrs.find("BODY.PEEK[HEADER]") != std::string::npos || attrs.find("BODY[HEADER]") != std::string::npos;
+    // HEADER.FIELDS / HEADER.FIELDS.NOT support
+    bool has_header_fields = attrs.find("HEADER.FIELDS") != std::string::npos;
+    bool want_body_header = has_header_fields ||
+        attrs.find("BODY.PEEK[HEADER]") != std::string::npos ||
+        attrs.find("BODY[HEADER]") != std::string::npos;
+    std::string header_fields_filter;
+    bool header_fields_not = false;
+    if (has_header_fields) {
+        header_fields_not = attrs.find("HEADER.FIELDS.NOT") != std::string::npos;
+        size_t lp = attrs.find('(', attrs.find("HEADER.FIELDS"));
+        if (lp != std::string::npos) {
+            size_t rp = attrs.find(')', lp);
+            if (rp != std::string::npos)
+                header_fields_filter = attrs.substr(lp + 1, rp - lp - 1);
+        }
+    }
     // BODY[n] 或 BODY.PEEK[n] — 客户端请求特定 MIME part
     // BODY[n] 或 BODY.PEEK[n] — 客户端请求特定 MIME part。
     // 从 attrs 中提取 part 编号（如 "BODY.PEEK[1]" → 1）
@@ -1399,7 +1414,41 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             size_t hdr_end = body_content.find("\r\n\r\n");
             if (hdr_end != std::string::npos)
                 headers = body_content.substr(0, hdr_end + 2); // include trailing \r\n
-            response += "BODY[HEADER] " + build_fetch_body_response(headers, headers.size()) + " ";
+
+            std::string label = "BODY[HEADER]";
+            if (has_header_fields && !header_fields_filter.empty()) {
+                // Filter to only the requested header fields
+                std::set<std::string> wanted;
+                {
+                    std::istringstream fs(header_fields_filter);
+                    std::string f;
+                    while (fs >> f) {
+                        std::transform(f.begin(), f.end(), f.begin(), ::tolower);
+                        wanted.insert(f);
+                    }
+                }
+                std::string filtered;
+                std::istringstream hs(headers);
+                std::string line;
+                while (std::getline(hs, line)) {
+                    if (line.empty() || line == "\r") break;
+                    if (line.back() == '\r') line.pop_back();
+                    size_t colon = line.find(':');
+                    if (colon != std::string::npos) {
+                        std::string hdr_name = line.substr(0, colon);
+                        std::transform(hdr_name.begin(), hdr_name.end(), hdr_name.begin(), ::tolower);
+                        bool match = wanted.count(hdr_name) > 0;
+                        if (header_fields_not) match = !match;
+                        if (match) filtered += line + "\r\n";
+                    }
+                }
+                if (!filtered.empty() && filtered.size() >= 2)
+                    filtered.resize(filtered.size() - 2);
+                headers = filtered;
+                label = header_fields_not ? "BODY[HEADER.FIELDS.NOT (" : "BODY[HEADER.FIELDS (";
+                label += header_fields_filter + ")]";
+            }
+            response += label + " " + build_fetch_body_response(headers, headers.size()) + " ";
         }
         if (want_body) {
             std::string body_content = this->read_mail_body(mail_info.body_path);
@@ -1491,7 +1540,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
                     }
                 }
             }
-            response += "BODY[] " + build_fetch_body_response(body_content, body_content.size()) + " ";
+            std::string body_label = want_body_part ? ("BODY[" + std::to_string(body_part_num) + "]") : "BODY[]";
+            response += body_label + " " + build_fetch_body_response(body_content, body_content.size()) + " ";
         }
         if (want_body_struct) {
             std::string body_content = this->read_mail_body(mail_info.body_path);

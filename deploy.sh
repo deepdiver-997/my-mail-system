@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER="root@120.24.169.213"
 TARGET_DIR="/opt/smtpServer"
 SYSROOT="${HOME}/.protorelay/sysroot/usr"
-JOBS="4"
+JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 BUILD_TYPE="Release"
 MODE="cross-x64 object-only"
 

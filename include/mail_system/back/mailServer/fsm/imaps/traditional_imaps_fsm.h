@@ -27,6 +27,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <regex>
 #include <string>
 #include <sstream>

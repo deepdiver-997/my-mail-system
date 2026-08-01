@@ -194,6 +194,8 @@ void SessionBase<ConnectionType>::drain_buffered_commands() {
         handle_read(extract_one_line());
         process_read();
     }
+    // 注意: drain 只负责消费已缓冲的命令，不启动新的异步读。
+    // 调用方必须在 drain 返回后自行判断是否需要 do_async_read()。
 }
 
 template <typename ConnectionType>
