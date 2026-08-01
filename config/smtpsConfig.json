@@ -9,8 +9,8 @@
     { "type": "tcp", "port": 587, "auth_policy": "on" }
   ],
 
-  "certFile": "crt/server.crt",
-  "keyFile": "crt/server.key",
+  "certFile": "config/crt/server.crt",
+  "keyFile": "config/crt/server.key",
 
   "use_database": true,
   "db_config_file": "db_config.json",
@@ -33,7 +33,7 @@
   "metrics_bind_address": "127.0.0.1",
 
   "log_level": "info",
-  "log_to_console": false,
+  "log_to_console": true,
   "log_to_file": true,
   "log_file": "/tmp/logs/server.log",
 

@@ -28,8 +28,6 @@
 #include <signal.h>
 #include <string>
 #include <thread>
-#include <mutex>
-#include <condition_variable>
 #include <chrono>
 #include <cstdlib>
 
@@ -125,15 +123,7 @@ std::shared_ptr<SmtpsServer> g_smtp_server = nullptr;
 std::shared_ptr<ImapsServer> g_imap_server = nullptr;
 SharedServerResources g_resources;
 
-// 信号安全：只写 volatile sig_atomic_t，让主线程轮询
-volatile sig_atomic_t g_signal_flag = 0;
-std::mutex g_signal_mutex;
-std::condition_variable g_signal_cv;
-
-void signal_handler(int signal) {
-    g_signal_flag = (signal == SIGHUP) ? 2 : 1;
-    g_signal_cv.notify_one();
-}
+sigset_t g_sigset;
 
 int main(int argc, char* argv[]) {
     CliOptions options;
@@ -159,9 +149,11 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    signal(SIGHUP, signal_handler);
+    sigemptyset(&g_sigset);
+    sigaddset(&g_sigset, SIGINT);
+    sigaddset(&g_sigset, SIGTERM);
+    sigaddset(&g_sigset, SIGHUP);
+    pthread_sigmask(SIG_BLOCK, &g_sigset, nullptr);
 
 #ifdef GNU_LINUX
     std::cout << "Remember to execute 'sudo setcap 'cap_net_bind_service=+ep' " << argv[0]
@@ -259,32 +251,24 @@ int main(int argc, char* argv[]) {
         }
         LOG_SERVER_INFO("Press Ctrl+C to stop all servers.");
 
-        // ================================================================
-        // 8. 主循环：轮询信号标志，安全关闭
-        // ================================================================
-        {
-            std::unique_lock<std::mutex> lk(g_signal_mutex);
-            g_signal_cv.wait(lk, []{ return g_signal_flag != 0; });
-        }
-
-        if (g_signal_flag == 2) {
-            LOG_SERVER_INFO("SIGHUP reload (SMTP only)");
-            g_signal_flag = 0;
-            if (g_smtp_server) {
-                bool ok = g_smtp_server->reload_config(g_smtp_server->m_configFilePath);
-                LOG_SERVER_INFO("SMTP config reload: {}", ok ? "success" : "failed");
+        // 8. 主循环：sigwait 阻塞等信号
+        int sig = 0;
+        while (g_smtp_server || g_imap_server) {
+            sigwait(&g_sigset, &sig);
+            if (sig == SIGHUP) {
+                LOG_SERVER_INFO("SIGHUP reload (SMTP only)");
+                if (g_smtp_server)
+                    g_smtp_server->reload_config(g_smtp_server->m_configFilePath);
+                continue;
             }
+            break;
         }
 
-        if (g_signal_flag == 1 || !g_smtp_server || !g_imap_server) {
-            LOG_SERVER_INFO("Shutting down...");
-            // request_stop 只设原子状态，然后 run() 检测到后退出
-            // reset() 触发析构链，在正常上下文中释放所有资源
-            if (g_smtp_server) g_smtp_server->request_stop();
-            if (g_imap_server) g_imap_server->request_stop();
-            g_smtp_server.reset();
-            g_imap_server.reset();
-        }
+        LOG_SERVER_INFO("Shutting down...");
+        if (g_smtp_server) g_smtp_server->request_stop();
+        if (g_imap_server) g_imap_server->request_stop();
+        g_smtp_server.reset();
+        g_imap_server.reset();
 
         LOG_SERVER_INFO("");
         LOG_SERVER_INFO("All servers stopped. Cleaning up...");

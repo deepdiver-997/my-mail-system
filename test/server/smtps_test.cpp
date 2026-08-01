@@ -6,8 +6,6 @@
 #include <signal.h>
 #include <string>
 #include <thread>
-#include <mutex>
-#include <condition_variable>
 #include <chrono>
 #if ENABLE_DATABASE_QUERY_DEBUG_LOG
 #define ENABLE_DATABASE_QUERY_DEBUG_LOG 0
@@ -79,14 +77,8 @@ bool parse_cli_options(int argc, char* argv[], CliOptions& options, std::string&
 
 // 全局服务器指针，用于信号处理
 std::unique_ptr<SmtpsServer> g_server = nullptr;
-volatile sig_atomic_t g_signal_flag = 0;
-std::mutex g_signal_mutex;
-std::condition_variable g_signal_cv;
-
-void signal_handler(int signal) {
-    g_signal_flag = (signal == SIGHUP) ? 2 : 1;
-    g_signal_cv.notify_one();
-}
+// sigwait 信号集——main 线程阻塞等信号，零竞态
+sigset_t g_sigset;
 
 int main(int argc, char* argv[]) {
     CliOptions options;
@@ -108,9 +100,12 @@ int main(int argc, char* argv[]) {
     }
 
     // 注册信号处理
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    signal(SIGHUP, signal_handler);
+    // 阻塞信号 → sigwait 接管
+    sigemptyset(&g_sigset);
+    sigaddset(&g_sigset, SIGINT);
+    sigaddset(&g_sigset, SIGTERM);
+    sigaddset(&g_sigset, SIGHUP);
+    pthread_sigmask(SIG_BLOCK, &g_sigset, nullptr);
 
     #ifdef GNU_LINUX
     std::cout << "Remember to execute 'sudo setcap 'cap_net_bind_service=+ep' " << argv[0] << "' to allow binding to privileged ports without running as root." << std::endl;
@@ -152,24 +147,20 @@ int main(int argc, char* argv[]) {
         LOG_SERVER_INFO("SMTPS Server is running");
         LOG_SERVER_INFO("Press Ctrl+C to stop");
 
-        // 主循环：等信号或服务器停止，condition_variable 替代忙等
-        while (g_server && !g_signal_flag) {
-            std::unique_lock<std::mutex> lk(g_signal_mutex);
-            g_signal_cv.wait_for(lk, std::chrono::seconds(1));
+        // 主循环：sigwait 阻塞等信号，零 CPU 开销
+        int sig = 0;
+        while (g_server) {
+            sigwait(&g_sigset, &sig);
+            if (sig == SIGHUP) {
+                LOG_SERVER_INFO("SIGHUP reload");
+                g_server->reload_config(g_server->m_configFilePath);
+                continue;
+            }
+            break;  // SIGINT / SIGTERM
         }
 
-        if (g_signal_flag == 2) {
-            LOG_SERVER_INFO("SIGHUP reload");
-            g_signal_flag = 0;
-            g_server->reload_config(g_server->m_configFilePath);
-        }
-
-        if (g_signal_flag == 1) {
-            LOG_SERVER_INFO("Shutting down...");
-            g_server->request_stop();  // 原子设状态 Pausing
-        }
-
-        LOG_SERVER_INFO("SMTPS Server stopped");
+        LOG_SERVER_INFO("Shutting down...");
+        g_server->request_stop();
 
         // request_stop + reset 触发 ServerBase 析构 → RAII 释放所有资源
         g_server.reset();

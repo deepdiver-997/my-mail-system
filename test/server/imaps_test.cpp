@@ -6,8 +6,6 @@
 #include <signal.h>
 #include <string>
 #include <thread>
-#include <mutex>
-#include <condition_variable>
 #include <chrono>
 #include <cstdlib>
 
@@ -79,14 +77,7 @@ bool parse_cli_options(int argc, char* argv[], CliOptions& options, std::string&
 
 // 全局服务器指针，用于信号处理
 std::unique_ptr<ImapsServer> g_server = nullptr;
-volatile sig_atomic_t g_signal_flag = 0;
-std::mutex g_signal_mutex;
-std::condition_variable g_signal_cv;
-
-void signal_handler(int signal) {
-    g_signal_flag = (signal == SIGHUP) ? 2 : 1;
-    g_signal_cv.notify_one();
-}
+sigset_t g_sigset;
 
 int main(int argc, char* argv[]) {
     CliOptions options;
@@ -108,9 +99,11 @@ int main(int argc, char* argv[]) {
     }
 
     // 注册信号处理
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    signal(SIGHUP, signal_handler);
+    sigemptyset(&g_sigset);
+    sigaddset(&g_sigset, SIGINT);
+    sigaddset(&g_sigset, SIGTERM);
+    sigaddset(&g_sigset, SIGHUP);
+    pthread_sigmask(SIG_BLOCK, &g_sigset, nullptr);
 
 #ifdef GNU_LINUX
     std::cout << "Remember to execute 'sudo setcap 'cap_net_bind_service=+ep' " << argv[0]
@@ -153,28 +146,20 @@ int main(int argc, char* argv[]) {
         LOG_SERVER_INFO("IMAPS Server running with {} listener(s)", config.mail_listeners.size());
         LOG_SERVER_INFO("Press Ctrl+C to stop, SIGHUP to reload config");
 
-        // 主循环：condition_variable 等信号，替代忙等
-        for (;;) {
-            {
-                std::unique_lock<std::mutex> lk(g_signal_mutex);
-                g_signal_cv.wait_for(lk, std::chrono::seconds(1), []{ return g_signal_flag != 0; });
-                if (!g_signal_flag) continue;
-            }
-
-            if (g_signal_flag == 2) {
-                // SIGHUP → reload config, keep running
+        // 主循环：sigwait 阻塞等信号，零 CPU
+        int sig = 0;
+        while (g_server) {
+            sigwait(&g_sigset, &sig);
+            if (sig == SIGHUP) {
                 LOG_SERVER_INFO("SIGHUP reload");
-                g_signal_flag = 0;
                 g_server->reload_config(g_server->m_configFilePath);
-                continue;  // 回到 polling 循环
+                continue;
             }
-
-            // SIGINT or SIGTERM → stop
-            LOG_SERVER_INFO("Shutting down...");
-            g_server->request_stop();  // 原子设状态 Pausing
             break;
         }
 
+        LOG_SERVER_INFO("Shutting down...");
+        g_server->request_stop();
         LOG_SERVER_INFO("IMAPS Server stopped");
 
         // request_stop + reset 触发 ServerBase 析构 → RAII 释放所有资源
