@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <nlohmann/json.hpp>
 
@@ -22,6 +23,10 @@ struct OutboundConfig {
     // === Delivery ===
     std::vector<uint16_t> ports = {25, 587, 465};
     size_t max_attempts = 8;
+
+    // === Static MX routes (跳过 DNS, domain → host:port) ===
+    struct StaticRoute { std::string host; uint16_t port = 25; };
+    std::unordered_map<std::string, StaticRoute> static_routes;
 
     // === Polling backoff ===
     int busy_sleep_ms     = 20;
@@ -65,6 +70,15 @@ struct OutboundConfig {
             for (auto& p : j["ports"])
                 if (p.is_number())
                     cfg.ports.push_back(static_cast<uint16_t>(p.get<uint32_t>()));
+        }
+
+        if (j.contains("static_routes") && j["static_routes"].is_object()) {
+            for (auto& [domain, route] : j["static_routes"].items()) {
+                cfg.static_routes[domain] = {
+                    route.value("host", "127.0.0.1"),
+                    static_cast<uint16_t>(route.value("port", 25))
+                };
+            }
         }
 
         return cfg;

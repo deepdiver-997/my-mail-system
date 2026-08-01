@@ -40,11 +40,22 @@ bool has_external_recipient(const mail& mail_data, const std::string& local_doma
 }
 
 std::vector<std::string> build_target_hosts(const OutboxRecord& record,
-                                            IDnsResolver* resolver) {
+                                            IDnsResolver* resolver,
+                                            const std::unordered_map<std::string, OutboundConfig::StaticRoute>* static_routes) {
     std::vector<std::string> hosts_v4;
     std::vector<std::string> hosts_v6;
     std::unordered_set<std::string> unique_hosts;
     const auto domain = extract_domain(record.recipient);
+
+    // 静态路由优先 (跳过 DNS)
+    if (static_routes && !domain.empty()) {
+        auto it = static_routes->find(domain);
+        if (it != static_routes->end()) {
+            LOG_OUTBOUND_INFO("Static route: {} → {}:{}", domain, it->second.host, it->second.port);
+            hosts_v4.push_back(it->second.host);
+            return hosts_v4;
+        }
+    }
 
     if (resolver && !domain.empty()) {
         SyncDnsWrapper sync(*resolver);
