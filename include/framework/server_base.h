@@ -10,6 +10,7 @@
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/db_service.h"
+#include "framework/net/dns_resolver.h"
 #include "mail_system/back/db/mysql_pool.h"
 #include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/entities/mail.h"
@@ -66,10 +67,12 @@ public:
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
+    std::shared_ptr<pr::IDnsResolver> m_dnsResolver;
 
     void set_mailbox_cache(std::shared_ptr<IMailboxCache> cache) { m_mailboxCache = cache; }
     std::shared_ptr<IMailboxCache> get_mailbox_cache() const { return m_mailboxCache; }
     std::shared_ptr<router::IShardRouter> get_shard_router() const { return m_shardRouter; }
+    std::shared_ptr<pr::IDnsResolver> get_dns_resolver() const { return m_dnsResolver; }
 
     std::shared_ptr<IMailboxCache> m_mailboxCache;
     std::string m_domain;

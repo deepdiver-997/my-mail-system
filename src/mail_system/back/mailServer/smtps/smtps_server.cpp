@@ -17,6 +17,9 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
         : TcpServerBase(config, ioThreadPool, wokerThreadPool, dbPool) {
     auto cfg = std::atomic_load(&m_config);
 
+    // DNS resolver (共享基础资源，入站验证+出站投递+DNSBL共用)
+    m_dnsResolver = std::make_shared<outbound::CaresDnsResolver>();
+
     // SMTP 专用：持久化队列和出站投递
     if (m_shardRouter && cfg->use_database) {
         if (!m_persistentQueue) {
