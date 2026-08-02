@@ -242,6 +242,35 @@ MockConnection 已被销毁。
 **原因**：IDLE 需要异步等待 `DONE` 事件。Mock 环境的所有 I/O 是同步的，
 无法正确模拟 IDLE 的 `async_read` → `DONE` 回调链。
 
+### 6. `smtps_fsm_test` 间歇性 SIGBUS/SIGSEGV —— 非法向下转型读越界（已修复）
+
+**现象**：Release 构建下 `smtps_fsm_test` 约 70% 崩溃（exit 138=SIGBUS / 139=SIGSEGV），
+崩溃不稳定。lldb 抓到崩溃点在 `SmtpsSession` 构造函数：
+`ldadd x9, x8, [x8]`（ARM64 原子自增），`x8` 是非 8 字节对齐的堆垃圾
+（曾解析出 ASCII 残留 `"set OLHM"`）。
+
+**根因（与已知问题 #1 无关）**：`TestServer` 直接继承 `ServerBase`，
+但 `SmtpsSession` 构造函数用 `static_cast<SmtpsServer*>(server)->m_persistentQueue`
+取持久化队列。`m_persistentQueue` 是 `SmtpsServer` 的成员（`smtps_server.h`），
+对非 `SmtpsServer` 的对象做该向下转型是未定义行为：编译器按 `SmtpsServer`
+的布局在 `TestServer+0x228` 处读 16 字节堆垃圾当作 `shared_ptr`，构造出野
+控制块指针，随后原子自增即崩溃（`ldadd` 要求 8 字节对齐）。
+
+**为何间歇**：`TestServer+0x228` 的垃圾值进程内固定、跨进程随堆布局变化——
+运气好读到可读且对齐的地址就静默损坏随机内存（不崩），多数读到非法地址就崩。
+
+**为何 imaps 稳定**：`ImapsSession` 构造函数没有 `persistent_queue_` 成员、
+没有该转型（`imaps_session.tpp`），与 enable_shared_from_this 类布局无关。
+
+**修复**：`TestServer` 改为派生自 `SmtpsServer`（转型合法），并在 fixture 绑定
+`server->m_persistentQueue = persist_q`。同源缺陷也存在于 `fsm_bench.cpp`
+的 `BenchServer`（派生自 `ServerBase` 且丢弃了传入的队列参数），一并修复。
+根因分析见 [session/smtps_session.tpp 的 TODO 注释](../../include/mail_system/back/mailServer/session/smtps_session.tpp#L22)。
+
+**遗留加固建议**（未改生产代码）：构造函数内的裸 `static_cast<SmtpsServer*>` 仍是
+潜在地雷，可改用 `dynamic_cast` + null 兜底、在 `ServerBase` 加虚访问器，或将队列
+作为显式构造参数传入（权衡见上述 TODO 注释）。
+
 ---
 
 ## FSM 状态覆盖矩阵
@@ -315,3 +344,8 @@ c++ -std=c++20 -O0 /tmp/test.cpp
 # Release: 正常
 c++ -std=c++20 -O3 /tmp/test.cpp
 ```
+
+> ⚠️ 注意区分：**本节的 Debug 编译失败**与 **`smtps_fsm_test` 的 Release 运行时崩溃
+> （已知问题 #6）不是同一回事**。运行时崩溃的根因是 `SmtpsSession` 构造函数里
+> `static_cast<SmtpsServer*>(server)` 对非 `SmtpsServer` 对象做非法向下转型，
+> 与 libc++ 的 `make_shared` 实现无关，已在 #6 中修复。

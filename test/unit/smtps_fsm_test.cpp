@@ -24,16 +24,19 @@ namespace pq = persist_storage;
 
 // ========== 测试夹具 ==========
 
-struct TestServer : ServerBase {
+// 注意：必须派生自 SmtpsServer 而非 ServerBase。
+// SmtpsSession 构造函数通过 `static_cast<SmtpsServer*>(server)->m_persistentQueue`
+// 读取持久化队列；若 server 不是真正的 SmtpsServer，该向下转型是未定义行为，
+// 会在构造时读越界垃圾指针（曾导致间歇性 SIGBUS/SIGSEGV）。
+struct TestServer : SmtpsServer {
     TestServer(const ServerConfig& c,
                std::shared_ptr<ThreadPoolBase> io,
                std::shared_ptr<ThreadPoolBase> w,
                std::shared_ptr<router::IShardRouter> r)
-        : ServerBase(c, io, w, nullptr) {
+        : SmtpsServer(c, io, w, nullptr) {
         m_shardRouter = std::move(r);
     }
     void start() override {}
-    bool should_reject_connection(std::string&, const std::string&) const override { return false; }
 };
 
 struct FsmTestFixture {
@@ -79,6 +82,8 @@ struct FsmTestFixture {
         system("mkdir -p /tmp/smtps_fsm_test_mail /tmp/smtps_fsm_test_att");
 
         server = std::shared_ptr<TestServer>(new TestServer(cfg, io_pool, worker_pool, router));
+        // SmtpsSession 构造函数从 server 读取持久化队列，务必绑定到测试自身的队列
+        server->m_persistentQueue = persist_q;
 
         fsm = std::make_shared<TraditionalSmtpsFsm<MockConnection>>(
             io_pool, worker_pool, persist_q, router);

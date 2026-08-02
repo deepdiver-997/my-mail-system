@@ -38,18 +38,20 @@ static std::string build_pipeline_msg(int idx) {
         + "QUIT\r\n";
 }
 
-// 最小 ServerBase — 仅提供 config + persistent_queue，不启动监听
-struct BenchServer : ServerBase {
+// 最小 SmtpsServer — 仅提供 config + persistent_queue，不启动监听。
+// 必须派生自 SmtpsServer（而非 ServerBase）：SmtpsSession 构造函数会
+// `static_cast<SmtpsServer*>(server)->m_persistentQueue`，否则向下转型为 UB。
+struct BenchServer : SmtpsServer {
     BenchServer(const ServerConfig& c,
                 std::shared_ptr<ThreadPoolBase> io,
                 std::shared_ptr<ThreadPoolBase> w,
                 std::shared_ptr<router::IShardRouter> r,
                 std::shared_ptr<pq::PersistentQueue> q)
-        : ServerBase(c, io, w, nullptr) {
+        : SmtpsServer(c, io, w, nullptr) {
         m_shardRouter = std::move(r);
+        m_persistentQueue = std::move(q);
     }
     void start() override {}
-    bool should_reject_connection(std::string&, const std::string&) const override { return false; }
 };
 
 // 单封投递: 创建 mock session → 喂命令 → FSM 处理 → QUIT 关闭

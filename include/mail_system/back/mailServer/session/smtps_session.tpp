@@ -19,6 +19,14 @@ SmtpsSession<ConnectionType>::SmtpsSession(
     , buffer_(new char[INITIAL_BUFFER_SIZE])
     , buffer_used_(0)
     , buffer_expand_count_(0)
+    // TODO: `static_cast<SmtpsServer*>(server)` 假定 server 一定是 SmtpsServer。
+    // 传非 SmtpsServer（如测试里的 ServerBase 派生类）会在 server+0x228 处越界读堆垃圾，
+    // 构造野 shared_ptr 导致间歇性 SIGBUS/SIGSEGV（smtps_fsm_test 曾 ~70% 崩溃）。
+    // 加固选项（任选，勿再裸转型）：
+    //   1) dynamic_cast<SmtpsServer*>(server) + null 兜底（需 RTTI，本项目已启用）
+    //   2) ServerBase 加虚访问器 get_persistent_queue()，SmtpsServer 覆写返回 m_persistentQueue
+    //      （会向传输无关基类引入 SMTP 专属语义，抽象污染）
+    //   3) 构造函数显式接收 shared_ptr<PersistentQueue> 参数（最纯，但需改 make_tcp_session 调用点）
     , persistent_queue_(static_cast<SmtpsServer*>(server)->m_persistentQueue) {}
 
 template <typename ConnectionType>
