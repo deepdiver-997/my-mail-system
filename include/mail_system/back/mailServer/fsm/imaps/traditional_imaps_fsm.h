@@ -243,10 +243,12 @@ private:
     static std::string build_fetch_body_response(
         const std::string& body_content,
         size_t octets);
+public:
+    // 以下纯静态工具方法对外暴露以便单元测试（不依赖实例状态）
     static std::string build_bodystructure(const std::string& raw);
     static std::string build_bodystructure_tree(const MimePart& mp);
     static std::string extract_part_content(const std::string& raw, const MimePart& part);
-
+private:
     // ========== 状态处理器 ==========
     void handle_init_connect(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_capability(std::shared_ptr<SessionBase<ConnectionType>> session);

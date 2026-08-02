@@ -95,8 +95,11 @@ inline void parse_mime_tree(const std::string& raw, MimePart& root, size_t pos =
                         if (os != std::string::npos) {
                             os++;
                             size_t oe = orig_hdrs.find('"', os);
-                            if (oe == std::string::npos)
+                            if (oe == std::string::npos) {
                                 oe = orig_hdrs.find_first_of(" \t\r\n", os);
+                                // 不带引号且 boundary 在 header 末尾时，用 header 末尾
+                                if (oe == std::string::npos) oe = orig_hdrs.size();
+                            }
                             if (oe != std::string::npos)
                                 root.boundary = orig_hdrs.substr(os, oe - os);
                         }

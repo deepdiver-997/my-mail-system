@@ -946,7 +946,6 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
             if (!this->m_statsRefreshInFlight.insert(key).second) return; // 已在途
         }
         pool->post([key, cache, pool, this]() {
-            bool ok = false;
             if (cache) {
                 MailboxCacheEntry fresh;
                 // 从 key 反解 user_id / mailbox_id
@@ -959,7 +958,6 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
                     fresh.uidnext = this->get_mailbox_uidnext(mid, uid);
                     fresh.uidvalidity = mid;
                     cache->put(key, fresh);
-                    ok = true;
                 }
             }
             std::lock_guard<std::mutex> lk(this->m_statsRefreshMutex);
