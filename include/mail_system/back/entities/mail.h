@@ -5,7 +5,9 @@
 #include<vector>
 #include<ctime>
 #include <atomic>
+#include <cstdint>
 #include <fstream>
+#include <sstream>
 #include <unordered_map>
 #include <future>
 
@@ -60,6 +62,23 @@ private:
 }
 }
 
+// MIME part 预解析结构 — SMTP 收信时解析一次，IMAP 直接遍历
+struct MimePart {
+    std::string type;          // "text", "multipart", "image", etc.
+    std::string subtype;       // "plain", "html", "alternative", "mixed", etc.
+    std::string charset;       // charset 参数值
+    std::string encoding;      // "7bit", "8bit", "base64", "quoted-printable"
+    std::string boundary;      // multipart boundary（仅 multipart/* 有效）
+    std::string name;          // Content-Disposition filename（附件名）
+    uint64_t offset = 0;       // 在 body 文件中的起始偏移（含该 part 的 header）
+    uint32_t length = 0;       // 在 body 文件中的字节长度
+    uint32_t body_size = 0;    // 解码后 body 大小（RFC822.SIZE）
+    uint32_t lines = 0;        // body 行数
+    std::vector<MimePart> subs; // 子 part（仅 multipart/* 有效）
+
+    bool is_multipart() const { return type == "multipart"; }
+};
+
 struct mailbox
 {
     size_t id;                 // 主键
@@ -102,6 +121,7 @@ struct mail
     bool mail_over{false};    // 邮件内容是否完整（用于流式处理）
     bool deduplicated_inbound{false}; // 是否被入站去重命中
     std::shared_future<bool> meta_future; // 附件元数据持久化返回的 future，可拷贝
+    MimePart mime_root;        // 预解析 MIME 树（SMTP 收信时填充）
     mail() = default;
     mail(const mail& other) {
         id = other.id;
@@ -120,6 +140,7 @@ struct mail
         body_path = other.body_path;
         mail_over = other.mail_over;
         deduplicated_inbound = other.deduplicated_inbound;
+        mime_root = other.mime_root;
     }
     mail(mail&& other) noexcept {
         id = other.id;
@@ -138,5 +159,6 @@ struct mail
         body_path = std::move(other.body_path);
         mail_over = other.mail_over;
         deduplicated_inbound = other.deduplicated_inbound;
+        mime_root = std::move(other.mime_root);
     }
 };

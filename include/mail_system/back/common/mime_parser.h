@@ -1,0 +1,288 @@
+#pragma once
+#include "mail_system/back/entities/mail.h"
+#include <algorithm>
+#include <cctype>
+#include <cstring>
+#include <string>
+#include <vector>
+
+namespace mail_system {
+
+// 解析邮件 body 文件的 MIME 结构，填充 mime_root 树
+// body 内容形如 "Header: value\r\n\r\nbody..."
+inline void parse_mime_tree(const std::string& raw, MimePart& root, size_t pos = 0) {
+    // 找 header/body 分隔
+    size_t sep = raw.find("\r\n\r\n", pos);
+    std::string hdrs = (sep != std::string::npos) ? raw.substr(pos, sep - pos) : raw.substr(pos);
+    size_t body_start = (sep != std::string::npos) ? sep + 4 : raw.size();
+
+    // 解析 Content-Type
+    {
+        auto hdr_lower = hdrs;
+        std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
+        size_t ct_pos = std::string::npos;
+        // 找行首的 content-type（避免 DKIM h= 标签干扰）
+        for (size_t p = 0; p < hdr_lower.size(); ) {
+            size_t f = hdr_lower.find("\ncontent-type:", p);
+            if (f == std::string::npos) {
+                // 检查第一行
+                if (p == 0 && hdr_lower.compare(0, 13, "content-type:") == 0) { ct_pos = 0; }
+                break;
+            }
+            ct_pos = f + 1; // 跳过 \n
+            break;
+        }
+        if (ct_pos == std::string::npos && hdr_lower.compare(0, 13, "content-type:") == 0)
+            ct_pos = 0;
+
+        if (ct_pos != std::string::npos) {
+            size_t ct_end = hdr_lower.find("\r\n", ct_pos);
+            // 展开 folded headers
+            while (ct_end != std::string::npos && ct_end + 2 < hdr_lower.size() &&
+                   (hdr_lower[ct_end + 2] == ' ' || hdr_lower[ct_end + 2] == '\t'))
+                ct_end = hdr_lower.find("\r\n", ct_end + 2);
+
+            std::string ct_line = (ct_end != std::string::npos)
+                ? hdr_lower.substr(ct_pos + 13, ct_end - ct_pos - 13)
+                : hdr_lower.substr(ct_pos + 13);
+
+            // unfold
+            std::string unfolded;
+            for (size_t i = 0; i < ct_line.size(); ++i) {
+                if (ct_line[i] == '\r' && i + 2 < ct_line.size() &&
+                    ct_line[i+1] == '\n' && ct_line[i+2] == '\t') { unfolded += ' '; i += 2; continue; }
+                if (ct_line[i] == '\r' && i + 1 < ct_line.size() &&
+                    ct_line[i+1] == '\n') { unfolded += ' '; i += 1; continue; }
+                unfolded += ct_line[i];
+            }
+            ct_line = unfolded;
+            ct_line.erase(0, ct_line.find_first_not_of(" \t"));
+            ct_line.erase(ct_line.find_last_not_of(" \t") + 1);
+
+            auto semi = ct_line.find(';');
+            if (semi != std::string::npos) {
+                std::string full_type = ct_line.substr(0, semi);
+                full_type.erase(full_type.find_last_not_of(" \t") + 1);
+                auto slash = full_type.find('/');
+                if (slash != std::string::npos) {
+                    root.type = full_type.substr(0, slash);
+                    root.subtype = full_type.substr(slash + 1);
+                }
+                std::string params = ct_line.substr(semi + 1);
+                // charset（支持带引号和不带引号，如 charset="utf-8" 或 charset=us-ascii）
+                auto cp = params.find("charset=");
+                if (cp != std::string::npos) {
+                    cp += 8;
+                    while (cp < params.size() && (params[cp] == ' ' || params[cp] == '\t')) cp++;
+                    if (cp < params.size() && params[cp] == '"') {
+                        cp++;
+                        auto ce = params.find('"', cp);
+                        if (ce != std::string::npos) root.charset = params.substr(cp, ce - cp);
+                    } else {
+                        auto ce = params.find_first_of(" \t;", cp);
+                        if (ce == std::string::npos) ce = params.size();
+                        root.charset = params.substr(cp, ce - cp);
+                    }
+                }
+                // boundary — 从原始 hdrs 提取（保留大小写）
+                {
+                    auto orig_hdrs = raw.substr(pos, sep - pos);
+                    auto obp = orig_hdrs.find("boundary=\"");
+                    if (obp == std::string::npos) obp = orig_hdrs.find("boundary=");
+                    if (obp != std::string::npos) {
+                        size_t os = orig_hdrs.find('"', obp);
+                        if (os == std::string::npos) os = orig_hdrs.find('=', obp);
+                        if (os != std::string::npos) {
+                            os++;
+                            size_t oe = orig_hdrs.find('"', os);
+                            if (oe == std::string::npos)
+                                oe = orig_hdrs.find_first_of(" \t\r\n", os);
+                            if (oe != std::string::npos)
+                                root.boundary = orig_hdrs.substr(os, oe - os);
+                        }
+                    }
+                }
+                // name (Content-Type name 或 Content-Disposition filename)
+                auto np = params.find("name=\"");
+                if (np != std::string::npos) {
+                    np += 6;
+                    auto ne = params.find('"', np);
+                    if (ne != std::string::npos) root.name = params.substr(np, ne - np);
+                }
+            } else {
+                auto slash = ct_line.find('/');
+                if (slash != std::string::npos) {
+                    root.type = ct_line.substr(0, slash);
+                    root.subtype = ct_line.substr(slash + 1);
+                }
+            }
+        } else {
+            // 默认 text/plain
+            root.type = "text";
+            root.subtype = "plain";
+        }
+    }
+
+    // Content-Disposition filename
+    if (root.name.empty()) {
+        auto hdr_lower = hdrs;
+        std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
+        size_t cd = hdr_lower.find("\ncontent-disposition:");
+        if (cd == std::string::npos && hdr_lower.compare(0, 20, "content-disposition:") == 0) cd = 0;
+        else if (cd != std::string::npos) cd++;
+        if (cd != std::string::npos) {
+            auto np = hdr_lower.find("filename=\"", cd);
+            if (np == std::string::npos) np = hdr_lower.find("filename=", cd);
+            if (np != std::string::npos) {
+                np = hdr_lower.find('"', np);
+                if (np == std::string::npos) np = hdr_lower.find('=', np);
+                if (np != std::string::npos) {
+                    np++;
+                    auto ne = hdr_lower.find('"', np);
+                    if (ne == std::string::npos)
+                        ne = hdr_lower.find_first_of(" \t\r\n", np);
+                    if (ne != std::string::npos)
+                        root.name = hdrs.substr(np, ne - np);
+                }
+            }
+        }
+    }
+
+    // Content-Transfer-Encoding
+    {
+        auto hdr_lower = hdrs;
+        std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
+        size_t cte = hdr_lower.find("\ncontent-transfer-encoding:");
+        if (cte == std::string::npos && hdr_lower.compare(0, 26, "content-transfer-encoding:") == 0) cte = 0;
+        else if (cte != std::string::npos) cte++;
+        if (cte != std::string::npos) {
+            size_t cte_end = hdr_lower.find("\r\n", cte);
+            root.encoding = (cte_end != std::string::npos)
+                ? hdr_lower.substr(cte + 27, cte_end - cte - 27)
+                : hdr_lower.substr(cte + 27);
+            root.encoding.erase(0, root.encoding.find_first_not_of(" \t"));
+            root.encoding.erase(root.encoding.find_last_not_of(" \t") + 1);
+        }
+    }
+    if (root.encoding.empty()) root.encoding = "7bit";
+
+    // 记录 offset 和 length（length 覆盖整个 part：header + body）
+    // 注意：非 multipart 的根 part 也必须用整封邮件长度，否则 IMAP BODY[1] 只能取到 header
+    root.offset = pos;
+    root.length = raw.size() - pos;
+    // body 部分大小（content after \r\n\r\n）
+    if (sep != std::string::npos) {
+        root.body_size = raw.size() - body_start;
+        root.lines = 0;
+        for (size_t i = body_start; i < raw.size(); ++i)
+            if (raw[i] == '\n') root.lines++;
+    }
+
+    // multipart: 递归解析子 part
+    if (root.is_multipart() && !root.boundary.empty()) {
+        std::string bdr = "--" + root.boundary;
+        size_t search_from = body_start;
+
+        // 跳到第一个 boundary 后的内容
+        size_t first = raw.find(bdr + "\r\n", search_from);
+        if (first == std::string::npos) first = raw.find(bdr + "\n", search_from);
+        if (first != std::string::npos) {
+            size_t nl = raw.find("\r\n", first);
+            if (nl == std::string::npos) nl = raw.find('\n', first);
+            if (nl != std::string::npos)
+                search_from = nl + (raw[nl] == '\r' ? 2 : 1);
+        }
+
+        while (search_from < raw.size()) {
+            size_t next = raw.find(bdr, search_from);
+            if (next == std::string::npos) break;
+            if (next > 0 && raw[next-1] != '\n') { search_from = next + bdr.size(); continue; }
+
+            bool is_close = (next + bdr.size() + 2 <= raw.size() &&
+                             raw.substr(next + bdr.size(), 2) == "--");
+
+            MimePart sub;
+            parse_mime_tree(raw, sub, search_from);
+            // 修正 sub 的 length 到 bdr 边界
+            sub.length = next - search_from;
+            while (sub.length > 0 && (raw[search_from + sub.length - 1] == '\r' ||
+                                       raw[search_from + sub.length - 1] == '\n'))
+                sub.length--;
+            // 写回真实 body_size
+            size_t sub_sep = raw.find("\r\n\r\n", search_from);
+            if (sub_sep != std::string::npos) {
+                sub.body_size = next - (sub_sep + 4);
+                while (sub.body_size > 0 && (raw[sub_sep + 4 + sub.body_size - 1] == '\r' ||
+                                              raw[sub_sep + 4 + sub.body_size - 1] == '\n'))
+                    sub.body_size--;
+            }
+            root.subs.push_back(std::move(sub));
+
+            if (is_close) break;
+            size_t nxt_nl = raw.find("\r\n", next);
+            if (nxt_nl == std::string::npos) nxt_nl = raw.find('\n', next);
+            if (nxt_nl == std::string::npos) break;
+            search_from = nxt_nl + (raw[nxt_nl] == '\r' ? 2 : 1);
+        }
+    }
+}
+
+// 从 sidecar JSON 加载预解析的 MIME 树
+inline bool load_mime_tree(const std::string& body_path, MimePart& root) {
+    std::string path = body_path + ".mime";
+    std::ifstream f(path);
+    if (!f.is_open()) return false;
+    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (json.empty() || json[0] != '{') return false;
+
+    std::function<void(const std::string&, size_t&, MimePart&)> parse;
+    parse = [&](const std::string& s, size_t& pos, MimePart& p) {
+        auto read_str = [&]() -> std::string {
+            size_t start = s.find('"', pos); if (start == std::string::npos) return "";
+            size_t end = s.find('"', start + 1); if (end == std::string::npos) return "";
+            pos = end + 1;
+            return s.substr(start + 1, end - start - 1);
+        };
+        auto read_uint = [&]() -> uint64_t {
+            while (pos < s.size() && !std::isdigit(s[pos])) pos++;
+            uint64_t v = 0;
+            while (pos < s.size() && std::isdigit(s[pos])) { v = v * 10 + (s[pos] - '0'); pos++; }
+            return v;
+        };
+        pos = s.find('{', pos); if (pos == std::string::npos) return;
+        pos++; // skip {
+        while (pos < s.size() && s[pos] != '}') {
+            std::string key = read_str(); pos++; // skip :
+            if (key == "t") p.type = read_str();
+            else if (key == "s") p.subtype = read_str();
+            else if (key == "c") p.charset = read_str();
+            else if (key == "e") p.encoding = read_str();
+            else if (key == "b") p.boundary = read_str();
+            else if (key == "n") p.name = read_str();
+            else if (key == "o") p.offset = read_uint();
+            else if (key == "l") p.length = read_uint();
+            else if (key == "z") p.body_size = read_uint();
+            else if (key == "ln") p.lines = read_uint();
+            else if (key == "p") {
+                pos = s.find('[', pos); if (pos == std::string::npos) return;
+                pos++; // skip [
+                while (pos < s.size() && s[pos] != ']') {
+                    MimePart sub;
+                    parse(s, pos, sub);
+                    if (!sub.type.empty()) p.subs.push_back(std::move(sub));
+                    if (pos < s.size() && s[pos] == ',') pos++;
+                }
+                if (pos < s.size()) pos++; // skip ]
+            }
+            if (pos < s.size() && s[pos] == ',') pos++;
+        }
+        if (pos < s.size()) pos++; // skip }
+    };
+    try {
+        size_t pos = 0;
+        parse(json, pos, root);
+        return !root.type.empty();
+    } catch (...) { return false; }
+}
+
+} // namespace mail_system

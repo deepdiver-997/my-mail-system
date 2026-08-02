@@ -2,6 +2,7 @@
 #define TRADITIONAL_IMAPS_FSM_TPP
 
 #include "mail_system/back/mailServer/imaps_server.h"
+#include "mail_system/back/common/mime_parser.h"
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -32,6 +33,33 @@ inline bool se(class IDBConnection* c, const std::string& sql) {
     bool ok = false;
     c->async_execute(sql, [&ok](bool r) { ok = r; });
     return ok;
+}
+// 展开逗号分隔的序列号集（支持 "1" / "1:*" / "1,3,5" / "1:3,5" / "*"）
+// 输出到 ranges（(start,end) 闭区间列表，已 clamp 到 [1,total]）
+inline void expand_seq_set(const std::string& seq_set, size_t total,
+                           std::vector<std::pair<uint64_t, uint64_t>>& ranges) {
+    ranges.clear();
+    std::istringstream ss(seq_set);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        if (token.empty()) continue;
+        uint64_t s, e;
+        if (token.find(':') != std::string::npos) {
+            size_t c = token.find(':');
+            std::string a = token.substr(0, c), b = token.substr(c + 1);
+            s = (a == "*") ? 1 : safe_stoull(a);
+            e = (b == "*") ? total : std::min((uint64_t)safe_stoull(b), (uint64_t)total);
+        } else if (token == "*") {
+            s = 1;
+            e = total;
+        } else {
+            s = safe_stoull(token);
+            e = s;
+        }
+        if (s < 1) s = 1;
+        if (e > total) e = total;
+        if (s <= e) ranges.emplace_back(s, e);
+    }
 }
 } // namespace
 
@@ -374,140 +402,72 @@ std::string TraditionalImapsFsm<ConnectionType>::build_fetch_body_response(
 // ====================================================================
 template <typename ConnectionType>
 std::string TraditionalImapsFsm<ConnectionType>::build_bodystructure(const std::string& raw) {
-    // 分隔 headers / body
-    size_t sep = raw.find("\r\n\r\n");
-    std::string body_part = (sep != std::string::npos) ? raw.substr(sep + 4) : raw;
-    std::string headers = (sep != std::string::npos) ? raw.substr(0, sep) : "";
+    // 旧邮件回退路径（无预解析 MIME 树时使用）
+    size_t body_size = raw.size();
+    size_t lines = 1 + std::count(raw.begin(), raw.end(), '\n');
+    return "(\"text\" \"plain\" NIL NIL NIL \"7bit\" " +
+           std::to_string(body_size) + " " + std::to_string(lines) +
+           " NIL NIL NIL NIL)";
+}
 
-    // 解析 Content-Type
-    std::string ct = "text/plain", charset, boundary;
-    {
-        auto hdr_lower = headers;
-        std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
-        size_t ct_pos = hdr_lower.find("content-type:");
-        if (ct_pos != std::string::npos) {
-            size_t ct_end = hdr_lower.find("\r\n", ct_pos);
-            std::string ct_line = (ct_end != std::string::npos)
-                ? hdr_lower.substr(ct_pos + 13, ct_end - ct_pos - 13)
-                : hdr_lower.substr(ct_pos + 13);
-            // 去掉前后空白
-            ct_line.erase(0, ct_line.find_first_not_of(" \t"));
-            ct_line.erase(ct_line.find_last_not_of(" \t") + 1);
-
-            // 解析 type/subtype
-            auto semi = ct_line.find(';');
-            if (semi != std::string::npos) {
-                ct = ct_line.substr(0, semi);
-                // 去掉 type/subtype 尾空白
-                ct.erase(ct.find_last_not_of(" \t") + 1);
-                // 解析参数
-                std::string params = ct_line.substr(semi + 1);
-                auto bp = params.find("boundary=\"");
-                if (bp != std::string::npos) {
-                    bp += 10;
-                    auto be = params.find('"', bp);
-                    if (be != std::string::npos) boundary = params.substr(bp, be - bp);
-                }
-                auto cp = params.find("charset=\"");
-                if (cp != std::string::npos) {
-                    cp += 9;
-                    auto ce = params.find('"', cp);
-                    if (ce != std::string::npos) charset = params.substr(cp, ce - cp);
-                }
-            } else {
-                ct = ct_line;
-            }
-        }
-    }
-
-    // 解析 Content-Transfer-Encoding
-    std::string encoding = "7bit";
-    {
-        auto hdr_lower = headers;
-        std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
-        size_t cte = hdr_lower.find("content-transfer-encoding:");
-        if (cte != std::string::npos) {
-            size_t cte_end = hdr_lower.find("\r\n", cte);
-            encoding = (cte_end != std::string::npos)
-                ? hdr_lower.substr(cte + 27, cte_end - cte - 27)
-                : hdr_lower.substr(cte + 27);
-            encoding.erase(0, encoding.find_first_not_of(" \t"));
-            encoding.erase(encoding.find_last_not_of(" \t") + 1);
-            std::transform(encoding.begin(), encoding.end(), encoding.begin(), ::tolower);
-        }
-    }
-
-    size_t body_size = body_part.size();
-
-    // 处理 multipart（简单版：递归解析 boundary 分隔的子 part）
-    if (ct.find("multipart/") == 0 && !boundary.empty()) {
-        std::string bdr = "--" + boundary;
-        std::string result = "(\"" + ct.substr(0, ct.find('/')) + "\" \""
-                           + ct.substr(ct.find('/') + 1) + "\"";
-        // boundary 参数
-        result += " (\"BOUNDARY\" \"" + boundary + "\")";
-        result += " NIL NIL NIL";
-
-        // 找子 part
-        size_t pos = body_part.find(bdr + "\r\n");
-        if (pos == std::string::npos) pos = body_part.find(bdr + "\n");
-        if (pos != std::string::npos) {
-            pos = body_part.find("\r\n", pos + bdr.size());
-            if (pos == std::string::npos) pos = body_part.find('\n', pos);
-            if (pos != std::string::npos) {
-                pos += (body_part[pos] == '\r') ? 2 : 1;
-                std::string subparts;
-                while (pos < body_part.size()) {
-                    size_t next = body_part.find(bdr, pos);
-                    if (next == std::string::npos) break;
-                    // 确保是边界行（前面有 \r\n 或 \n）
-                    bool proper_bnd = (next == 0 || body_part[next-1] == '\n');
-                    if (proper_bnd) {
-                        // 提取子 part 的原始内容（含子 headers + body）
-                        std::string sub_raw = body_part.substr(pos, next - pos);
-                        // 去掉尾部 \r\n
-                        while (!sub_raw.empty() && (sub_raw.back() == '\r' || sub_raw.back() == '\n'))
-                            sub_raw.pop_back();
-                        subparts += build_bodystructure(sub_raw);
-                        pos = next + bdr.size();
-                        if (pos < body_part.size() && body_part[pos] == '\r') pos++;
-                        if (pos < body_part.size() && body_part[pos] == '\n') pos++;
-                        if (pos < body_part.size() && body_part[pos] == '-') break;
-                        continue;
-                    }
-                    pos++;
-                }
-                result += " " + subparts;
-            }
-        }
-        result += ")";
+template <typename ConnectionType>
+std::string TraditionalImapsFsm<ConnectionType>::build_bodystructure_tree(const MimePart& mp) {
+    if (mp.is_multipart()) {
+        // RFC 3501 §7.4.2: multipart 子 part 在最前，subtype 在最后
+        //   ((sub1)(sub2) "alternative" ("BOUNDARY" "...") NIL NIL NIL)
+        std::string result = "(";
+        for (const auto& sub : mp.subs)
+            result += build_bodystructure_tree(sub);
+        result += " \"" + mp.subtype + "\"";
+        if (!mp.boundary.empty())
+            result += " (\"BOUNDARY\" \"" + mp.boundary + "\")";
+        else
+            result += " NIL";
+        result += " NIL NIL NIL)";
         return result;
     }
-
-    // 单 part：("type" "subtype" NIL NIL NIL "encoding" size NIL NIL NIL NIL)
-    std::string type, subtype;
-    auto slash = ct.find('/');
-    if (slash != std::string::npos) {
-        type = ct.substr(0, slash);
-        subtype = ct.substr(slash + 1);
-    } else {
-        type = ct;
-        subtype = "";
-    }
-
-    std::string result = "(\"" + type + "\" \"" + subtype + "\"";
-    // 参数 (charset)
-    if (!charset.empty())
-        result += " (\"CHARSET\" \"" + charset + "\")";
-    else
-        result += " NIL";
-    result += " NIL NIL \"" + encoding + "\" " + std::to_string(body_size);
-    // lines count (approximate)
-    size_t lines = 1;
-    for (char c : body_part) if (c == '\n') lines++;
-    result += " " + std::to_string(lines);
-    result += " NIL NIL NIL NIL)";
+    std::string result = "(\"" + mp.type + "\" \"" + mp.subtype + "\"";
+    if (!mp.charset.empty()) result += " (\"CHARSET\" \"" + mp.charset + "\")";
+    else result += " NIL";
+    if (!mp.name.empty()) result += " (\"" + mp.name + "\")";
+    else result += " NIL";
+    result += " NIL \"" + mp.encoding + "\" " + std::to_string(mp.body_size);
+    result += " " + std::to_string(mp.lines) + " NIL NIL NIL NIL)";
     return result;
+}
+
+// 提取 MIME part 的正文：跳过该 part 自己的 MIME header，返回原始内容。
+// 注意：BODY[<section>] 按 RFC 3501 返回的是原始编码内容（base64/quoted-printable 保持原样），
+// 由客户端根据 BODYSTRUCTURE 的 body-fld-enc 自行解码。因此这里不做 transfer-encoding 解码。
+// raw 是完整 body 文件内容（含顶层 header + multipart），part 来自预解析 MimePart 树
+// （offset/length 为该 part 在 raw 中的字节区间，含其自己的 MIME header）。
+template <typename ConnectionType>
+std::string TraditionalImapsFsm<ConnectionType>::extract_part_content(
+    const std::string& raw, const MimePart& part)
+{
+    size_t start = part.offset;
+    size_t end = part.offset + part.length;
+    if (start >= raw.size()) return {};
+    if (end > raw.size()) end = raw.size();
+    if (end <= start) return {};
+
+    // 在 part 范围内定位 header/body 分隔
+    size_t sep = raw.find("\r\n\r\n", start);
+    if (sep == std::string::npos || sep >= end) {
+        sep = raw.find("\n\n", start);
+        if (sep == std::string::npos || sep >= end) return {};
+    }
+    size_t body_start = sep + (raw[sep] == '\r' ? 4 : 2);
+    // 兼容旧 sidecar：非 multipart 根 part 的 length 可能只覆盖 header
+    // （parse_mime_tree 的旧 bug）。此时 body 应从 header 之后延伸到消息末尾。
+    if (body_start >= end && start == 0) end = raw.size();
+    if (body_start >= end) return {};
+
+    std::string body = raw.substr(body_start, end - body_start);
+    // 去掉尾部空白行
+    while (!body.empty() && (body.back() == '\r' || body.back() == '\n'))
+        body.pop_back();
+    return body;
 }
 
 // ====================================================================
@@ -975,24 +935,35 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
     size_t unseen = stats.unseen;
     uint64_t uidnext = stats.uidnext;
 
-    // stale-while-revalidate: 先用缓存返回，后台异步回源刷新
+    // stale-while-revalidate: 先用缓存返回，后台异步回源刷新。
+    // 同一 key 只允许一个刷新任务在途，防止客户端频繁 SELECT 时雪崩式重复查库。
     if (stale && from_cache && this->m_mailboxStatsCache && this->m_workerThreadPool) {
         auto key = mbox_cache_key(ctx->user_id, mailbox_id);
         auto cache = this->m_mailboxStatsCache;
         auto pool = this->m_workerThreadPool;
-        pool->post([key, cache, this]() {
-            if (!cache) return;
-            MailboxCacheEntry fresh;
-            // 从 key 反解 user_id / mailbox_id
-            size_t colon = key.find(':');
-            if (colon == std::string::npos) return;
-            uint64_t uid = safe_stoull(key.substr(0, colon));
-            uint64_t mid = safe_stoull(key.substr(colon + 1));
-            fresh.exists = this->get_mailbox_count(mid, uid);
-            fresh.unseen = this->get_mailbox_unseen_count(mid, uid);
-            fresh.uidnext = this->get_mailbox_uidnext(mid, uid);
-            fresh.uidvalidity = mid;
-            cache->put(key, fresh);
+        {
+            std::lock_guard<std::mutex> lk(this->m_statsRefreshMutex);
+            if (!this->m_statsRefreshInFlight.insert(key).second) return; // 已在途
+        }
+        pool->post([key, cache, pool, this]() {
+            bool ok = false;
+            if (cache) {
+                MailboxCacheEntry fresh;
+                // 从 key 反解 user_id / mailbox_id
+                size_t colon = key.find(':');
+                if (colon != std::string::npos) {
+                    uint64_t uid = safe_stoull(key.substr(0, colon));
+                    uint64_t mid = safe_stoull(key.substr(colon + 1));
+                    fresh.exists = this->get_mailbox_count(mid, uid);
+                    fresh.unseen = this->get_mailbox_unseen_count(mid, uid);
+                    fresh.uidnext = this->get_mailbox_uidnext(mid, uid);
+                    fresh.uidvalidity = mid;
+                    cache->put(key, fresh);
+                    ok = true;
+                }
+            }
+            std::lock_guard<std::mutex> lk(this->m_statsRefreshMutex);
+            this->m_statsRefreshInFlight.erase(key);
         });
     }
 
@@ -1001,7 +972,10 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
     // Build SELECT response (RFC 3501: [READ-WRITE]/[READ-ONLY] on tagged OK)
     std::string response;
     response += "* " + std::to_string(count) + " EXISTS\r\n";
-    response += "* " + std::to_string(count - unseen) + " RECENT\r\n";
+    // 我们没有跟踪 \Recent 标志（自上次访问后到达的邮件），报告 0。
+    // 之前用 count - unseen（已读数量）是错的：只要有已读邮件就恒 > 0，
+    // 导致客户端一直认为有新邮件而反复重同步。
+    response += "* 0 RECENT\r\n";
     if (unseen > 0) {
         response += "* OK [UNSEEN " + std::to_string(count - unseen + 1) + "]\r\n";
     }
@@ -1058,7 +1032,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_examine(
 
     std::string response;
     response += "* " + std::to_string(count) + " EXISTS\r\n";
-    response += "* " + std::to_string(count - unseen) + " RECENT\r\n";
+    response += "* 0 RECENT\r\n";
     if (unseen > 0) {
         response += "* OK [UNSEEN " + std::to_string(count - unseen + 1) + "]\r\n";
     }
@@ -1308,39 +1282,20 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     if (want_body_part) want_body = true; // fallback: 返回指定 part
     bool want_body_struct = attrs.find("BODYSTRUCTURE") != std::string::npos;
 
-    // Determine sequence range
-    uint64_t seq_start = 1;
-    uint64_t seq_end = mails.size();
-    if (seq_set.find(':') != std::string::npos) {
-        size_t colon = seq_set.find(':');
-        std::string start_str = seq_set.substr(0, colon);
-        std::string end_str = seq_set.substr(colon + 1);
-        if (start_str == "*") seq_start = 1;
-        else seq_start = safe_stoull(start_str);
-        if (end_str == "*") seq_end = mails.size();
-        else seq_end = std::min((uint64_t)safe_stoull(end_str), (uint64_t)mails.size());
-    } else if (seq_set == "*") {
-        seq_start = 1;
-        seq_end = mails.size();
-    } else {
-        seq_start = safe_stoull(seq_set);
-        seq_end = seq_start;
-    }
-
-    // Clamp
-    if (seq_start < 1) seq_start = 1;
-    if (seq_end > mails.size()) seq_end = mails.size();
-    if (seq_start > seq_end) {
+    // Determine sequence ranges（支持逗号分隔，如 "1,3" / "1:3,5" / "1:*"）
+    std::vector<std::pair<uint64_t, uint64_t>> ranges;
+    expand_seq_set(seq_set, mails.size(), ranges);
+    if (ranges.empty()) {
         send_tagged(session, tag, "OK", "FETCH completed");
         return;
     }
 
     // Build response
     std::string response;
-    LOG_IMAP_INFO("FETCH building response: seq={}-{} mails={}", seq_start, seq_end, mails.size());
-    // 从 seq_start 到 seq_end（注意 mails 是按 send_time DESC 排的）
-    // 序列号: mail 在列表的下标 + 1
-    for (uint64_t seq = seq_start; seq <= seq_end; ++seq) {
+    LOG_IMAP_INFO("FETCH building response: {} ranges mails={}", ranges.size(), mails.size());
+    // 注意 mails 是按 send_time DESC 排的；序列号: mail 在列表的下标 + 1
+    for (const auto& range : ranges) {
+    for (uint64_t seq = range.first; seq <= range.second; ++seq) {
         size_t idx = seq - 1;
         const auto& mail_info = mails[idx];
 
@@ -1453,104 +1408,51 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
         if (want_body) {
             std::string body_content = this->read_mail_body(mail_info.body_path);
             if (want_body_part && body_part_num > 0) {
-                // 提取第 body_part_num 个 MIME sub-part
-                // 1. 找 boundary
-                std::string boundary;
-                {
-                    size_t sep = body_content.find("\r\n\r\n");
-                    std::string hdrs = (sep != std::string::npos) ? body_content.substr(0, sep) : "";
-                    std::string body_only = (sep != std::string::npos) ? body_content.substr(sep + 4) : body_content;
-                    auto hdr_lower = hdrs;
-                    std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
-                    size_t ct = hdr_lower.find("content-type:");
-                    if (ct != std::string::npos) {
-                        // 从原始 hdrs 提取 boundary（保持大小写，body 中是 case-sensitive 的）
-                        std::string raw_ct_line;
-                        {
-                            size_t pos = ct + 13; // skip "content-type:"
-                            while (pos < hdrs.size()) {
-                                size_t next_nl = hdrs.find("\r\n", pos);
-                                std::string part = (next_nl != std::string::npos)
-                                    ? hdrs.substr(pos, next_nl - pos)
-                                    : hdrs.substr(pos);
-                                part.erase(0, part.find_first_not_of(" \t"));
-                                part.erase(part.find_last_not_of(" \t") + 1);
-                                raw_ct_line += (raw_ct_line.empty() ? "" : ";") + part;
-                                if (next_nl == std::string::npos) break;
-                                pos = next_nl + 2;
-                                if (pos >= hdrs.size() || (hdrs[pos] != ' ' && hdrs[pos] != '\t'))
-                                    break;
-                            }
-                        }
-                        auto bp = raw_ct_line.find("boundary=\"");
-                        if (bp != std::string::npos) {
-                            bp += 10;
-                            auto be = raw_ct_line.find('"', bp);
-                            if (be != std::string::npos) boundary = raw_ct_line.substr(bp, be - bp);
-                        }
-                    }
-                }
-                if (!boundary.empty()) {
-                    std::string bdr = "--" + boundary;
-                    // 2. 切分 sub-parts
-                    std::vector<std::string> parts;
-                    size_t pos = 0;
-                    // 跳过 preamble（第一个 boundary 之前的内容）
-                    size_t first_bdr = body_content.find(bdr + "\r\n", body_content.find("\r\n\r\n"));
-                    if (first_bdr == std::string::npos) first_bdr = body_content.find(bdr + "\n", body_content.find("\r\n\r\n"));
-                    if (first_bdr != std::string::npos) pos = first_bdr;
-                    while (pos < body_content.size()) {
-                        size_t bpos = body_content.find(bdr, pos);
-                        if (bpos == std::string::npos) break;
-                        // 确保是行首或前面有 \n
-                        if (bpos > 0 && body_content[bpos-1] != '\n') { pos = bpos + bdr.size(); continue; }
-                        size_t part_start = body_content.find("\r\n", bpos);
-                        if (part_start == std::string::npos) part_start = body_content.find('\n', bpos);
-                        if (part_start == std::string::npos) break;
-                        part_start += (body_content[part_start] == '\r') ? 2 : 1;
-                        // 找下一个 boundary
-                        size_t next_bdr = body_content.find(bdr, part_start);
-                        if (next_bdr == std::string::npos) {
-                            // 最后一段到结尾
-                            parts.push_back(body_content.substr(part_start));
-                            break;
-                        }
-                        // 确保下一个 boundary 在行首
-                        if (next_bdr > 0 && body_content[next_bdr-1] != '\n') {
-                            pos = next_bdr + bdr.size();
-                            continue;
-                        }
-                        // 提取 sub-part（去掉尾部 \r\n）
-                        std::string part = body_content.substr(part_start, next_bdr - part_start);
-                        while (!part.empty() && (part.back() == '\r' || part.back() == '\n'))
-                            part.pop_back();
-                        parts.push_back(part);
-                        pos = next_bdr + bdr.size();
-                        // 跳过 "--"（结束标记）
-                        if (pos < body_content.size() && body_content[pos] == '-') break;
-                    }
-                    if (body_part_num <= (int)parts.size()) {
-                        body_content = parts[body_part_num - 1];
-                    }
-                } else if (body_part_num == 1) {
-                    // 非 multipart 消息：BODY[1] 返回消息体（\r\n\r\n 之后的内容）
-                    size_t hdr_end = body_content.find("\r\n\r\n");
-                    if (hdr_end != std::string::npos) {
-                        body_content = body_content.substr(hdr_end + 4);
-                    }
+                // 提取第 body_part_num 个 MIME part 的正文：
+                // 跳过该 part 自己的 header，并按 Content-Transfer-Encoding 解码
+                MimePart mime_tree;
+                if (load_mime_tree(mail_info.body_path, mime_tree)) {
+                    const MimePart* part = nullptr;
+                    if (mime_tree.is_multipart() && (size_t)body_part_num <= mime_tree.subs.size())
+                        part = &mime_tree.subs[body_part_num - 1];
+                    else if (!mime_tree.is_multipart() && body_part_num == 1)
+                        part = &mime_tree;
+                    if (part)
+                        body_content = extract_part_content(body_content, *part);
+                    else
+                        body_content.clear(); // 无效 section
+                } else {
+                    // 旧邮件无 sidecar：inline 解析后走同样的提取/解码逻辑
+                    MimePart fallback_tree;
+                    parse_mime_tree(body_content, fallback_tree);
+                    const MimePart* part = nullptr;
+                    if (fallback_tree.is_multipart() && (size_t)body_part_num <= fallback_tree.subs.size())
+                        part = &fallback_tree.subs[body_part_num - 1];
+                    else if (!fallback_tree.is_multipart() && body_part_num == 1)
+                        part = &fallback_tree;
+                    if (part)
+                        body_content = extract_part_content(body_content, *part);
+                    else
+                        body_content.clear();
                 }
             }
             std::string body_label = want_body_part ? ("BODY[" + std::to_string(body_part_num) + "]") : "BODY[]";
             response += body_label + " " + build_fetch_body_response(body_content, body_content.size()) + " ";
         }
         if (want_body_struct) {
-            std::string body_content = this->read_mail_body(mail_info.body_path);
-            response += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
+            MimePart mime_tree;
+            if (load_mime_tree(mail_info.body_path, mime_tree)) {
+                response += "BODYSTRUCTURE " + build_bodystructure_tree(mime_tree) + " ";
+            } else {
+                std::string body_content = this->read_mail_body(mail_info.body_path);
+                response += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
+            }
         }
         // Remove trailing space
         if (response.back() == ' ') response.pop_back();
         response += ")\r\n";
     }
+    } // for each range
 
     response += tag + " OK FETCH completed\r\n";
 
@@ -1634,17 +1536,19 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
         return;
     }
 
-    // Parse sequence set
-    uint64_t seq_start = 1, seq_end = mails.size();
-    if (!parse_seq_set(seq_set, seq_start, seq_end, mails.size())) {
-        send_tagged(session, tag, "BAD", "Invalid sequence set");
+    // Parse sequence ranges（支持逗号分隔）
+    std::vector<std::pair<uint64_t, uint64_t>> ranges;
+    expand_seq_set(seq_set, mails.size(), ranges);
+    if (ranges.empty()) {
+        send_tagged(session, tag, "OK", "STORE completed");
         return;
     }
 
     std::string user_email = this->get_user_email(ctx->user_id);
     std::string response;
 
-    for (uint64_t seq = seq_start; seq <= seq_end; ++seq) {
+    for (const auto& range : ranges) {
+    for (uint64_t seq = range.first; seq <= range.second; ++seq) {
         size_t idx = seq - 1;
         const auto& mail_info = mails[idx];
 
@@ -1678,6 +1582,12 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
                 mail_info.is_important);
             response += "* " + std::to_string(seq) + " FETCH (FLAGS (" + flags + "))\r\n";
         }
+    }
+    } // for each range
+
+    // 标记已读/删除等会改变 UNSEEN/RECENT/统计，失效邮箱统计缓存，避免客户端反复重同步
+    if (m_mailboxStatsCache) {
+        m_mailboxStatsCache->invalidate(mbox_cache_key(ctx->user_id, ctx->selected_mailbox_id));
     }
 
     response += tag + " OK STORE completed\r\n";
@@ -2130,6 +2040,43 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
     bool search_deleted = (upper_args.find("DELETED") != std::string::npos
                           && upper_args.find("UNDELETED") == std::string::npos);
 
+    // UID 范围条件（如 "UID SEARCH UID 2083...:*"）：只返回 UID 落在该区间的邮件。
+    // 之前完全忽略此条件，导致 "UID SEARCH UID <last>:*" 总是返回整箱，
+    // 客户端"最后同步 UID"永远无法推进 → 每次轮询都全量重同步。
+    bool has_uid_range = false;
+    uint64_t uid_lo = 0, uid_hi = UINT64_MAX;
+    {
+        // 遍历所有 "UID " 出现，取后面跟数字或 * 的 token 作为 UID 集。
+        // 兼容 "UID SEARCH UID X:*"（第一个 "UID " 后是 SEARCH，跳过）和 "UID X:*"。
+        size_t search_pos = 0;
+        while (search_pos < upper_args.size()) {
+            size_t p = upper_args.find("UID ", search_pos);
+            if (p == std::string::npos) break;
+            size_t q = p + 4;
+            while (q < upper_args.size() && upper_args[q] == ' ') q++;
+            size_t e = q;
+            while (e < upper_args.size() &&
+                   (std::isalnum(static_cast<unsigned char>(upper_args[e])) ||
+                    upper_args[e] == ':' || upper_args[e] == '*'))
+                e++;
+            std::string tok = upper_args.substr(q, e - q);
+            if (!tok.empty() && tok != "SEARCH" &&
+                (tok[0] == '*' || std::isdigit(static_cast<unsigned char>(tok[0])))) {
+                size_t colon = tok.find(':');
+                if (colon != std::string::npos) {
+                    std::string a = tok.substr(0, colon), b = tok.substr(colon + 1);
+                    uid_lo = (a == "*") ? 0 : safe_stoull(a);
+                    uid_hi = (b == "*") ? UINT64_MAX : safe_stoull(b);
+                } else if (tok != "*") {
+                    uid_lo = uid_hi = safe_stoull(tok);
+                }
+                has_uid_range = true;
+                break;
+            }
+            search_pos = p + 4;
+        }
+    }
+
     std::string response = "* SEARCH";
     for (size_t i = 0; i < mails.size(); ++i) {
         const auto& m = mails[i];
@@ -2137,6 +2084,8 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
         if (search_unseen) match = (m.status == 1);
         else if (search_seen) match = (m.status == 0);
         if (search_deleted) match = m.is_deleted;
+        if (has_uid_range)
+            match = match && (m.mail_id >= uid_lo && m.mail_id <= uid_hi);
 
         if (match) {
             // UID SEARCH 返回 mail_id，普通 SEARCH 返回 seq number
@@ -2194,18 +2143,36 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
 
         // UID set → seq set
         std::string seq_set;
-        if (uid_set.find(':') != std::string::npos) {
+        if (uid_set.find(',') != std::string::npos) {
+            // 逗号分隔的 UID 列表，逐个映射为 seq（保持原顺序）
+            std::istringstream us(uid_set);
+            std::string tok;
+            while (std::getline(us, tok, ',')) {
+                if (tok.empty()) continue;
+                auto it = uid_to_seq.find(safe_stoull(tok));
+                uint64_t s = (it != uid_to_seq.end()) ? it->second : 0;
+                if (s > 0) {
+                    if (!seq_set.empty()) seq_set += ",";
+                    seq_set += std::to_string(s);
+                }
+            }
+            if (seq_set.empty()) seq_set = "0";
+        } else if (uid_set.find(':') != std::string::npos) {
+            // UID 范围：>= start 且 <= end（* 表示无穷）。
+            // 之前要求起止 UID 精确匹配某封邮件，客户端发 "UID <last>:*" 且 <last>
+            // 不是确切 UID 时映射成 0:* → 全量拉取，导致客户端永远重拉。
             size_t c = uid_set.find(':');
             std::string u1 = uid_set.substr(0, c), u2 = uid_set.substr(c + 1);
-            auto it1 = uid_to_seq.find(safe_stoull(u1));
-            uint64_t s1 = (it1 != uid_to_seq.end()) ? it1->second : 0;
-            if (u2 == "*")
-                seq_set = std::to_string(s1) + ":*";
-            else {
-                auto it2 = uid_to_seq.find(safe_stoull(u2));
-                uint64_t s2 = (it2 != uid_to_seq.end()) ? it2->second : 0;
-                seq_set = std::to_string(s1) + ":" + std::to_string(s2);
+            uint64_t start_uid = (u1 == "*") ? 0 : safe_stoull(u1);
+            uint64_t end_uid = (u2 == "*") ? UINT64_MAX : safe_stoull(u2);
+            std::string collected;
+            for (size_t i = 0; i < mails.size(); ++i) {
+                if (mails[i].mail_id >= start_uid && mails[i].mail_id <= end_uid) {
+                    if (!collected.empty()) collected += ",";
+                    collected += std::to_string(i + 1);
+                }
             }
+            seq_set = collected.empty() ? "0" : collected;
         } else if (uid_set == "*") {
             seq_set = "*";
         } else {
@@ -2427,29 +2394,6 @@ void TraditionalImapsFsm<ConnectionType>::handle_timeout(
 }
 
 // ========== 辅助函数 ==========
-
-// 序列集解析（简单实现，仅处理数字和星号范围）
-template <typename ConnectionType>
-bool TraditionalImapsFsm<ConnectionType>::parse_seq_set(
-    const std::string& seq_set, uint64_t& start, uint64_t& end, size_t total)
-{
-    if (seq_set.find(':') != std::string::npos) {
-        size_t colon = seq_set.find(':');
-        std::string s = seq_set.substr(0, colon);
-        std::string e = seq_set.substr(colon + 1);
-        start = (s == "*") ? 1 : safe_stoull(s);
-        end = (e == "*") ? total : std::min((uint64_t)safe_stoull(e), (uint64_t)total);
-    } else if (seq_set == "*") {
-        start = 1;
-        end = total;
-    } else {
-        start = safe_stoull(seq_set);
-        end = start;
-    }
-    if (start < 1) start = 1;
-    if (end > total) end = total;
-    return start <= end;
-}
 
 // ====================================================================
 // ImapsFsm 迁移方法（原 inline，现 out-of-line template）
@@ -2712,9 +2656,15 @@ bool TraditionalImapsFsm<ConnectionType>::update_mail_seen(
         return false;
     }
     int new_status = seen ? 0 : 1;
-    return se(conn.operator->(),
-        "UPDATE mail_recipients SET status = ? WHERE mail_id = ? AND recipient = ?",
-        {std::to_string(new_status), std::to_string(mail_id), recipient});
+    // 直接拼接转义后的 SQL（不用 prepared statement）：连接池 get_connection() 的
+    // SELECT 1 验证会重置 prepared statement 状态，导致绑定参数丢失、UPDATE 落空。
+    // 见 docs/bugfixes/prepared-statement-connection-pool-issue.md
+    std::string sql = "UPDATE mail_recipients SET status = " + std::to_string(new_status)
+        + " WHERE mail_id = " + std::to_string(mail_id)
+        + " AND recipient = '" + conn->escape_string(recipient) + "'";
+    bool ok = se(conn.operator->(), sql);
+    LOG_IMAP_INFO("update_mail_seen mail_id={} seen={} recipient={} ok={}", mail_id, seen, recipient, ok);
+    return ok;
 }
 
 template <typename ConnectionType>
@@ -2725,9 +2675,12 @@ bool TraditionalImapsFsm<ConnectionType>::update_mail_deleted(
     if (!conn.is_valid()) {
         return false;
     }
-    return se(conn.operator->(),
-        db::sql::build_imap_update_mail_flag_deleted(),
-        {deleted ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
+    // 全部为数值参数，直接拼接 SQL（避开 prepared statement 参数丢失问题）
+    std::string sql = "UPDATE mail_mailbox SET is_deleted = " + std::string(deleted ? "1" : "0")
+        + " WHERE mail_id = " + std::to_string(mail_id)
+        + " AND user_id = " + std::to_string(user_id)
+        + " AND mailbox_id = " + std::to_string(mailbox_id);
+    return se(conn.operator->(), sql);
 }
 
 template <typename ConnectionType>
@@ -2738,9 +2691,12 @@ bool TraditionalImapsFsm<ConnectionType>::update_mail_flagged(
     if (!conn.is_valid()) {
         return false;
     }
-    return se(conn.operator->(),
-        db::sql::build_imap_update_mail_flag_starred(),
-        {flagged ? "1" : "0", std::to_string(mail_id), std::to_string(user_id), std::to_string(mailbox_id)});
+    // 全部为数值参数，直接拼接 SQL（避开 prepared statement 参数丢失问题）
+    std::string sql = "UPDATE mail_mailbox SET is_starred = " + std::string(flagged ? "1" : "0")
+        + " WHERE mail_id = " + std::to_string(mail_id)
+        + " AND user_id = " + std::to_string(user_id)
+        + " AND mailbox_id = " + std::to_string(mailbox_id);
+    return se(conn.operator->(), sql);
 }
 
 template <typename ConnectionType>

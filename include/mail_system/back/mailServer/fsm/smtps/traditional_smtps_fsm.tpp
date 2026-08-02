@@ -4,6 +4,7 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
+#include "mail_system/back/common/mime_parser.h"
 #include <openssl/md5.h>
 #include "mail_system/back/mailServer/session/smtps_session.h"
 #include "mail_system/back/mailServer/smtps_server.h"
@@ -437,6 +438,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
                     [session](auto s, auto& ec) {
                         if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
                         s->drain_buffered_commands();
+                        if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
                     });
             } else {
                 if (session->record_auth_failure_and_check()) { session->close(); return; }
@@ -444,6 +446,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
                     [session](auto s, auto& ec) {
                         if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
                         s->drain_buffered_commands();
+                        if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
                     });
             }
         });
@@ -453,22 +456,30 @@ template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
     std::shared_ptr<SessionBase<ConnectionType>> session)
 {
-    // AUTH policy check
+    // AUTH policy check — 外部发件人是否需要认证：
+    // - listener auth_policy=ON（465/587 提交端口）始终要求认证
+    // - listener auth_policy=AUTO（25）按 inbound_auth_policy 决定，默认 off = 无需认证
+    //   之前错误地按 listener AUTO 处理（require_auth=!is_trusted_server，而该值从未被置真），
+    //   导致所有外部入站投递都被 530 拒绝
     {
         auto* ctx = static_cast<SmtpsContext*>(session->get_context());
         const auto& lc = ctx->listener_config;
         auto cfg = std::atomic_load(&session->get_server()->m_config);
 
-        if (lc.auth_policy == InboundAuthPolicy::AUTO &&
-            !ctx->is_trusted_server && !ctx->ehlo_domain.empty()) {
-            // TODO: re-enable EHLO/PTR verification after adding DNS resolver to OutboundServer
-        }
-
         bool require_auth = false;
         switch (lc.auth_policy) {
-        case InboundAuthPolicy::ON:   require_auth = true; break;
-        case InboundAuthPolicy::AUTO: require_auth = !ctx->is_trusted_server; break;
-        case InboundAuthPolicy::OFF:  break;
+        case InboundAuthPolicy::ON:
+            require_auth = true;
+            break;
+        case InboundAuthPolicy::AUTO:
+            switch (cfg->inbound_auth_policy) {
+            case InboundAuthPolicy::ON:   require_auth = true; break;
+            case InboundAuthPolicy::AUTO: require_auth = !ctx->is_trusted_server; break;
+            case InboundAuthPolicy::OFF:  require_auth = false; break;
+            }
+            break;
+        case InboundAuthPolicy::OFF:
+            break;
         }
 
         if (require_auth && !ctx->is_authenticated) {
@@ -609,6 +620,50 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     if (!smtp_session) { session->close(); return; }
     smtp_session->flush_body_and_wait();
 
+    // 读取完整 body 文件（供 MIME 解析 + DKIM 验证共用）
+    std::string full_body;
+    if (smtp_session->get_mail() && !smtp_session->get_mail()->body_path.empty()) {
+        std::ifstream body_file(smtp_session->get_mail()->body_path, std::ios::binary);
+        if (body_file.is_open()) {
+            std::ostringstream ss; ss << body_file.rdbuf();
+            full_body = ss.str();
+        }
+    }
+
+    // MIME 预解析：供 IMAP BODYSTRUCTURE / BODY[section] 直接使用
+    if (!full_body.empty()) {
+        parse_mime_tree(full_body, smtp_session->get_mail()->mime_root);
+        // 写 sidecar JSON 文件，供 IMAP 直接读取
+        try {
+            std::string sidecar_path = smtp_session->get_mail()->body_path + ".mime";
+            std::ofstream sf(sidecar_path);
+            if (sf.is_open()) {
+                // hand-rolled JSON — 足够紧凑且不引入额外依赖
+                std::function<void(const MimePart&, std::ostream&)> write_part;
+                write_part = [&](const MimePart& p, std::ostream& os) {
+                    os << "{\"t\":\"" << p.type << "\",\"s\":\"" << p.subtype << "\"";
+                    if (!p.charset.empty()) os << ",\"c\":\"" << p.charset << "\"";
+                    if (!p.encoding.empty()) os << ",\"e\":\"" << p.encoding << "\"";
+                    if (!p.boundary.empty()) os << ",\"b\":\"" << p.boundary << "\"";
+                    if (!p.name.empty()) os << ",\"n\":\"" << p.name << "\"";
+                    os << ",\"o\":" << p.offset << ",\"l\":" << p.length
+                       << ",\"z\":" << p.body_size << ",\"ln\":" << p.lines;
+                    if (!p.subs.empty()) {
+                        os << ",\"p\":[";
+                        for (size_t i = 0; i < p.subs.size(); ++i) {
+                            if (i) os << ",";
+                            write_part(p.subs[i], os);
+                        }
+                        os << "]";
+                    }
+                    os << "}";
+                };
+                write_part(smtp_session->get_mail()->mime_root, sf);
+                sf.close();
+            }
+        } catch (...) { /* sidecar 写入失败不阻塞收信 */ }
+    }
+
     // Inbound verification (DKIM/DMARC)
     auto cfg = std::atomic_load(&session->get_server()->m_config);
     bool needs_verify = !cfg->perf_mode && (
@@ -621,14 +676,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         std::string helo = ctx->ehlo_domain;
         std::string headers = ctx->header_buffer;
         std::string raw_body;
-        if (smtp_session->get_mail() && !smtp_session->get_mail()->body_path.empty()) {
-            std::ifstream body_file(smtp_session->get_mail()->body_path, std::ios::binary);
-            if (body_file.is_open()) {
-                std::ostringstream ss; ss << body_file.rdbuf();
-                std::string full = ss.str();
-                auto hdr_end = full.find("\r\n\r\n");
-                if (hdr_end != std::string::npos) raw_body = full.substr(hdr_end + 4);
-            }
+        if (!full_body.empty()) {
+            auto hdr_end = full_body.find("\r\n\r\n");
+            if (hdr_end != std::string::npos) raw_body = full_body.substr(hdr_end + 4);
         }
 
         auto* dns = session->get_server()->get_dns_resolver().get();

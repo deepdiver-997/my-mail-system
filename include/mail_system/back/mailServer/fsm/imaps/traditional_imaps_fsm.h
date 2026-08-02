@@ -47,6 +47,9 @@ protected:
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
+    // 邮箱统计后台刷新的在途 key 集合：同一 key 只允许一个刷新任务在跑，避免雪崩
+    std::set<std::string> m_statsRefreshInFlight;
+    std::mutex m_statsRefreshMutex;
 
 public:
     TraditionalImapsFsm(
@@ -241,6 +244,8 @@ private:
         const std::string& body_content,
         size_t octets);
     static std::string build_bodystructure(const std::string& raw);
+    static std::string build_bodystructure_tree(const MimePart& mp);
+    static std::string extract_part_content(const std::string& raw, const MimePart& part);
 
     // ========== 状态处理器 ==========
     void handle_init_connect(std::shared_ptr<SessionBase<ConnectionType>> session);
@@ -279,7 +284,6 @@ private:
     void handle_timeout(std::shared_ptr<SessionBase<ConnectionType>> session);
 
     // 辅助函数
-    static bool parse_seq_set(const std::string& seq_set, uint64_t& start, uint64_t& end, size_t total);
 };
 
 } // namespace mail_system
