@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <fstream>
 #include <regex>
 #include <sstream>
 #include <unordered_map>
@@ -185,6 +186,43 @@ void InboundVerifier::verify_all(const std::string& client_ip,
     }
 
     // DMARC
+    if (config.inbound_dmarc_mode != "off") {
+        std::string from_domain = extract_from_header_domain(raw_headers);
+        std::string mf_domain = extract_domain(mail_from);
+        result.dmarc = check_dmarc(from_domain, result.spf, result.dkim, mf_domain);
+        result.dmarc.header_from_domain = from_domain;
+    } else {
+        result.dmarc.result = "none";
+        result.dmarc.reason = "DMARC check disabled";
+    }
+}
+
+void InboundVerifier::verify_all_from_file(const std::string& client_ip,
+                                           const std::string& mail_from,
+                                           const std::string& helo_domain,
+                                           const std::string& raw_headers,
+                                           const std::string& body_path,
+                                           const ServerConfig& config,
+                                           VerificationResult& result,
+                                           const SpfResult* precomputed_spf) {
+    // SPF — 与 verify_all 一致
+    if (precomputed_spf) {
+        result.spf = *precomputed_spf;
+    } else if (config.inbound_spf_mode != "off") {
+        result.spf = check_spf(client_ip, mail_from, helo_domain);
+    } else {
+        result.spf = {"none", "SPF check disabled"};
+    }
+
+    // DKIM — 正文从 body 文件流式读取，不全量读回内存
+    if (config.inbound_dkim_mode != "off") {
+        result.dkim = check_dkim_from_file(raw_headers, body_path);
+    } else {
+        result.dkim.result = "none";
+        result.dkim.reason = "DKIM check disabled";
+    }
+
+    // DMARC — 与 verify_all 一致
     if (config.inbound_dmarc_mode != "off") {
         std::string from_domain = extract_from_header_domain(raw_headers);
         std::string mf_domain = extract_domain(mail_from);
@@ -523,6 +561,35 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
                                             const std::string& raw_headers,
                                             const std::string& raw_body,
                                             std::string& error_out) {
+    std::string canonical_body = (sig.body_canon == "relaxed")
+        ? outbound::normalize_body_relaxed(raw_body)
+        : outbound::normalize_body_simple(raw_body);
+    std::string computed_bh = outbound::sha256_base64(canonical_body);
+    return verify_dkim_signature_impl(sig, raw_headers, computed_bh, error_out);
+}
+
+bool InboundVerifier::verify_dkim_signature_from_file(const DkimSignature& sig,
+                                                      const std::string& raw_headers,
+                                                      const std::string& body_path,
+                                                      std::string& error_out) {
+    std::ifstream body_file(body_path, std::ios::binary);
+    if (!body_file.is_open()) {
+        error_out = "cannot open DKIM body file: " + body_path;
+        LOG_INBOUND_WARN("DKIM: cannot open body file {}", body_path);
+        return false;
+    }
+    std::string computed_bh;
+    if (!outbound::dkim_body_hash_stream(body_file, sig.body_canon, computed_bh)) {
+        error_out = "streaming DKIM body hash failed";
+        return false;
+    }
+    return verify_dkim_signature_impl(sig, raw_headers, computed_bh, error_out);
+}
+
+bool InboundVerifier::verify_dkim_signature_impl(const DkimSignature& sig,
+                                                 const std::string& raw_headers,
+                                                 const std::string& computed_bh,
+                                                 std::string& error_out) {
     try {
     // 1. Fetch public key via DNS
     std::string key_domain = sig.selector + "._domainkey." + sig.domain;
@@ -550,14 +617,10 @@ bool InboundVerifier::verify_dkim_signature(const DkimSignature& sig,
         return false;
     }
 
-    // 2. Normalize body and verify body hash (respect c= tag)
-    std::string canonical_body = (sig.body_canon == "relaxed")
-        ? outbound::normalize_body_relaxed(raw_body)
-        : outbound::normalize_body_simple(raw_body);
-    std::string computed_bh = outbound::sha256_base64(canonical_body);
-    LOG_INBOUND_DEBUG("DKIM body hash: expected={}.. computed={}.. canon={} body_len={}",
+    // 2. Verify body hash（computed_bh 由调用方计算：字符串版或流式文件版）
+    LOG_INBOUND_DEBUG("DKIM body hash: expected={}.. computed={}.. canon={}",
                      sig.body_hash.substr(0, 8), computed_bh.substr(0, 8),
-                     sig.body_canon, raw_body.size());
+                     sig.body_canon);
     if (computed_bh != sig.body_hash) {
         error_out = "DKIM body hash mismatch (canon=" + sig.body_canon + ")";
         LOG_INBOUND_WARN("DKIM bh mismatch: domain={}, selector={}, canon={}, exp={}, got={}",
@@ -741,6 +804,48 @@ DkimResult InboundVerifier::check_dkim(const std::string& raw_headers,
 
         std::string error;
         if (verify_dkim_signature(sig, raw_headers, raw_body, error)) {
+            result.result = "pass";
+            result.reason = "";
+            result.selector = sig.selector;
+            result.signing_domain = sig.domain;
+            return result;
+        }
+
+        // Store first failure reason
+        if (result.reason.empty()) {
+            result.reason = error;
+        }
+    }
+
+    // If we got here, no signature passed
+    if (result.result == "none") {
+        result.result = "fail";
+    }
+    if (result.reason.empty()) {
+        result.reason = "no valid DKIM signature";
+    }
+    return result;
+}
+
+DkimResult InboundVerifier::check_dkim_from_file(const std::string& raw_headers,
+                                                 const std::string& body_path) {
+    DkimResult result;
+    result.result = "none";
+
+    auto sigs = parse_dkim_signatures(raw_headers);
+    if (sigs.empty()) {
+        result.result = "none";
+        result.reason = "no DKIM-Signature header found";
+        return result;
+    }
+
+    for (auto& sig : sigs) {
+        if (sig.algorithm != "rsa-sha256") {
+            continue; // unsupported algorithm, try next
+        }
+
+        std::string error;
+        if (verify_dkim_signature_from_file(sig, raw_headers, body_path, error)) {
             result.result = "pass";
             result.reason = "";
             result.selector = sig.selector;

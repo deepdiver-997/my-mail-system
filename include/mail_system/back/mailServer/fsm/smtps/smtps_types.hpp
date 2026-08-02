@@ -76,10 +76,9 @@ struct SmtpsContext {
     std::string current_part_encoding;           // 当前部分的 Content-Transfer-Encoding
     std::string current_part_mime;               // 当前部分的 Content-Type
     std::string current_attachment_filename;     // 当前附件文件名（来自 MIME 头）
-    std::string current_attachment_path;         // 当前附件落盘路径
-    std::ofstream current_attachment_stream;     // 备用流句柄（现以缓冲方式为主）
+    std::string current_attachment_path;         // 当前附件落盘路径（DATA 阶段恒为空，附件字节在 body 文件中）
     std::string base64_remainder;                // Base64 断行余数，拼接下一块使用
-    size_t current_attachment_size = 0;          // 当前附件累计写入大小
+    size_t current_attachment_size = 0;          // 当前附件累计写入大小（DATA 阶段恒为 0）
     std::vector<attachment> streamed_attachments;// 已完成的附件元数据，DATA_END 时搬运到 mail
 
     // 入站验证相关
@@ -93,12 +92,6 @@ struct SmtpsContext {
     std::string dkim_result;                   // DKIM 验证结果
     std::string dmarc_result;                  // DMARC 验证结果
     int shard_index = 0;                       // 由 shard router 在认证时分配
-
-    // 附件缓冲区相关（采用与邮件相同的缓冲策略）
-    size_t attachment_buffer_size = 0;           // 当前附件缓冲区大小
-    std::unique_ptr<char[]> attachment_buffer;   // 附件数据缓冲指针
-    size_t attachment_buffer_used = 0;           // 附件缓冲已使用字节数
-    size_t attachment_buffer_expand_count = 0;   // 附件缓冲扩容次数，超过阈值转刷盘
 
     void clear() {
         is_authenticated = false;
@@ -130,8 +123,6 @@ struct SmtpsContext {
         base64_remainder.clear();
         current_attachment_size = 0;
         streamed_attachments.clear();
-        attachment_buffer_used = 0;
-        attachment_buffer_expand_count = 0;
         ehlo_domain.clear();
         is_trusted_server = false;
         auth_results_header.clear();
@@ -140,9 +131,6 @@ struct SmtpsContext {
         spf_result.clear();
         spf_reason.clear();
         shard_index = 0;
-        if (current_attachment_stream.is_open()) {
-            current_attachment_stream.close();
-        }
     }
 };
 

@@ -87,9 +87,6 @@ public:
     void auth_user_async(SessionBase<ConnectionType>* session, const std::string& mail_address,
                          const std::string& password, AuthCallback cb);
 
-    void get_mail_data(SessionBase<ConnectionType>* session, std::string& mail_data);
-    void get_mail_data(std::shared_ptr<SessionBase<ConnectionType>> session, std::string& mail_data);
-
     // 保存邮件元数据到数据库（异步），返回future用于跟踪操作结果
     std::future<bool> save_mail_metadata_async(mail* data, const std::string& file_path_prefix);
 

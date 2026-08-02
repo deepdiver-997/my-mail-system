@@ -5,6 +5,7 @@
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
 #include "mail_system/back/common/mime_parser.h"
+#include <filesystem>
 #include <openssl/md5.h>
 #include "mail_system/back/mailServer/session/smtps_session.h"
 #include "mail_system/back/mailServer/smtps_server.h"
@@ -620,17 +621,23 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     if (!smtp_session) { session->close(); return; }
     smtp_session->flush_body_and_wait();
 
-    // 读取完整 body 文件（供 MIME 解析 + DKIM 验证共用）
+    try {
+    auto cfg = std::atomic_load(&session->get_server()->m_config);
+
+    // MIME 预解析：仅当消息 ≤ 阈值才 eager 解析（大消息跳过，交给 IMAP lazy 解析）
+    // 供 IMAP BODYSTRUCTURE / BODY[section] 直接使用
     std::string full_body;
     if (smtp_session->get_mail() && !smtp_session->get_mail()->body_path.empty()) {
-        std::ifstream body_file(smtp_session->get_mail()->body_path, std::ios::binary);
-        if (body_file.is_open()) {
-            std::ostringstream ss; ss << body_file.rdbuf();
-            full_body = ss.str();
+        std::error_code fec;
+        auto fsz = std::filesystem::file_size(smtp_session->get_mail()->body_path, fec);
+        if (!fec && fsz > 0 && static_cast<std::uintmax_t>(cfg->inbound_mime_parse_limit_bytes) >= fsz) {
+            std::ifstream body_file(smtp_session->get_mail()->body_path, std::ios::binary);
+            if (body_file.is_open()) {
+                std::ostringstream ss; ss << body_file.rdbuf();
+                full_body = ss.str();
+            }
         }
     }
-
-    // MIME 预解析：供 IMAP BODYSTRUCTURE / BODY[section] 直接使用
     if (!full_body.empty()) {
         parse_mime_tree(full_body, smtp_session->get_mail()->mime_root);
         // 写 sidecar JSON 文件，供 IMAP 直接读取
@@ -664,8 +671,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         } catch (...) { /* sidecar 写入失败不阻塞收信 */ }
     }
 
-    // Inbound verification (DKIM/DMARC)
-    auto cfg = std::atomic_load(&session->get_server()->m_config);
+    // Inbound verification (DKIM/DMARC) — 正文从 body 文件流式读取，不全量读回内存
     bool needs_verify = !cfg->perf_mode && (
         (!ctx->spf_checked && cfg->inbound_spf_mode != "off") ||
          cfg->inbound_dkim_mode != "off" || cfg->inbound_dmarc_mode != "off");
@@ -675,19 +681,16 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         std::string mail_from = ctx->sender_address;
         std::string helo = ctx->ehlo_domain;
         std::string headers = ctx->header_buffer;
-        std::string raw_body;
-        if (!full_body.empty()) {
-            auto hdr_end = full_body.find("\r\n\r\n");
-            if (hdr_end != std::string::npos) raw_body = full_body.substr(hdr_end + 4);
-        }
+        const std::string body_path = (smtp_session->get_mail() && !smtp_session->get_mail()->body_path.empty())
+            ? smtp_session->get_mail()->body_path : std::string();
 
         auto* dns = session->get_server()->get_dns_resolver().get();
-        if (dns) {
+        if (dns && !body_path.empty()) {
             inbound::VerificationResult vr;
             inbound::InboundVerifier verifier(*dns);
             inbound::SpfResult pre_spf{ctx->spf_result, ""};
-            verifier.verify_all(client_ip, mail_from, helo, headers, raw_body, *cfg, vr,
-                                ctx->spf_checked ? &pre_spf : nullptr);
+            verifier.verify_all_from_file(client_ip, mail_from, helo, headers, body_path, *cfg, vr,
+                                          ctx->spf_checked ? &pre_spf : nullptr);
             ctx->dkim_result = vr.dkim.result;
             ctx->dmarc_result = vr.dmarc.result;
             if (!ctx->spf_checked) {
@@ -702,6 +705,13 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     if (!submit_result.accepted) {
         smtp_session->discard_current_mail();
         session->do_async_write("451 Requested action aborted: insufficient storage or backend pressure\r\n",
+            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
+        return;
+    }
+    } catch (const std::exception& e) {
+        LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());
+        if (smtp_session) smtp_session->discard_current_mail();
+        session->do_async_write("451 Requested action aborted: local processing error\r\n",
             [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
         return;
     }
@@ -905,41 +915,6 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
         });
 }
 
-template <typename ConnectionType>
-void TraditionalSmtpsFsm<ConnectionType>::get_mail_data(
-    SessionBase<ConnectionType>* session, std::string& mail_data)
-{
-    if (!session) {
-        LOG_AUTH_ERROR("Session is null in get_mail_data");
-        return;
-    }
-
-    auto conn = acquire_connection(0);
-    if (!conn.is_valid()) {
-        LOG_AUTH_ERROR("Failed to get database connection in get_mail_data");
-        return;
-    }
-
-    // 从session上下文获取发件人地址（如果已设置）
-    auto* smtp_s = static_cast<SmtpsSession<ConnectionType>*>(session);
-    std::string sender = smtp_s->context_.sender_address.empty() ? smtp_s->context_.client_username : smtp_s->context_.sender_address;
-
-    // 使用参数化查询
-    std::string sql = "SELECT subject, body FROM mails WHERE sender = ? ORDER BY send_time DESC LIMIT 1";
-    auto result = sq(conn.operator->(), sql, {sender});
-    if (result && result->get_row_count() > 0) {
-        std::string subject = result->get_value(0, "subject");
-        std::string body = result->get_value(0, "body");
-        mail_data = "Subject: " + subject + "\n\n" + body;
-    }
-}
-
-template <typename ConnectionType>
-void TraditionalSmtpsFsm<ConnectionType>::get_mail_data(
-    std::shared_ptr<SessionBase<ConnectionType>> session, std::string& mail_data)
-{
-    get_mail_data(session.get(), mail_data);
-}
 
 template <typename ConnectionType>
 std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_mail_metadata_async(

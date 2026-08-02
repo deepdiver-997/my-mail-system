@@ -438,12 +438,6 @@ bool SmtpsSession<ConnectionType>::check_mail_persist_status() {
 }
 
 template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::transfer_mail_ownership_to_outbound() {
-    // 旧 SmtpOutboundClient 已移除，热投递暂由 PersistentQueue 接管
-    // TODO: 接入新 OutboundServer 的 submit() 接口
-}
-
-template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::discard_current_mail() {
     if (!this->get_mail()) {
         return;
@@ -557,19 +551,9 @@ void SmtpsSession<ConnectionType>::process_message_data(const std::string& data)
 }
 
 template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::handle_multipart_line_and_write_attachment(const std::string& line) {
-    algorithm::handle_multipart_line(context_, line);
-
-    if (context_.current_part_is_attachment && !line.empty()) {
-        append_to_attachment_buffer(line.data(), line.size());
-    }
-}
-
-template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::finalize_attachment_from_context() {
     if (context_.current_part_is_attachment && !context_.current_attachment_filename.empty()) {
-        flush_attachment_buffer_to_disk();
-
+        // 附件字节已包含在 body 文件中（DATA 阶段整体落盘），此处仅记录元数据
         attachment att;
         att.filename = context_.current_attachment_filename;
         att.filepath = context_.current_attachment_path;
@@ -589,192 +573,6 @@ void SmtpsSession<ConnectionType>::finalize_attachment_from_context() {
     context_.current_part_encoding.clear();
     context_.current_part_is_attachment = false;
     context_.base64_remainder.clear();
-}
-
-template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::expand_attachment_buffer() {
-    if (context_.attachment_buffer_expand_count >= MAX_BUFFER_EXPAND_COUNT) {
-        LOG_SESSION_INFO("Attachment buffer expansion limit reached, flushing to disk asynchronously");
-        async_flush_attachment_buffer_to_disk();
-        return;
-    }
-
-    size_t new_size = context_.attachment_buffer_size * BUFFER_GROWTH_FACTOR;
-    if (new_size > MAX_BUFFER_SIZE) {
-        LOG_SESSION_WARN("Attachment buffer expansion would exceed MAX_BUFFER_SIZE, flushing asynchronously");
-        async_flush_attachment_buffer_to_disk();
-        return;
-    }
-
-    async_flush_attachment_buffer_to_disk();
-
-    LOG_SESSION_DEBUG("Expanding attachment buffer from {} to {} bytes", context_.attachment_buffer_size, new_size);
-    auto new_buffer = std::make_unique<char[]>(new_size);
-    context_.attachment_buffer = std::move(new_buffer);
-    context_.attachment_buffer_size = new_size;
-    context_.attachment_buffer_used = 0;
-    context_.attachment_buffer_expand_count++;
-
-    LOG_SESSION_INFO("Attachment buffer expanded, expand count: {}", context_.attachment_buffer_expand_count);
-}
-
-template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::flush_attachment_buffer_to_disk() {
-    if (context_.attachment_buffer_used == 0 || context_.current_attachment_path.empty()) {
-        return;
-    }
-
-    try {
-        if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
-            std::string error;
-            if (!this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(context_.current_attachment_path,
-                                                                  context_.attachment_buffer.get(),
-                                                                  context_.attachment_buffer_used,
-                                                                  error)) {
-                LOG_SESSION_ERROR("Failed to write attachment via storage provider: {}, error={}",
-                                  context_.current_attachment_path,
-                                  error);
-                return;
-            }
-        } else {
-            std::ofstream out(context_.current_attachment_path, std::ios::binary | std::ios::app);
-            if (!out.is_open()) {
-                LOG_SESSION_ERROR("Failed to open attachment file for writing: {}", context_.current_attachment_path);
-                return;
-            }
-
-            out.write(context_.attachment_buffer.get(), static_cast<std::streamsize>(context_.attachment_buffer_used));
-            if (!out.good()) {
-                LOG_SESSION_ERROR("Failed to write data to attachment file: {}", context_.current_attachment_path);
-                out.close();
-                return;
-            }
-
-            out.close();
-        }
-
-        context_.current_attachment_size += context_.attachment_buffer_used;
-        context_.attachment_buffer_used = 0;
-        LOG_SESSION_DEBUG("Flushed {} bytes to attachment file", context_.current_attachment_size);
-    } catch (const std::exception& e) {
-        LOG_SESSION_ERROR("Exception during flush attachment buffer: {}", e.what());
-    }
-}
-
-template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::async_flush_attachment_buffer_to_disk() {
-    if (context_.attachment_buffer_used == 0 || context_.current_attachment_path.empty()) {
-        return;
-    }
-
-    std::string buffer_data(context_.attachment_buffer.get(), context_.attachment_buffer_used);
-    std::string attachment_path = context_.current_attachment_path;
-    context_.attachment_buffer_used = 0;
-
-    auto future = this->m_server->m_workerThreadPool->submit([this, attachment_path, buffer_data]() -> bool {
-        try {
-            if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
-                std::string error;
-                if (!this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(attachment_path,
-                                                                      buffer_data.data(),
-                                                                      buffer_data.size(),
-                                                                      error)) {
-                    LOG_SESSION_ERROR("Failed async attachment write via storage provider: {}, error={}",
-                                      attachment_path,
-                                      error);
-                    return false;
-                }
-            } else {
-                std::ofstream out(attachment_path, std::ios::binary | std::ios::app);
-                if (!out.is_open()) {
-                    LOG_SESSION_ERROR("Failed to open attachment file for async write: {}", attachment_path);
-                    return false;
-                }
-
-                out.write(buffer_data.data(), static_cast<std::streamsize>(buffer_data.size()));
-                if (!out.good()) {
-                    LOG_SESSION_ERROR("Failed to write data to attachment file: {}", attachment_path);
-                    out.close();
-                    return false;
-                }
-
-                out.close();
-            }
-            LOG_SESSION_DEBUG("Async write {} bytes to attachment file: {}", buffer_data.size(), attachment_path);
-            return true;
-        } catch (const std::exception& e) {
-            LOG_SESSION_ERROR("Exception during async attachment write: {}", e.what());
-            return false;
-        }
-    });
-
-    async_write_futures_.push_back(std::move(future));
-    LOG_SESSION_INFO("Submitted async attachment write task, pending tasks: {}", async_write_futures_.size());
-}
-
-template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::append_to_attachment_buffer(const char* data, size_t size) {
-    if (context_.current_attachment_path.empty() && this->get_mail() && context_.current_part_is_attachment) {
-        if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
-            context_.current_attachment_path = this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->build_attachment_key(
-                this->get_mail()->id,
-                context_.current_attachment_filename);
-        } else {
-            auto cfg = std::atomic_load(&this->m_server->m_config);
-            std::string attachment_path = cfg->attachment_storage_path;
-            if (!attachment_path.empty() && attachment_path.back() != '/' && attachment_path.back() != '\\') {
-                attachment_path.push_back('/');
-            }
-            attachment_path += std::to_string(this->get_mail()->id) + "_" + context_.current_attachment_filename;
-            context_.current_attachment_path = attachment_path;
-        }
-    }
-
-    if (!context_.attachment_buffer) {
-        context_.attachment_buffer_size = INITIAL_BUFFER_SIZE;
-        context_.attachment_buffer = std::make_unique<char[]>(INITIAL_BUFFER_SIZE);
-        context_.attachment_buffer_used = 0;
-        context_.attachment_buffer_expand_count = 0;
-    }
-
-    if (context_.attachment_buffer_used + size > context_.attachment_buffer_size) {
-        if (context_.attachment_buffer_expand_count >= MAX_BUFFER_EXPAND_COUNT) {
-            async_flush_attachment_buffer_to_disk();
-        } else {
-            expand_attachment_buffer();
-        }
-
-        if (size > context_.attachment_buffer_size) {
-            try {
-                if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
-                    std::string error;
-                    if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(context_.current_attachment_path,
-                                                                          data,
-                                                                          size,
-                                                                          error)) {
-                        context_.current_attachment_size += size;
-                    } else {
-                        LOG_SESSION_ERROR("Failed direct attachment write via storage provider: {}, error={}",
-                                          context_.current_attachment_path,
-                                          error);
-                    }
-                } else {
-                    std::ofstream out(context_.current_attachment_path, std::ios::binary | std::ios::app);
-                    if (out.is_open()) {
-                        out.write(data, static_cast<std::streamsize>(size));
-                        context_.current_attachment_size += size;
-                        out.close();
-                    }
-                }
-            } catch (const std::exception& e) {
-                LOG_SESSION_ERROR("Exception writing large attachment data: {}", e.what());
-            }
-            return;
-        }
-    }
-
-    std::memcpy(context_.attachment_buffer.get() + context_.attachment_buffer_used, data, size);
-    context_.attachment_buffer_used += size;
 }
 
 template <typename ConnectionType>

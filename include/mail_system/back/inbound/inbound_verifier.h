@@ -62,6 +62,17 @@ public:
                     VerificationResult& result,
                     const SpfResult* precomputed_spf = nullptr);
 
+    // 同 verify_all，但 DKIM 正文从 body 文件流式读取（body_path 为含 header 的完整消息文件）
+    // 避免把整封正文读回内存。SPF/DMARC 语义与 verify_all 完全一致。
+    void verify_all_from_file(const std::string& client_ip,
+                              const std::string& mail_from,
+                              const std::string& helo_domain,
+                              const std::string& raw_headers,
+                              const std::string& body_path,
+                              const ServerConfig& config,
+                              VerificationResult& result,
+                              const SpfResult* precomputed_spf = nullptr);
+
     // 构建 Authentication-Results 头（RFC 8601 格式）
     static std::string build_auth_results_header(
         const std::string& authserv_id,
@@ -85,9 +96,13 @@ private:
                        const std::string& helo_domain,
                        int depth = 0);
 
-    // DKIM 验证
+    // DKIM 验证（正文在内存字符串中）
     DkimResult check_dkim(const std::string& raw_headers,
                           const std::string& raw_body);
+
+    // DKIM 验证（正文从 body 文件流式读取）
+    DkimResult check_dkim_from_file(const std::string& raw_headers,
+                                    const std::string& body_path);
 
     // DMARC 验证
     DmarcResult check_dmarc(const std::string& from_domain,
@@ -126,6 +141,16 @@ private:
                                const std::string& raw_headers,
                                const std::string& raw_body,
                                std::string& error_out);
+    bool verify_dkim_signature_from_file(const DkimSignature& sig,
+                                         const std::string& raw_headers,
+                                         const std::string& body_path,
+                                         std::string& error_out);
+
+    // 给定已计算好的 body hash（base64），完成 DNS 拉取 + header canonicalization + RSA 验签
+    bool verify_dkim_signature_impl(const DkimSignature& sig,
+                                    const std::string& raw_headers,
+                                    const std::string& computed_bh,
+                                    std::string& error_out);
 
     // 对齐检查
     static bool is_aligned(const std::string& auth_domain,

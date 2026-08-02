@@ -41,8 +41,6 @@ void handle_multipart_line(SmtpsContext& ctx, const std::string& line);
 
 void process_message_data(SmtpsContext& ctx, const std::string& data);
 
-void finalize_part(SmtpsContext& ctx, const std::string& attachment_storage_path);
-
 void cleanup_streamed_attachments(SmtpsContext& ctx);
 
 } // namespace algorithm

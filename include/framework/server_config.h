@@ -180,6 +180,7 @@ struct ServerConfig : public pr::ServerConfig {
 
     InboundAckMode inbound_ack_mode;
     uint32_t inbound_persist_wait_timeout_ms;
+    size_t inbound_mime_parse_limit_bytes;  // MIME eager 解析阈值：超过则跳过，交给 IMAP lazy 解析
     size_t persist_max_inflight_mails;
     size_t persist_min_available_memory_mb;
     size_t persist_min_db_available_connections;
@@ -237,6 +238,7 @@ struct ServerConfig : public pr::ServerConfig {
         , outbound_poll_backoff_shift_cap(6)
         , inbound_ack_mode(InboundAckMode::AFTER_PERSIST)
         , inbound_persist_wait_timeout_ms(5000)
+        , inbound_mime_parse_limit_bytes(1024 * 1024)
         , persist_max_inflight_mails(2048)
         , persist_min_available_memory_mb(256)
         , persist_min_db_available_connections(1)
@@ -354,6 +356,7 @@ struct ServerConfig : public pr::ServerConfig {
         inbound_ack_mode = inbound_ack_mode_from_string(
             j.value("inbound_ack_mode", std::string(inbound_ack_mode_to_string(inbound_ack_mode))));
         inbound_persist_wait_timeout_ms = j.value("inbound_persist_wait_timeout_ms", inbound_persist_wait_timeout_ms);
+        inbound_mime_parse_limit_bytes = j.value("inbound_mime_parse_limit_bytes", inbound_mime_parse_limit_bytes);
         persist_max_inflight_mails      = j.value("persist_max_inflight_mails", persist_max_inflight_mails);
         persist_min_available_memory_mb = j.value("persist_min_available_memory_mb", persist_min_available_memory_mb);
         persist_min_db_available_connections = j.value("persist_min_db_available_connections", persist_min_db_available_connections);

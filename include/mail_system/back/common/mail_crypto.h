@@ -174,6 +174,86 @@ inline std::string sha256_base64(const std::string& data) {
     return base64_encode(digest, SHA256_DIGEST_LENGTH);
 }
 
+// 逐行流式计算 DKIM body canonicalization + SHA256，内存 O(行长)。
+// 输出与 normalize_body_simple/relaxed + sha256_base64 严格等价。
+//
+// 输入是完整消息流（含 header）：自动跳过到首个空行分隔符，之后视为 body。
+// trailing 空行剥离用"待发射的非空行 + 空行计数"实现：
+//   - 空行先记数不发射（可能是 trailing）
+//   - 下一个非空行到来时，才把上一 pending 行和其间空行一起发射（确认是中间行）
+// canon: "simple" 或 "relaxed"
+inline bool dkim_body_hash_stream(std::istream& in, const std::string& canon, std::string& out_base64) {
+    SHA256_CTX ctx;
+    SHA256_Init(&ctx);
+
+    auto update = [&](const std::string& s) {
+        SHA256_Update(&ctx, s.data(), s.size());
+    };
+
+    const bool is_relaxed = (canon == "relaxed");
+    std::string pending;      // 最近一条非空行（canonical 后，不含 CRLF）
+    bool have_pending = false;
+    int pending_empties = 0;  // pending 行之后的空行数（可能 trailing）
+    bool in_body = false;
+
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        if (!in_body) {
+            if (line.empty()) in_body = true;  // header/body 分隔符
+            continue;
+        }
+
+        if (line.empty()) {
+            pending_empties++;
+            continue;
+        }
+
+        // canonical 当前行
+        std::string cur;
+        if (is_relaxed) {
+            cur.reserve(line.size());
+            bool in_sp = false;
+            for (char ch : line) {
+                if (ch == ' ' || ch == '\t') {
+                    in_sp = true;
+                } else {
+                    if (in_sp) { cur += ' '; in_sp = false; }
+                    cur += ch;
+                }
+            }
+        } else {
+            cur = line;
+        }
+
+        // 上一 pending 行已确定不是 trailing，发射它与其间的空行
+        if (have_pending) {
+            update(pending);
+            update("\r\n");
+            for (int i = 0; i < pending_empties; ++i) update("\r\n");
+        } else {
+            for (int i = 0; i < pending_empties; ++i) update("\r\n");
+        }
+        pending = std::move(cur);
+        have_pending = true;
+        pending_empties = 0;
+    }
+
+    if (have_pending) {
+        update(pending);
+        update("\r\n");
+    } else if (!is_relaxed) {
+        // simple：空 body 的 canonical 形式为单个 CRLF
+        update("\r\n");
+    }
+
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256_Final(digest, &ctx);
+    out_base64 = base64_encode(digest, SHA256_DIGEST_LENGTH);
+    return true;
+}
+
 } // namespace outbound
 } // namespace mail_system
 

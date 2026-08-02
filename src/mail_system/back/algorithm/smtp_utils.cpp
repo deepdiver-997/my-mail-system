@@ -216,7 +216,7 @@ void handle_multipart_line(SmtpsContext& ctx, const std::string& line) {
 
     if (line_lower == boundary_marker || line_lower == boundary_end) {
         LOG_SESSION_DEBUG("Boundary detected: [{}]", line_lower);
-        // finalize_part will be called by caller
+        // 附件元数据的收尾在 DATA_END（SmtpsSession::finalize_attachment_from_context）完成
         if (line_lower == boundary_end) {
             LOG_SESSION_DEBUG("Multipart end detected");
             ctx.in_part_header = false;
@@ -245,9 +245,8 @@ void handle_multipart_line(SmtpsContext& ctx, const std::string& line) {
     }
 
     if (ctx.current_part_is_attachment) {
-        // 附件内容行处理，写入附件缓冲区
-        // 由 SmtpsSession 处理缓冲区写入
-        LOG_SESSION_DEBUG("Attachment body line (will be written to buffer): [{}]", line.substr(0, 60));
+        // 附件字节已随整封邮件落盘到 body 文件，这里只跳过，不进 text_body_buffer
+        LOG_SESSION_DEBUG("Attachment body line skipped (stored in body file): [{}]", line.substr(0, 60));
         return;
     }
 
@@ -309,35 +308,6 @@ void process_message_data(SmtpsContext& ctx, const std::string& data) {
             }
         }
     }
-}
-
-void finalize_part(SmtpsContext& ctx, const std::string& attachment_storage_path) {
-    // 如果当前有待处理的附件数据（通过缓冲区），需要刷新到文件
-    if (ctx.current_part_is_attachment && !ctx.current_attachment_filename.empty()) {
-        LOG_SESSION_DEBUG("Finalizing attachment: filename=[{}], filepath=[{}], size={} bytes",
-                        ctx.current_attachment_filename, ctx.current_attachment_path,
-                        ctx.current_attachment_size);
-        
-        // 创建 attachment 对象
-        attachment att;
-        att.filename = ctx.current_attachment_filename;
-        att.filepath = ctx.current_attachment_path;
-        att.mime_type = ctx.current_part_mime.empty() ? "application/octet-stream" : ctx.current_part_mime;
-        att.file_size = ctx.current_attachment_size;
-        att.upload_time = std::time(nullptr);
-        
-        ctx.streamed_attachments.push_back(std::move(att));
-        LOG_SESSION_DEBUG("Attachment added to streamed_attachments, total count={}", ctx.streamed_attachments.size());
-    }
-    
-    ctx.current_attachment_filename.clear();
-    ctx.current_attachment_path.clear();
-    ctx.current_attachment_size = 0;
-    ctx.current_part_headers.clear();
-    ctx.current_part_mime.clear();
-    ctx.current_part_encoding.clear();
-    ctx.current_part_is_attachment = false;
-    ctx.base64_remainder.clear();
 }
 
 void cleanup_streamed_attachments(SmtpsContext& ctx) {

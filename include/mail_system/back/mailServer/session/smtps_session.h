@@ -70,7 +70,6 @@ public:
     void create_mail_on_data_command();
     persist_storage::SubmitOwnedMailResult submit_mail_to_queue();
     bool check_mail_persist_status();
-    void transfer_mail_ownership_to_outbound();
     void flush_body_and_wait();
     void reset_mail_state();
     void discard_current_mail();
@@ -80,7 +79,6 @@ public:
     void clear_pending_mail_submission();
 
     void process_message_data(const std::string& data);
-    void handle_multipart_line_and_write_attachment(const std::string& line);
     void finalize_attachment_from_context();
     void parse_smtp_command(const std::string& data);
 
@@ -108,22 +106,6 @@ private:
     // 清理邮件相关的所有文件（邮件体和附件）
     // 在邮件持久化失败或需要删除时调用
     void cleanup_mail_files(mail* mail_ptr);
-
-    // 扩展附件缓冲区，当附件数据量大时调用
-    // 扩展逻辑与邮件体缓冲区类似
-    void expand_attachment_buffer();
-
-    // 将附件缓冲区的内容同步写入磁盘
-    // 在附件接收完成时调用
-    void flush_attachment_buffer_to_disk();
-
-    // 异步将附件缓冲区的内容写入磁盘
-    // 提交到线程池执行，避免阻塞网络IO线程
-    void async_flush_attachment_buffer_to_disk();
-
-    // 将数据追加到附件缓冲区
-    // 当缓冲区空间不足时会触发扩容或刷盘
-    void append_to_attachment_buffer(const char* data, size_t size);
 
     void wait_for_async_writes();
 

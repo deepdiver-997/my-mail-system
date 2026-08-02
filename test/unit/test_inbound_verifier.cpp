@@ -626,6 +626,51 @@ static void test_dkim_qq_fixture() {
 }
 
 // ================================================================
+// 流式 DKIM body hash 等价性测试
+// 验证 dkim_body_hash_stream 与 normalize_body_* + sha256_base64 输出一致
+// ================================================================
+
+static void test_streaming_dkim_body_hash() {
+    std::cout << "\n=== streaming DKIM body hash ===" << std::endl;
+    using namespace mail_system::outbound;
+
+    const std::string header = "From: a@b.com\r\nTo: c@d.com\r\n\r\n";
+    const std::vector<std::string> bodies = {
+        "",                                    // 空 body
+        "\r\n",                                // 只有空行
+        "hello",                               // 无结尾换行
+        "hello\r\n",                           // 单行带换行
+        "hello\r\nworld\r\n",                  // 多行
+        "hello\r\n\r\n\r\n",                   // 尾部空行
+        "hello\r\n\r\nworld\r\n\r\n",          // 中间空行
+        "a b\tc  \r\n d \t\r\n",               // 空白折叠（relaxed）
+        "This is a multi-part message in MIME format.\r\n\r\n"
+        "------=_B\r\nContent-Type: text/plain\r\n\r\nUVENCg==\r\n"
+        "------=_B--",                         // 真实 MIME 形态
+    };
+
+    for (const std::string& body : bodies) {
+        for (const char* mode : {"simple", "relaxed"}) {
+            std::string expected = (std::string(mode) == "relaxed")
+                ? sha256_base64(normalize_body_relaxed(body))
+                : sha256_base64(normalize_body_simple(body));
+
+            std::string full_msg = header + body;
+            std::istringstream ss(full_msg);
+            std::string got;
+            bool ok = dkim_body_hash_stream(ss, mode, got);
+
+            std::string tag = std::string("streaming[") + mode + "] " +
+                              (body.empty() ? "<empty>" : body.substr(0, 20) + (body.size() > 20 ? "..." : ""));
+            check(tag.c_str(), ok && got == expected);
+            if (!ok || got != expected) {
+                std::cerr << "      expected=" << expected << "\n      got=" << got << std::endl;
+            }
+        }
+    }
+}
+
+// ================================================================
 // Main
 // ================================================================
 
@@ -643,6 +688,9 @@ int main() {
 
     // Phase 4: DKIM QQ fixture
     test_dkim_qq_fixture();
+
+    // Phase 5: 流式 DKIM body hash 等价性
+    test_streaming_dkim_body_hash();
 
     // Report
     std::cout << std::endl;
