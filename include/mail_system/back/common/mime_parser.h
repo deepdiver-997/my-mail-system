@@ -85,23 +85,27 @@ inline void parse_mime_tree(const std::string& raw, MimePart& root, size_t pos =
                     }
                 }
                 // boundary — 从原始 hdrs 提取（保留大小写）
+                // 注意：不带引号时不能 find('"') 向后搜，否则会误匹配后续 header 里的引号
+                // （如 To: "test3"），把 boundary 提取成错误值。
                 {
                     auto orig_hdrs = raw.substr(pos, sep - pos);
-                    auto obp = orig_hdrs.find("boundary=\"");
-                    if (obp == std::string::npos) obp = orig_hdrs.find("boundary=");
+                    auto obp = orig_hdrs.find("boundary=");
                     if (obp != std::string::npos) {
-                        size_t os = orig_hdrs.find('"', obp);
-                        if (os == std::string::npos) os = orig_hdrs.find('=', obp);
-                        if (os != std::string::npos) {
+                        size_t os = obp + 9; // "boundary=" 之后
+                        while (os < orig_hdrs.size() &&
+                               (orig_hdrs[os] == ' ' || orig_hdrs[os] == '\t'))
+                            os++;
+                        if (os < orig_hdrs.size() && orig_hdrs[os] == '"') {
+                            // 带引号：boundary="..."
                             os++;
                             size_t oe = orig_hdrs.find('"', os);
-                            if (oe == std::string::npos) {
-                                oe = orig_hdrs.find_first_of(" \t\r\n", os);
-                                // 不带引号且 boundary 在 header 末尾时，用 header 末尾
-                                if (oe == std::string::npos) oe = orig_hdrs.size();
-                            }
                             if (oe != std::string::npos)
                                 root.boundary = orig_hdrs.substr(os, oe - os);
+                        } else {
+                            // 不带引号：boundary=值，到空白/换行/header 末尾为止
+                            size_t oe = orig_hdrs.find_first_of(" \t\r\n", os);
+                            if (oe == std::string::npos) oe = orig_hdrs.size();
+                            root.boundary = orig_hdrs.substr(os, oe - os);
                         }
                     }
                 }

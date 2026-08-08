@@ -1498,17 +1498,18 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
     std::string store_cmd = rest.substr(0, space2);
     std::string flags_part = rest.substr(space2 + 1);
 
-    // Check for SILENT
-    if (store_cmd.find("SILENT") != std::string::npos) {
+    // Check for SILENT（大小写不敏感）
+    std::string cmd_upper = store_cmd;
+    std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
+    if (cmd_upper.find("SILENT") != std::string::npos) {
         silent = true;
-        std::string cmd_upper = store_cmd;
-        std::transform(cmd_upper.begin(), cmd_upper.end(), cmd_upper.begin(), ::toupper);
-        if (cmd_upper.find("FLAGS") != std::string::npos) {
-            store_cmd = "FLAGS";
+        // 注意顺序：先匹配带 +/- 的，再匹配裸 FLAGS，否则 -FLAGS 会丢失负号被当成添加
+        if (cmd_upper.find("-FLAGS") != std::string::npos) {
+            store_cmd = "-FLAGS";
         } else if (cmd_upper.find("+FLAGS") != std::string::npos) {
             store_cmd = "+FLAGS";
-        } else if (cmd_upper.find("-FLAGS") != std::string::npos) {
-            store_cmd = "-FLAGS";
+        } else if (cmd_upper.find("FLAGS") != std::string::npos) {
+            store_cmd = "FLAGS";
         }
     }
 
@@ -1520,9 +1521,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
         }
     }
 
-    bool flag_seen = flags_part.find("\\Seen") != std::string::npos;
-    bool flag_flagged = flags_part.find("\\Flagged") != std::string::npos;
-    bool flag_deleted = flags_part.find("\\Deleted") != std::string::npos;
+    // RFC 3501 属性名大小写不敏感：客户端可能发 \SEEN / \Seen / \seen
+    // （之前只匹配 \Seen，网易大师发 \SEEN 时 flag_seen=false → 已读从不落库）
+    std::string flags_upper = flags_part;
+    std::transform(flags_upper.begin(), flags_upper.end(), flags_upper.begin(), ::toupper);
+    bool flag_seen = flags_upper.find("\\SEEN") != std::string::npos;
+    bool flag_flagged = flags_upper.find("\\FLAGGED") != std::string::npos;
+    bool flag_deleted = flags_upper.find("\\DELETED") != std::string::npos;
     bool add = store_cmd.find('+') != std::string::npos || (store_cmd.find("FLAGS") != std::string::npos && store_cmd[0] != '-');
     bool remove = store_cmd.find('-') != std::string::npos;
 

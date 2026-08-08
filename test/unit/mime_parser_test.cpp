@@ -252,6 +252,31 @@ static void test_quoted_charset() {
     expect_str(root.charset, "gb2312", "quoted charset");
 }
 
+// 10. 不带引号的 boundary + 后面有带引号的 header（如 To: "test3"）
+//     —— 之前 find('"') 向后搜会误匹配 To 的引号，把 boundary 提取成 "test3"
+static void test_unquoted_boundary_with_quoted_to() {
+    const std::string raw =
+        "From: sender@feishu.cn\r\n"
+        "To: \"test3\" <test3@scut.email>\r\n"
+        "Subject: test\r\n"
+        "Content-Type: multipart/alternative;\r\n"
+        "\tboundary=77c32bd97011b71999b9c42bd3ffb1141e49e616cb30dd3cf5dd4684ef41\r\n"
+        "\r\n"
+        "--77c32bd97011b71999b9c42bd3ffb1141e49e616cb30dd3cf5dd4684ef41\r\n"
+        "Content-Type: text/plain\r\n"
+        "\r\n"
+        "hello feishu\r\n"
+        "--77c32bd97011b71999b9c42bd3ffb1141e49e616cb30dd3cf5dd4684ef41--\r\n";
+    MimePart root;
+    parse_mime_tree(raw, root);
+    expect_str(root.boundary, "77c32bd97011b71999b9c42bd3ffb1141e49e616cb30dd3cf5dd4684ef41",
+               "unquoted boundary not confused by To: quote");
+    expect_num(root.subs.size(), 1, "sub count");
+    if (root.subs.size() == 1) {
+        expect_str(Fsm::extract_part_content(raw, root.subs[0]), "hello feishu", "BODY[1]");
+    }
+}
+
 // 9. Content-Disposition filename 提取
 static void test_content_disposition_name() {
     const std::string raw =
@@ -277,6 +302,7 @@ int main() {
     test_dkim_h_contains_content_type();
     test_quoted_charset();
     test_content_disposition_name();
+    test_unquoted_boundary_with_quoted_to();
 
     std::printf("\n================================\n  Passed: %d  Failed: %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
