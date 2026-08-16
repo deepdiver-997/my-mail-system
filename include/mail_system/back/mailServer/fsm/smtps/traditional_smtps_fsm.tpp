@@ -259,7 +259,13 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_greeting_ehlo(
     if (auto* ctx = static_cast<SmtpsContext*>(session->get_context()))
         ctx->ehlo_domain = session->get_last_command_args();
 
-    std::string response = "250-" + session->get_last_command_args() + " Hello\r\n"
+    // RFC 5321: EHLO 响应首行必须是服务器自身的域名（非回显客户端 EHLO 参数）。
+    // Gmail 会校验该主机名：若服务器自称是 "*.google.com"（回显客户端）会触发安全中止。
+    auto cfg = std::atomic_load(&session->get_server()->m_config);
+    std::string helo = cfg->helo_hostname.empty() ? cfg->system_domain : cfg->helo_hostname;
+    if (helo.empty()) helo = session->get_last_command_args();
+
+    std::string response = "250-" + helo + " Hello\r\n"
         "250-SIZE 10240000\r\n"
         "250-8BITMIME\r\n";
     if constexpr (!std::is_same_v<ConnectionType, SslConnection>)
@@ -288,8 +294,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_starttls(
             if (ec) { LOG_SMTP_DETAIL_ERROR("Error sending STARTTLS: {}", ec.message()); return; }
             self->set_current_state(static_cast<int>(SmtpsState::INIT));
             auto server = static_cast<SmtpsServer*>(self->get_server());
+            auto trace = self->take_trace_buffer();   // 交接给 TLS 会话，延续对话记录
             auto tcp_sock = self->release_connection()->release_socket();
-            server->handoff_starttls_socket(std::move(tcp_sock));
+            server->handoff_starttls_socket(std::move(tcp_sock), std::move(trace));
         });
 }
 
@@ -564,22 +571,87 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
 {
     auto addr_start = session->get_last_command_args().find('<');
     auto addr_end   = session->get_last_command_args().find('>', addr_start != std::string::npos ? addr_start + 1 : 0);
-    if (addr_start != std::string::npos && addr_end != std::string::npos) {
-        static_cast<SmtpsContext*>(session->get_context())->recipient_addresses.push_back(
-            session->get_last_command_args().substr(addr_start + 1, addr_end - addr_start - 1));
+    if (addr_start == std::string::npos || addr_end == std::string::npos) {
+        session->do_async_write("501 Syntax error in parameters or arguments\r\n",
+            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                if (ec) return;
+                s->do_async_read();
+            });
+        return;
+    }
+
+    std::string recipient = algorithm::trim(
+        session->get_last_command_args().substr(addr_start + 1, addr_end - addr_start - 1));
+    if (recipient.empty()) {
+        session->do_async_write("501 Syntax error in parameters or arguments\r\n",
+            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                if (ec) return;
+                s->do_async_read();
+            });
+        return;
+    }
+
+    auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+
+    // 认证客户端（465/587 提交）：允许任意收件人（含外部域名，按提交模式转发）
+    if (ctx->is_authenticated) {
+        ctx->recipient_addresses.push_back(recipient);
         session->do_async_write("250 Ok\r\n",
             [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
                 s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                 s->do_async_read();
             });
-    } else {
+        return;
+    }
+
+    // 未认证（25 端口 MTA 入站）：禁止中继，只收本地已注册用户
+    auto cfg = std::atomic_load(&session->get_server()->m_config);
+    std::string local = recipient;
+    std::string domain;
+    auto at = recipient.rfind('@');
+    if (at != std::string::npos) {
+        local = recipient.substr(0, at);
+        domain = recipient.substr(at + 1);
+    }
+    local = algorithm::trim(local);
+
+    // 外部域名（非本系统域名）→ 拒绝中继
+    if (algorithm::to_lower(domain) != algorithm::to_lower(cfg->system_domain)) {
+        LOG_SMTP_INFO("RCPT relay denied: {} (domain {})", recipient, domain);
+        session->do_async_write("550 5.7.1 Relay access denied\r\n",
+            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                if (ec) return;
+                s->do_async_read();
+            });
+        return;
+    }
+
+    // 本地域名但无本地部分 → 语法错误
+    if (local.empty()) {
         session->do_async_write("501 Syntax error in parameters or arguments\r\n",
             [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                 if (ec) return;
                 s->do_async_read();
             });
+        return;
     }
+
+    // 本地域名 → 校验用户存在性（DB 或缓存）
+    this->user_exists_async(session.get(), recipient,
+        [session, recipient](bool exists) {
+            auto* c = static_cast<SmtpsContext*>(session->get_context());
+            const char* resp = exists ? "250 Ok\r\n" : "550 5.1.1 User unknown\r\n";
+            if (!exists) LOG_SMTP_WARN("RCPT user unknown: {}", recipient);
+            if (exists) c->recipient_addresses.push_back(recipient);
+            session->do_async_write(resp,
+                [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                    if (ec) return;
+                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
+                    s->drain_buffered_commands();
+                    if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
+                });
+        });
 }
 
 template <typename ConnectionType>
@@ -774,6 +846,7 @@ template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_quit_quit(
     std::shared_ptr<SessionBase<ConnectionType>> session)
 {
+    session->set_trace_clean_close();   // 正常 QUIT → 连接追踪丢弃
     session->do_async_write("221 Bye\r\n",
         [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) LOG_SMTP_DETAIL_ERROR("QUIT reply error: {}", ec.message());
@@ -912,6 +985,47 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
             } else {
                 cb(false, 0);
             }
+        });
+}
+
+
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
+    SessionBase<ConnectionType>* session, const std::string& mail_address,
+    std::function<void(bool exists)> cb)
+{
+    if (!session) { cb(false); return; }
+
+    int shard = 0;
+    if (m_shardRouter) { int r = m_shardRouter->route(mail_address); if (r >= 0) shard = r; }
+
+    // 快路径：缓存命中（含负缓存 status=0）直接回调
+    AuthCacheEntry ce;
+    if (m_recipientCache->lookup(mail_address, ce)) { cb(ce.status == 1); return; }
+
+    // 缓存未命中，查 DB
+    std::shared_ptr<DBPool> pool = m_shardRouter ? m_shardRouter->get_db_pool(static_cast<size_t>(shard)) : nullptr;
+    if (!pool) { LOG_SMTP_WARN("RCPT check no DB pool for shard {}", shard); cb(false); return; }
+    auto conn_raw = pool->acquire_connection();
+    if (!conn_raw.is_valid()) { LOG_SMTP_WARN("RCPT check failed to get DB connection"); cb(false); return; }
+    auto conn = std::make_shared<ScopedConnection>(std::move(conn_raw));
+
+    // 暂停流水线：DB 查询期间不消费新命令，回调中 drain_buffered_commands()
+    session->set_paused(true);
+
+    std::string sql = db::sql::build_recipient_exists_query();
+    (*conn)->async_query(sql, {mail_address},
+        [this, session, mail_address, conn,
+         cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
+            if (!result || result->get_row_count() == 0) {
+                // 负缓存：不存在
+                m_recipientCache->store(mail_address, {"", 0, 0, 0});
+                cb(false);
+                return;
+            }
+            int status = std::stoi(result->get_value(0, "status"));
+            m_recipientCache->store(mail_address, {"", status, 0, 0});
+            cb(status == 1);
         });
 }
 

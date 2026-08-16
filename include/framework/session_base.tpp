@@ -27,6 +27,9 @@ void SessionBase<ConnectionType>::close() {
     if (closed_) return;
     closed_ = true;
 
+    // 连接追踪：正常关闭(QUIT/LOGOUT)丢弃，异常结束落盘
+    trace_maybe_save();
+
     auto elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - session_start_).count();
     if (m_server) {
@@ -139,7 +142,9 @@ void SessionBase<ConnectionType>::do_async_read() {
 
             // 流水线消费：paused 时停止消费，等待 DB 回调排空
             while (self->has_buffered_input() && !self->is_paused()) {
-                self->handle_read(self->extract_one_line());
+                std::string line = self->extract_one_line();
+                self->trace_append_inbound(line);   // 连接追踪：在"移除点"记录收到的行
+                self->handle_read(line);
                 self->process_read();
             }
         });
@@ -150,6 +155,8 @@ void SessionBase<ConnectionType>::do_async_write(
     const std::string& data, WriteCallback callback)
 {
     if (closed_ || !connection_) return;
+
+    trace_append_outbound(data);   // 连接追踪：记录发出的响应
 
     // 还有流水线命令 → 累积响应，同步调用回调（回调中 do_async_read
     // 会取下一行 + process_read，链式消费直到缓冲区空）
@@ -191,7 +198,9 @@ template <typename ConnectionType>
 void SessionBase<ConnectionType>::drain_buffered_commands() {
     paused_ = false;
     while (has_buffered_input() && !paused_) {
-        handle_read(extract_one_line());
+        std::string line = extract_one_line();
+        trace_append_inbound(line);   // 连接追踪：同上，在移除点记录
+        handle_read(line);
         process_read();
     }
     // 注意: drain 只负责消费已缓冲的命令，不启动新的异步读。
@@ -277,6 +286,73 @@ std::string SessionBase<ConnectionType>::error_message(SessionError e) const {
         case SessionError::Internal:       return "Internal server error";
     }
     return "Unknown error";
+}
+
+// ================================================================
+// 连接追踪（诊断）：正常关闭丢弃，异常结束落盘
+// ================================================================
+template <typename ConnectionType>
+void SessionBase<ConnectionType>::trace_maybe_save() {
+    if (m_trace_buf.empty()) return;
+    if (m_trace_clean_close) { m_trace_buf.clear(); return; }  // 正常关闭 → 丢弃
+
+    // 异常结束 → 落盘到 <log_dir>/traces/
+    try {
+        std::filesystem::path dir;
+        if (m_server) {
+            auto cfg = std::atomic_load(&m_server->m_config);
+            if (cfg && !cfg->log_file.empty())
+                dir = std::filesystem::path(cfg->log_file).parent_path();
+        }
+        if (dir.empty()) dir = std::filesystem::path("/tmp/logs");
+        dir /= "traces";
+        std::filesystem::create_directories(dir);
+
+        // 诊断期可能大量异常连接（如垃圾扫描器），限制文件数防磁盘膨胀：超 300 删最旧
+        constexpr size_t kMaxTraceFiles = 300;
+        try {
+            std::vector<std::filesystem::path> files;
+            for (auto& e : std::filesystem::directory_iterator(dir)) {
+                if (e.is_regular_file() && e.path().extension() == ".txt")
+                    files.push_back(e.path());
+            }
+            if (files.size() >= kMaxTraceFiles) {
+                std::sort(files.begin(), files.end(), [](const auto& a, const auto& b) {
+                    return std::filesystem::last_write_time(a) < std::filesystem::last_write_time(b);
+                });
+                for (size_t i = 0; i + kMaxTraceFiles <= files.size(); ++i)
+                    std::filesystem::remove(files[i]);
+            }
+        } catch (...) {}
+
+        auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm tm{};
+        gmtime_r(&t, &tm);
+        char ts[32];
+        std::snprintf(ts, sizeof(ts), "%04d%02d%02d-%02d%02d%02d",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                      tm.tm_hour, tm.tm_min, tm.tm_sec);
+
+        static std::atomic<uint64_t> seq{0};
+        uint16_t lport = 0;
+        if (connection_) {
+            try { lport = connection_->get_local_port(); } catch (...) {}
+        }
+        std::string fname = "trace-" + std::string(ts) + "-" + get_client_ip()
+                          + "-" + std::to_string(lport) + "-"
+                          + std::to_string(seq.fetch_add(1)) + ".txt";
+        std::ofstream of(dir / fname, std::ios::trunc);
+        if (of.is_open()) {
+            of << "=== abnormal connection trace ===\n"
+               << "client_ip: " << get_client_ip() << "\n"
+               << "local_port: " << lport << "\n"
+               << "auth: " << (session_authenticated_ ? "yes" : "no") << "\n"
+               << "error: " << error_message(last_error_);
+            if (!last_error_detail_.empty()) of << " (" << last_error_detail_ << ")";
+            of << "\n--- conversation ---\n" << m_trace_buf << "\n";
+        }
+    } catch (...) {}
+    m_trace_buf.clear();
 }
 
 } // namespace mail_system

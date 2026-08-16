@@ -171,6 +171,7 @@ struct ServerConfig : public pr::ServerConfig {
 
     std::string system_name;
     std::string system_domain;
+    std::string helo_hostname;  // 入站 EHLO 响应首行主机名（RFC 5321：必须为服务器自身域名，非回显客户端）
     std::vector<uint16_t> outbound_ports;
     size_t outbound_max_attempts;
     uint32_t outbound_poll_busy_sleep_ms;
@@ -230,6 +231,7 @@ struct ServerConfig : public pr::ServerConfig {
         , s3_use_path_style(true)
         , system_name("mail-system")
         , system_domain("example.com")
+        , helo_hostname("")
         , outbound_ports({25, 587, 465})
         , outbound_max_attempts(8)
         , outbound_poll_busy_sleep_ms(20)
@@ -339,6 +341,7 @@ struct ServerConfig : public pr::ServerConfig {
 
         system_name           = j.value("system_name", system_name);
         system_domain         = j.value("system_domain", system_domain);
+        helo_hostname         = j.value("helo_hostname", helo_hostname);
         outbound_helo_domain  = j.value("outbound_helo_domain", outbound_helo_domain);
         outbound_mail_from_domain = j.value("outbound_mail_from_domain", outbound_mail_from_domain);
         outbound_rewrite_header_from = j.value("outbound_rewrite_header_from", outbound_rewrite_header_from);

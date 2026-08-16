@@ -49,6 +49,8 @@ protected:
 
 public:
     std::shared_ptr<AuthCache> m_authCache = std::make_shared<AuthCache>();
+    // RCPT TO 校验缓存（独立于认证缓存，缓存用户存在性 status：1=存在 0=不存在）
+    std::shared_ptr<AuthCache> m_recipientCache = std::make_shared<AuthCache>();
 
     TraditionalSmtpsFsm(
         std::shared_ptr<ThreadPoolBase> io_thread_pool,
@@ -86,6 +88,10 @@ public:
     using AuthCallback = std::function<void(bool ok, int shard)>;
     void auth_user_async(SessionBase<ConnectionType>* session, const std::string& mail_address,
                          const std::string& password, AuthCallback cb);
+
+    // RCPT TO 校验：异步检查本地收件人是否存在（回调 exists=true 表示存在且 status=1）
+    void user_exists_async(SessionBase<ConnectionType>* session, const std::string& mail_address,
+                           std::function<void(bool exists)> cb);
 
     // 保存邮件元数据到数据库（异步），返回future用于跟踪操作结果
     std::future<bool> save_mail_metadata_async(mail* data, const std::string& file_path_prefix);

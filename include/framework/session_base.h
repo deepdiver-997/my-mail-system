@@ -6,10 +6,17 @@
 #include "framework/server_base.h"
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mail_system {
@@ -92,7 +99,14 @@ public:
                 const boost::system::error_code& error) mutable {
                 if (self->closed_) return;
                 if (error) {
-                    LOG_SESSION_ERROR("Handshake failed: {}", error.message());
+                    // 增强诊断：输出错误码、对端 IP、本地端口、SSL 状态/OpenSSL 错误栈
+                    std::string diag = self->connection_
+                        ? self->connection_->get_handshake_diagnostic() : "";
+                    uint16_t lport = self->connection_
+                        ? self->connection_->get_local_port() : 0;
+                    LOG_SESSION_ERROR("Handshake failed: {} (ec={}) client={} port={}{}",
+                        error.message(), error.value(), self->get_client_ip(), lport,
+                        diag.empty() ? "" : (" " + diag));
                     self->handle_error(error);
                 } else {
                     LOG_SESSION_INFO("Handshake successful.");
@@ -131,6 +145,16 @@ public:
     // 子类可覆写以提供协议特定的错误消息
     virtual std::string error_message(SessionError e) const;
 
+    // ── 5c. 连接追踪（诊断） ──────────────────────────────────
+    // 在读写路径拦截拷贝应用层字节（天然排除 TLS 握手，握手在 SSL 层内部）。
+    // 正常关闭(QUIT/LOGOUT)丢弃缓冲；异常结束在 close() 时落盘到 traces/ 目录。
+    void trace_append_inbound(const std::string& line) { trace_append("C: ", line); }
+    void trace_append_outbound(const std::string& data) { trace_append("S: ", data); }
+    void set_trace_clean_close() { m_trace_clean_close = true; }
+    // STARTTLS 交接：把旧会话已记录的对话交给新会话，保证完整且不误判为异常
+    std::string take_trace_buffer() { return std::exchange(m_trace_buf, std::string()); }
+    void set_trace_buffer(std::string t) { m_trace_buf = std::move(t); }
+
     // ── 6. 纯虚接口（协议子类实现） ─────────────────────────────
     virtual void handle_read(const std::string& data) = 0;
     virtual void process_read() = 0;
@@ -165,6 +189,21 @@ protected:
     ServerBase* m_server = nullptr;
     std::chrono::steady_clock::time_point session_start_{
         std::chrono::steady_clock::now()};
+
+    std::string m_trace_buf;            // 累积的 C:/S: 对话
+    bool m_trace_clean_close = false;   // QUIT/LOGOUT 干净关闭 → 丢弃 trace
+
+    // ── 连接追踪（诊断）内部实现 ──────────────────────────────
+    void trace_append(const std::string& prefix, const std::string& data) {
+        if (data.empty()) return;
+        constexpr size_t kTraceCap = 64 * 1024;   // 每连接对话上限，防内存/磁盘膨胀
+        if (m_trace_buf.size() >= kTraceCap) return;
+        size_t avail = kTraceCap - m_trace_buf.size();
+        if (avail <= prefix.size()) return;
+        m_trace_buf += prefix;
+        m_trace_buf += data.substr(0, avail - prefix.size());
+    }
+    void trace_maybe_save();
 };
 
 } // namespace mail_system

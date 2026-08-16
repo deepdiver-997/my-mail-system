@@ -229,6 +229,13 @@ void test_build_update_last_login() {
     check_contains("update_login_where", sql, "mail_address = ?");
 }
 
+void test_build_recipient_exists_query() {
+    std::string sql = mail_system::db::sql::build_recipient_exists_query();
+    check_contains("rcpt_exists_from", sql, "FROM users");
+    check_contains("rcpt_exists_where", sql, "mail_address = ?");
+    check_contains("rcpt_exists_limit", sql, "LIMIT 1");
+}
+
 // ---- IMAP ----
 
 void test_build_imap_list_mailboxes() {
@@ -343,6 +350,7 @@ int main() {
 
     test_build_auth_user_query();
     test_build_update_last_login();
+    test_build_recipient_exists_query();
 
     test_build_imap_list_mailboxes();
     test_build_imap_get_mailbox_mails();

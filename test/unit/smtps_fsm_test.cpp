@@ -96,6 +96,25 @@ struct FsmTestFixture {
             entry.status = 1;
             fsm->m_authCache->inject(email, entry);
         }
+
+        // 预注入收件人存在性缓存（无 DB 环境，RCPT 校验走缓存路径）
+        auto inject_rcpt = [this](const std::string& email, int status) {
+            AuthCacheEntry entry;
+            entry.password_hash = "";
+            entry.status = status;
+            fsm->m_recipientCache->inject(email, entry);
+        };
+        for (int i = 0; i < 5; ++i)
+            inject_rcpt("user" + std::to_string(i) + "@test.local", 1);
+        // 现有测试用到的收件人
+        inject_rcpt("rcpt@test.local", 1);
+        inject_rcpt("rcpt1@test.local", 1);
+        inject_rcpt("rcpt2@test.local", 1);
+        inject_rcpt("rcpt3@test.local", 1);
+        inject_rcpt("r1@test.local", 1);
+        inject_rcpt("r2@test.local", 1);
+        // 不存在的本地用户（负缓存）
+        inject_rcpt("nobody@test.local", 0);
     }
 
     ~FsmTestFixture() {
@@ -161,7 +180,7 @@ TEST(ehlo_capabilities) {
     fx.start(h);
     auto& w = h.conn->written();
     assert(HAS(w, "220 SMTPS Server"));
-    assert(HAS(w, "250-mail.test.local Hello"));
+    assert(HAS(w, "250-test.local Hello"));   // RFC 5321: EHLO 响应首行=服务器域名
     assert(HAS(w, "250-SIZE"));
     assert(HAS(w, "250-8BITMIME"));
     assert(HAS(w, "STARTTLS"));       // TCP 连接会宣告 STARTTLS
@@ -234,7 +253,7 @@ TEST(full_delivery_pipeline) {
     fx.start(h);
     auto& w = h.conn->written();
     assert(HAS(w, "220 SMTPS Server"));
-    assert(HAS(w, "250-test Hello"));
+    assert(HAS(w, "250-test.local Hello"));  // EHLO 响应首行=服务器域名
     assert(HAS(w, "250 Ok"));       // MAIL FROM + RCPT TO
     assert(HAS(w, "354 Start mail input"));
     assert(HAS(w, "250 "));         // message accepted (queue ID)
@@ -275,8 +294,8 @@ TEST(re_ehlo_in_wait_auth) {
         "EHLO second\r\n");
     fx.start(h);
     auto& w = h.conn->written();
-    assert(HAS(w, "250-first Hello"));
-    assert(HAS(w, "250-second Hello"));
+    assert(HAS(w, "250-test.local Hello"));  // EHLO 后再次 EHLO，首行仍=服务器域名
+    assert(HAS(w, "250-test.local Hello"));
     std::cout << "  [PASS] re_ehlo_in_wait_auth" << std::endl;
 }
 
@@ -310,6 +329,61 @@ TEST(rcpt_to_bad_syntax) {
     auto& w = h.conn->written();
     assert(HAS(w, "501 Syntax error"));
     std::cout << "  [PASS] rcpt_to_bad_syntax" << std::endl;
+}
+
+// ========== RCPT TO 收件人校验（防开放中继 + 防孤儿数据） ==========
+
+TEST(rcpt_relay_denied) {
+    // 未认证 MTA 路径：外部域名收件人 → 拒绝中继
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<spam@attacker.com>\r\n"
+        "RCPT TO:<victim@gmail.com>\r\n");
+    fx.start(h);
+    auto& w = h.conn->written();
+    assert(HAS(w, "550 5.7.1 Relay access denied"));
+    std::cout << "  [PASS] rcpt_relay_denied" << std::endl;
+}
+
+TEST(rcpt_unknown_local_rejected) {
+    // 未认证 MTA 路径：本地不存在用户 → 550 User unknown（负缓存）
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<spam@attacker.com>\r\n"
+        "RCPT TO:<nobody@test.local>\r\n");
+    fx.start(h);
+    auto& w = h.conn->written();
+    assert(HAS(w, "550 5.1.1 User unknown"));
+    std::cout << "  [PASS] rcpt_unknown_local_rejected" << std::endl;
+}
+
+TEST(rcpt_local_known_accepted) {
+    // 未认证 MTA 路径：本地已注册用户 → 250 Ok
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<sender@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n");
+    fx.start(h);
+    auto& w = h.conn->written();
+    assert(HAS(w, "250 Ok"));
+    std::cout << "  [PASS] rcpt_local_known_accepted" << std::endl;
+}
+
+TEST(rcpt_auth_client_any_recipient) {
+    // 认证客户端（465/587 提交）：允许任意收件人（含外部域名）
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH LOGIN\r\n"
+        "dXNlcjBAdGVzdC5sb2NhbA==\r\n"     // base64("user0@test.local")
+        "dGVzdDEyMw==\r\n"                   // base64("test123")
+        "MAIL FROM:<user0@test.local>\r\n"
+        "RCPT TO:<forward@example.com>\r\n",
+        InboundAuthPolicy::ON);
+    fx.start(h);
+    auto& w = h.conn->written();
+    assert(HAS(w, "235 Authentication successful"));
+    assert(HAS(w, "250 Ok"));   // RCPT 接受外部域名
+    std::cout << "  [PASS] rcpt_auth_client_any_recipient" << std::endl;
 }
 
 // ========== AUTH Flow ==========
@@ -625,6 +699,10 @@ int main() {
         test_invalid_command_sequence(fx);
         test_mail_from_bad_syntax(fx);
         test_rcpt_to_bad_syntax(fx);
+        test_rcpt_relay_denied(fx);
+        test_rcpt_unknown_local_rejected(fx);
+        test_rcpt_local_known_accepted(fx);
+        test_rcpt_auth_client_any_recipient(fx);
 
         // ── AUTH Flow ──
         test_auth_required_rejected(fx);

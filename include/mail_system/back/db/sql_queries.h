@@ -152,6 +152,9 @@ std::string build_dedup_by_message_id(const std::string& sender,
 std::string build_auth_user_query();
 std::string build_update_last_login();
 
+// RCPT TO 校验：本地收件人是否存在（未认证 MTA 入站路径）
+std::string build_recipient_exists_query();
+
 // ============================================================
 // IMAP 命令
 // ============================================================

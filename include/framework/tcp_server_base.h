@@ -41,10 +41,11 @@ protected:
 
 public:
     // STARTTLS 升级处理（子类可覆写）
-    virtual void handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket);
+    virtual void handoff_starttls_socket(std::unique_ptr<boost::asio::ip::tcp::socket>&& socket,
+                                         std::string trace = {});
 
     void load_certificates(const std::string& cert_file, const std::string& key_file,
-                           const std::string& dh_file = "");
+                           const std::string& dh_file = "", bool enable_tls1_3 = true);
 
     // 监听器配置
     std::unordered_map<uint16_t, ListenerConfig> m_listener_configs;
@@ -87,7 +88,8 @@ TcpServerBase<TcpSession, SslSession>::TcpServerBase(
         if (l.type == ListenerType::SSL) { has_ssl = true; break; }
 
     if (has_ssl) {
-        load_certificates(config.certFile, config.keyFile, config.dhFile);
+        load_certificates(config.certFile, config.keyFile, config.dhFile,
+                          config.enable_tls1_3);
     }
 
     for (auto& l : config.listeners) {
@@ -251,7 +253,7 @@ void TcpServerBase<TcpSession, SslSession>::do_ssl_accept(
 
 template <typename TcpSession, typename SslSession>
 void TcpServerBase<TcpSession, SslSession>::handoff_starttls_socket(
-    std::unique_ptr<boost::asio::ip::tcp::socket>&& socket)
+    std::unique_ptr<boost::asio::ip::tcp::socket>&& socket, std::string trace)
 {
     if (!socket) return;
     auto ssl_stream = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>>(
@@ -260,13 +262,15 @@ void TcpServerBase<TcpSession, SslSession>::handoff_starttls_socket(
     auto session = make_ssl_session(std::move(conn), ListenerConfig{});
     if (session) {
         increment_connection_count();
+        if (!trace.empty()) session->set_trace_buffer(std::move(trace));  // 延续旧会话的对话记录
         SslSession::start_after_starttls(session);
     }
 }
 
 template <typename TcpSession, typename SslSession>
 void TcpServerBase<TcpSession, SslSession>::load_certificates(
-    const std::string& cert_file, const std::string& key_file, const std::string& dh_file)
+    const std::string& cert_file, const std::string& key_file, const std::string& dh_file,
+    bool enable_tls1_3)
 {
     try {
         if (!std::ifstream(cert_file.c_str()).good())
@@ -275,6 +279,12 @@ void TcpServerBase<TcpSession, SslSession>::load_certificates(
             throw std::runtime_error("Private key file not found: " + key_file);
         m_sslContext.use_certificate_chain_file(cert_file);
         m_sslContext.use_private_key_file(key_file, boost::asio::ssl::context::pem);
+        // Gmail 用 TLS 1.3 ClientHello 且无回退机制：若服务器强制 TLS 1.2，
+        // Gmail 在 STARTTLS 阶段直接 RST（TLS Negotiation failed, error 104）。
+        // 默认启用 TLS 1.3，可通过配置 enable_tls1_3=false 强制 TLS 1.2 回退。
+        if (!enable_tls1_3) {
+            m_sslContext.set_options(boost::asio::ssl::context::no_tlsv1_3);
+        }
         if (!dh_file.empty() && std::ifstream(dh_file.c_str()).good()) {
             m_sslContext.use_tmp_dh_file(dh_file);
         }

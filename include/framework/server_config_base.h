@@ -50,6 +50,10 @@ struct ServerConfig {
     std::string keyFile;
     std::string dhFile;
 
+    // TLS 1.3 开关：默认启用。Gmail 等现代 MTA 用 TLS 1.3 ClientHello 且无回退机制，
+    // 服务器若强制 TLS 1.2 会导致 Gmail 在 STARTTLS 阶段直接 RST（投递失败）。
+    bool enable_tls1_3 = true;
+
     size_t maxMessageSize;
     size_t maxConnections;
 
@@ -133,6 +137,7 @@ struct ServerConfig {
         certFile = resolve_path(base_dir, j.value("certFile", certFile));
         keyFile  = resolve_path(base_dir, j.value("keyFile", keyFile));
         dhFile   = resolve_path(base_dir, j.value("dhFile", dhFile));
+        enable_tls1_3 = j.value("enable_tls1_3", enable_tls1_3);
 
         return true;
     }

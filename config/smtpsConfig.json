@@ -2,6 +2,7 @@
   "address": "0.0.0.0",
   "system_name": "scut-email-smtp",
   "system_domain": "scut.email",
+  "helo_hostname": "mx1.scut.email",
 
   "listeners": [
     { "type": "tcp", "port": 25,  "auth_policy": "off" },
@@ -11,6 +12,7 @@
 
   "certFile": "config/crt/server.crt",
   "keyFile": "config/crt/server.key",
+  "enable_tls1_3": true,
 
   "use_database": true,
   "db_config_file": "db_config.json",
@@ -52,7 +54,7 @@
   "inbound_dkim_mode": "soft",
   "inbound_dmarc_mode": "soft",
 
-  "dnsbl_enabled": true,
+  "dnsbl_enabled": false,
   "intrusion_detection_enabled": true,
   "intrusion_ban_threshold": 5,
 

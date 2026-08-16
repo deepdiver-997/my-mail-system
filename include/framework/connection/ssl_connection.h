@@ -3,6 +3,7 @@
 
 #include "i_connection.h"
 #include <boost/asio/ssl.hpp>
+#include <openssl/err.h>
 #include <memory>
 
 namespace mail_system {
@@ -85,6 +86,33 @@ public:
         return std::make_unique<boost::asio::ip::tcp::socket>(
             std::move(stream_->next_layer())
         );
+    }
+
+    // 握手失败诊断：输出 SSL 状态 + OpenSSL 错误栈（比裸 "Connection reset by peer" 详细）
+    std::string get_handshake_diagnostic() const override {
+        std::string out;
+        SSL* ssl = stream_->native_handle();
+        if (ssl) {
+            out += "ssl_state=";
+            out += SSL_state_string_long(ssl);
+            const char* ver = SSL_get_version(ssl);
+            if (ver && *ver) { out += " version="; out += ver; }
+        }
+        unsigned long err = ERR_get_error();
+        if (err) {
+            out += " openssl=[";
+            char buf[256];
+            bool first = true;
+            while (err) {
+                if (!first) out += "; ";
+                ERR_error_string_n(err, buf, sizeof(buf));
+                out += buf;
+                first = false;
+                err = ERR_get_error();
+            }
+            out += "]";
+        }
+        return out;
     }
 
 private:

@@ -76,6 +76,9 @@ public:
     // 获取远程 IP 地址
     virtual std::string get_remote_ip() const = 0;
 
+    // 握手失败诊断信息（SSL 连接返回 OpenSSL 错误栈/状态；TCP 连接返回空）
+    virtual std::string get_handshake_diagnostic() const { return {}; }
+
     // 获取原始 socket 指针（谨慎使用，仅用于类型转换）
     virtual std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() = 0;
 };
