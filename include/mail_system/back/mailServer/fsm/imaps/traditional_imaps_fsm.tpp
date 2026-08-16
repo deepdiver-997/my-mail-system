@@ -402,12 +402,11 @@ std::string TraditionalImapsFsm<ConnectionType>::build_fetch_body_response(
 // ====================================================================
 template <typename ConnectionType>
 std::string TraditionalImapsFsm<ConnectionType>::build_bodystructure(const std::string& raw) {
-    // 旧邮件回退路径（无预解析 MIME 树时使用）
-    size_t body_size = raw.size();
-    size_t lines = 1 + std::count(raw.begin(), raw.end(), '\n');
-    return "(\"text\" \"plain\" NIL NIL NIL \"7bit\" " +
-           std::to_string(body_size) + " " + std::to_string(lines) +
-           " NIL NIL NIL NIL)";
+    // 旧邮件回退路径（无预解析 MIME 树时使用）：用 parse_mime_tree 解析，
+    // 而非硬编码 text/plain（否则 HTML 邮件会被按纯文本渲染）。
+    MimePart root;
+    parse_mime_tree(raw, root);
+    return build_bodystructure_tree(root);
 }
 
 template <typename ConnectionType>
@@ -866,6 +865,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_logout(
     std::string current_tag = ctx ? ctx->current_tag : "*";
     ctx->clear();
 
+    session->set_trace_clean_close();   // 正常 LOGOUT → 连接追踪丢弃
     session->set_current_state(static_cast<int>(ImapState::LOGOUT));
 
     std::string response = "* BYE IMAP4rev1 Server logging out\r\n";
@@ -939,12 +939,17 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
     // 同一 key 只允许一个刷新任务在途，防止客户端频繁 SELECT 时雪崩式重复查库。
     if (stale && from_cache && this->m_mailboxStatsCache && this->m_workerThreadPool) {
         auto key = mbox_cache_key(ctx->user_id, mailbox_id);
-        auto cache = this->m_mailboxStatsCache;
-        auto pool = this->m_workerThreadPool;
+        bool post_refresh = false;
         {
             std::lock_guard<std::mutex> lk(this->m_statsRefreshMutex);
-            if (!this->m_statsRefreshInFlight.insert(key).second) return; // 已在途
+            if (this->m_statsRefreshInFlight.insert(key).second)
+                post_refresh = true;   // 仅第一个 SELECT 发起刷新
         }
+        // 已在途：跳过刷新，但仍用缓存(stale)数据立即响应，
+        // 否则并行 SELECT 会收到空响应导致客户端超时。
+        if (post_refresh) {
+        auto cache = this->m_mailboxStatsCache;
+        auto pool = this->m_workerThreadPool;
         pool->post([key, cache, pool, this]() {
             if (cache) {
                 MailboxCacheEntry fresh;
@@ -963,6 +968,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
             std::lock_guard<std::mutex> lk(this->m_statsRefreshMutex);
             this->m_statsRefreshInFlight.erase(key);
         });
+        }
     }
 
     session->set_current_state(static_cast<int>(ImapState::SELECTED));
@@ -1698,8 +1704,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_starttls(
                 return;
             }
             auto server = static_cast<ImapsServer*>(self->get_server());
+            auto trace = self->take_trace_buffer();   // 交接给 TLS 会话，延续对话记录
             auto tcp_sock = self->release_connection()->release_socket();
-            server->handoff_starttls_socket(std::move(tcp_sock));
+            server->handoff_starttls_socket(std::move(tcp_sock), std::move(trace));
         }
     );
 }

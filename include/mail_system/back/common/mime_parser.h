@@ -124,9 +124,65 @@ inline void parse_mime_tree(const std::string& raw, MimePart& root, size_t pos =
                 }
             }
         } else {
-            // 默认 text/plain
-            root.type = "text";
-            root.subtype = "plain";
+            // 畸形邮件（header 在 body 之后，如部分 OpenAI 通知邮件）时，首段
+            // （第一个 \r\n\r\n 之前）没有 Content-Type。此时在整封消息里找
+            // 行首的 content-type:（避开 DKIM h= 标签），取最后一次匹配。
+            bool ct_found = false;
+            auto whole_lower = raw;
+            std::transform(whole_lower.begin(), whole_lower.end(), whole_lower.begin(), ::tolower);
+            size_t ct_line_start = std::string::npos;
+            for (size_t p = 0; p < whole_lower.size(); ) {
+                size_t f = whole_lower.find("\ncontent-type:", p);
+                if (f == std::string::npos) {
+                    if (p == 0 && whole_lower.compare(0, 13, "content-type:") == 0)
+                        ct_line_start = 0;
+                    break;
+                }
+                ct_line_start = f + 1;   // 保留最后一次匹配
+                p = f + 1;
+            }
+            if (ct_line_start != std::string::npos && ct_line_start > 0) {
+                size_t ct_end = whole_lower.find("\r\n", ct_line_start);
+                while (ct_end != std::string::npos && ct_end + 2 < whole_lower.size() &&
+                       (whole_lower[ct_end + 2] == ' ' || whole_lower[ct_end + 2] == '\t'))
+                    ct_end = whole_lower.find("\r\n", ct_end + 2);
+                std::string ct_line = (ct_end != std::string::npos)
+                    ? whole_lower.substr(ct_line_start + 13, ct_end - ct_line_start - 13)
+                    : whole_lower.substr(ct_line_start + 13);
+                auto semi = ct_line.find(';');
+                std::string full_type = (semi != std::string::npos)
+                    ? ct_line.substr(0, semi) : ct_line;
+                full_type.erase(0, full_type.find_first_not_of(" \t"));
+                full_type.erase(full_type.find_last_not_of(" \t") + 1);
+                auto slash = full_type.find('/');
+                if (slash != std::string::npos) {
+                    root.type = full_type.substr(0, slash);
+                    root.subtype = full_type.substr(slash + 1);
+                    if (semi != std::string::npos) {
+                        std::string params = ct_line.substr(semi + 1);
+                        auto cp = params.find("charset=");
+                        if (cp != std::string::npos) {
+                            cp += 8;
+                            while (cp < params.size() && (params[cp] == ' ' || params[cp] == '\t')) cp++;
+                            if (cp < params.size() && params[cp] == '"') {
+                                cp++;
+                                auto ce = params.find('"', cp);
+                                if (ce != std::string::npos) root.charset = params.substr(cp, ce - cp);
+                            } else {
+                                auto ce = params.find_first_of(" \t;", cp);
+                                if (ce == std::string::npos) ce = params.size();
+                                root.charset = params.substr(cp, ce - cp);
+                            }
+                        }
+                    }
+                    ct_found = true;
+                }
+            }
+            if (!ct_found) {
+                // 默认 text/plain
+                root.type = "text";
+                root.subtype = "plain";
+            }
         }
     }
 
