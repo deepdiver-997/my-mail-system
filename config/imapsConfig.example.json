@@ -1,7 +1,7 @@
 {
   "address": "0.0.0.0",
-  "system_name": "scut-email-imap",
-  "system_domain": "scut.email",
+  "system_name": "example-email-imap",
+  "system_domain": "example.com",
 
   "listeners": [
     { "type": "tcp", "port": 143, "auth_policy": "off" },
@@ -53,8 +53,8 @@
   "intrusion_detection_enabled": false,
 
   "outbound": {
-    "helo_domain": "smtp.scut.email",
-    "mail_from_domain": "scut.email",
+    "helo_domain": "smtp.example.com",
+    "mail_from_domain": "example.com",
     "rewrite_header_from": false,
     "max_attempts": 1,
     "ports": [465],

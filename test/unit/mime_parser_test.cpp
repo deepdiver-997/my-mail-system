@@ -241,6 +241,29 @@ static void test_dkim_h_contains_content_type() {
     expect_str(Fsm::extract_part_content(raw, root), "dkim test", "BODY[1]");
 }
 
+// 9. 畸形邮件：HTML 正文在前、真实 header 在 </html> 之后（如部分 OpenAI 通知邮件）。
+//    首段（第一个 \r\n\r\n 之前）无 Content-Type，必须从整封消息找回退 content-type。
+static void test_malformed_headers_after_body() {
+    const std::string raw =
+        "        <html>\r\n"
+        "          <body style=\"color:#fff\">\r\n"
+        "          </body>\r\n"      // HTML 里的空行会误当 header/body 分隔
+        "        </html>\r\n"
+        "\r\n"                       // 第一个空行在 HTML 内部
+        "DKIM-Signature: v=1; a=rsa-sha256; h=content-type:date:from:subject;\r\n"
+        "\tbh=abc;\r\n"
+        "From: noreply@tm.openai.com\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Content-Transfer-Encoding: quoted-printable\r\n"
+        "\r\n"
+        "trailing\r\n";
+    MimePart root;
+    parse_mime_tree(raw, root);
+    expect_str(root.type, "text", "malformed: type via fallback");
+    expect_str(root.subtype, "html", "malformed: subtype via fallback");
+    expect_str(root.charset, "utf-8", "malformed: charset via fallback");
+}
+
 // 8. charset 带引号
 static void test_quoted_charset() {
     const std::string raw =
@@ -257,7 +280,7 @@ static void test_quoted_charset() {
 static void test_unquoted_boundary_with_quoted_to() {
     const std::string raw =
         "From: sender@feishu.cn\r\n"
-        "To: \"test3\" <test3@scut.email>\r\n"
+        "To: \"test3\" <test3@test.local>\r\n"
         "Subject: test\r\n"
         "Content-Type: multipart/alternative;\r\n"
         "\tboundary=77c32bd97011b71999b9c42bd3ffb1141e49e616cb30dd3cf5dd4684ef41\r\n"
@@ -300,6 +323,7 @@ int main() {
     test_nested_multipart();
     test_folded_content_type();
     test_dkim_h_contains_content_type();
+    test_malformed_headers_after_body();
     test_quoted_charset();
     test_content_disposition_name();
     test_unquoted_boundary_with_quoted_to();

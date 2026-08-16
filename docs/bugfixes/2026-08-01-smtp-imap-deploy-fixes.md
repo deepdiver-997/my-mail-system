@@ -2,7 +2,7 @@
 
 ## 背景
 
-将 ProtoRelay 从本地交叉编译部署至 `root@120.24.169.213` (Ubuntu 22.04, 1.6GB RAM)，替换旧版 SMTP/IMAP 服务。部署后发现网易邮件大师无法拉取邮件。
+将 ProtoRelay 从本地交叉编译部署至 `root@<SERVER_IP>` (Ubuntu 22.04, 1.6GB RAM)，替换旧版 SMTP/IMAP 服务。部署后发现网易邮件大师无法拉取邮件。
 
 ---
 
@@ -90,7 +90,7 @@ bool want_body_header = attrs.find("BODY.PEEK[HEADER]") != std::string::npos;
 - IMAP FSM 单元测试：38/38 通过
 - SMTP 465 手动发信：MAIL FROM → RCPT TO → DATA → QUIT 全流程通过
 - IMAP 993 手动测试：LOGIN → SELECT → UID FETCH (HEADER.FIELDS + BODY[1]) 返回正确
-- 网易邮件大师实际测试：test3@scut.email 可正常登录拉取邮件
+- 网易邮件大师实际测试：test3@<DOMAIN> 可正常登录拉取邮件
 
 ---
 

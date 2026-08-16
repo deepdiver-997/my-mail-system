@@ -36,7 +36,7 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "2525"))
 SUBMIT_PORT = int(os.environ.get("SUBMIT_PORT", "8587"))
 IMAP_HOST = os.environ.get("IMAP_HOST", "127.0.0.1")
 IMAP_PORT = int(os.environ.get("IMAP_PORT", "1414"))
-USER     = os.environ.get("TEST_USER", "test2@scut.email")
+USER     = os.environ.get("TEST_USER", "test2@test.local")
 PASSWORD = os.environ.get("TEST_PASSWORD", "test123")
 
 # ── 报告 ──
@@ -82,7 +82,7 @@ def test_smtp_auth_login_deliver():
             msg["From"] = USER
             msg["To"] = USER
             msg["Subject"] = f"Integration Test - {datetime.now().isoformat()}"
-            msg["Message-ID"] = f"<integ-{int(time.time())}@scut.email>"
+            msg["Message-ID"] = f"<integ-{int(time.time())}@test.local>"
             msg.set_content("SMTP AUTH LOGIN integration test body.\r\nLine 2.\r\n")
 
             s.sendmail(USER, USER, msg.as_string())
@@ -129,15 +129,15 @@ def test_smtp_multi_rcpt_html():
 
             msg = email.message.EmailMessage(policy=email.policy.SMTP)
             msg["From"] = USER
-            msg["To"] = f"{USER}, local_test@scut.email"
+            msg["To"] = f"{USER}, local_test@test.local"
             msg["Subject"] = f"Multi-RCPT HTML - {int(time.time())}"
             msg.set_content("Plain text fallback.\r\n")
             msg.add_alternative(
                 "<html><body><h1>HTML Test</h1><p>Multi-recipient html mail.</p></body></html>",
                 subtype="html")
 
-            s.sendmail(USER, [USER, "local_test@scut.email"], msg.as_string())
-        ok("SMTP multi-RCPT HTML", f"{USER} → {USER}, local_test@scut.email")
+            s.sendmail(USER, [USER, "local_test@test.local"], msg.as_string())
+        ok("SMTP multi-RCPT HTML", f"{USER} → {USER}, local_test@test.local")
     except Exception as e:
         err("SMTP multi-RCPT HTML", str(e))
 
@@ -262,7 +262,7 @@ def test_smtp_imap_e2e():
             msg["From"] = USER
             msg["To"] = USER
             msg["Subject"] = subject
-            msg["Message-ID"] = f"<e2e-{subject}@scut.email>"
+            msg["Message-ID"] = f"<e2e-{subject}@test.local>"
             msg.set_content("SMTP→IMAP E2E test body.\r\n")
             s.sendmail(USER, USER, msg.as_string())
         info(f"SMTP sent: {subject}")

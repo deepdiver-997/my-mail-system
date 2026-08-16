@@ -27,8 +27,8 @@ Usage:
 
 import argparse, base64, random, time, threading, smtplib, socket, ssl, sys
 
-SENDERS    = [f"user{i}@scut.email" for i in range(10)]
-RECIPIENTS = [f"dest{i}@scut.email" for i in range(10)]
+SENDERS    = [f"user{i}@test.local" for i in range(10)]
+RECIPIENTS = [f"dest{i}@test.local" for i in range(10)]
 MSG_BODY   = "From: {sender}\r\nTo: {rcpt}\r\nSubject: perf\r\n\r\nhi\r\n"
 
 MODE_DEFAULTS = {

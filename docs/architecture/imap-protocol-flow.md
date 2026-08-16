@@ -111,7 +111,7 @@ C:  a1 CAPABILITY
 S:  * CAPABILITY IMAP4rev1 AUTH=LOGIN STARTTLS IDLE UIDPLUS MOVE
 S:  a1 OK CAPABILITY completed
 
-C:  a2 LOGIN t1@mail.hgmail.xin 123456
+C:  a2 LOGIN t1@<HGDOMAIN> <PASSWORD>
 S:  a2 OK LOGIN completed
 ```
 
@@ -223,7 +223,7 @@ C:  a10 FETCH 1 BODY[]
 S:  * 1 FETCH (BODY[] {450}
 S:  Date: 01-Jan-2025 10:00:00 +0000
 S:  From: alice@example.com
-S:  To: t1@mail.hgmail.xin
+S:  To: t1@<HGDOMAIN>
 S:  Subject: Hello
 S:  
 S:  This is the message body.
@@ -372,7 +372,7 @@ S:  a20 OK IDLE terminated
 
 ```bash
 # 连接 IMAP 明文端口
-printf "a1 LOGIN t1@mail.hgmail.xin 123456\r\na2 LIST \"\" \"*\"\r\na3 LOGOUT\r\n" | nc localhost 143
+printf "a1 LOGIN t1@<HGDOMAIN> <PASSWORD>\r\na2 LIST \"\" \"*\"\r\na3 LOGOUT\r\n" | nc localhost 143
 ```
 
 ### 使用 openssl 测试 IMAPS

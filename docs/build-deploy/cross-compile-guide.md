@@ -3,7 +3,7 @@
 ## 架构
 
 ```
-macOS ARM64 (开发机)              Linux x86_64 (服务器 120.24.169.213)
+macOS ARM64 (开发机)              Linux x86_64 (服务器 <SERVER_IP>)
 ┌─────────────────────┐           ┌──────────────────────────┐
 │ build.sh cross-x64  │  rsync   │ link.sh → imapsServer    │
 │ → .o 文件 (ELF)     │ ──────→ │ → systemctl restart      │
@@ -53,13 +53,13 @@ EXTRA_CMAKE_ARGS="-DENABLE_S3_STORAGE=OFF" bash build.sh Release cross-x64 8
 ### 2. 上传
 
 ```bash
-rsync -avz artifacts/linux-x86_64/Release/obj/ root@120.24.169.213:/opt/smtpServer/build-obj/
+rsync -avz artifacts/linux-x86_64/Release/obj/ root@<SERVER_IP>:/opt/smtpServer/build-obj/
 ```
 
 ### 3. 服务器链接
 
 ```bash
-ssh root@120.24.169.213 "
+ssh root@<SERVER_IP> "
 cd /opt/smtpServer/build-obj
 chmod +x link.sh
 

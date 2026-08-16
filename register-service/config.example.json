@@ -1,13 +1,14 @@
 {
   "db_host": "localhost",
   "db_user": "mail_user",
-  "db_password": "Mail@Scut2024!",
+  "db_password": "<PASSWORD>",
   "db_database": "mail",
   "listen_host": "127.0.0.1",
   "listen_port": 8080,
+  "register_domain": "example.com",
   "invite_codes": [
-    {"code": "RESUME2025", "max_uses": 5, "expires_days": 90},
-    {"code": "INTERVIEW2025", "max_uses": 3, "expires_days": 60}
+    {"code": "EXAMPLE2026", "max_uses": 5, "expires_days": 90},
+    {"code": "INTERVIEW2026", "max_uses": 3, "expires_days": 60}
   ],
   "rate_limit_per_ip": 3,
   "rate_limit_window_hours": 24

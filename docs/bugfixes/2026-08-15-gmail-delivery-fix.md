@@ -1,8 +1,8 @@
-# 2026-08-15 Gmail → scut.email 投递失败排查与修复
+# 2026-08-15 Gmail → <DOMAIN> 投递失败排查与修复
 
 ## 背景
 
-Gmail 发信到 `test3@scut.email` 持续失败。从 2026-08-12 起多轮排查，先后处理 DNSBL、证书、TLS 版本、EHLO 合规，最终根因收窄到**服务器 IP 信誉**（PTR 缺失 + Barracuda RBL 命中）。本文记录排查过程、已部署的修复，以及遗留待办。
+Gmail 发信到 `test3@<DOMAIN>` 持续失败。从 2026-08-12 起多轮排查，先后处理 DNSBL、证书、TLS 版本、EHLO 合规，最终根因收窄到**服务器 IP 信誉**（PTR 缺失 + Barracuda RBL 命中）。本文记录排查过程、已部署的修复，以及遗留待办。
 
 ---
 
@@ -11,7 +11,7 @@ Gmail 发信到 `test3@scut.email` 持续失败。从 2026-08-12 起多轮排查
 | 时间 | Gmail 退信错误 |
 |---|---|
 | 08-14 | `TLS Negotiation failed: FAILED_PRECONDITION: starttls error(104): Connection reset by peer` |
-| 08-15 后 | `The recipient server did not accept our requests to connect. [mx1.scut.email. 120.24.169.213: timed out]` |
+| 08-15 后 | `The recipient server did not accept our requests to connect. [<MX_HOSTNAME>. <SERVER_IP>: timed out]` |
 
 两种都是**网络/TLS 层错误**，不是 PTR 拒收（无 `4.7.23`/`5.7.25`）。
 
@@ -32,8 +32,8 @@ Gmail 退信显示的是**最终/代表性失败**。`timed out` 不是服务器
 - `dnsbl_enabled: true → false`（Gmail Google Cloud IP 命中 Spamhaus CSS 被拒）。
 
 ### 2. 证书（已解决 08-12/08-15）
-- 自签 → Let's Encrypt 有效证书（`smtp.scut.email`）。
-- 08-15 用 DNS-01 重签，SAN 含裸域 `scut.email`（`mx1.scut.email, scut.email, smtp.scut.email`）。
+- 自签 → Let's Encrypt 有效证书（`<SMTP_HOSTNAME>`）。
+- 08-15 用 DNS-01 重签，SAN 含裸域 `<DOMAIN>`（`<MX_HOSTNAME>, <DOMAIN>, <SMTP_HOSTNAME>`）。
 - `openssl s_client` 465/25 均 `Verify return code: 0`。
 
 ### 3. TLS 版本（已排除 08-15）
@@ -47,8 +47,8 @@ Gmail 退信显示的是**最终/代表性失败**。`timed out` 不是服务器
   std::string response = "250-" + session->get_last_command_args() + " Hello\r\n";
   ```
   Gmail 发 `EHLO mail-pz2-f0.google.com`，服务器回 `250-mail-pz2-f0.google.com Hello` → **服务器自称是 `*.google.com`** → Gmail 安全机制判定异常。
-- **修复**：新增 `helo_hostname` 配置，EHLO 首行改用服务器自身域名 `mx1.scut.email`。
-- **验证**：部署后 01:52 抓包确认 EHLO 响应首行为 `250-mx1.scut.email Hello`，**但 Gmail 仍 ClientHello 后 RST**。故 EHLO 不是最终根因（但修复本身是 RFC 5321 合规的必要修正）。
+- **修复**：新增 `helo_hostname` 配置，EHLO 首行改用服务器自身域名 `<MX_HOSTNAME>`。
+- **验证**：部署后 01:52 抓包确认 EHLO 响应首行为 `250-<MX_HOSTNAME> Hello`，**但 Gmail 仍 ClientHello 后 RST**。故 EHLO 不是最终根因（但修复本身是 RFC 5321 合规的必要修正）。
 
 ---
 
@@ -61,7 +61,7 @@ Gmail 退信显示的是**最终/代表性失败**。`timed out` 不是服务器
    - 入站 EHLO 响应首行主机名，默认空则回退 `system_domain`。
 3. **EHLO 响应合规**（[traditional_smtps_fsm.tpp](../../include/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.tpp#L262)）
    - 首行用服务器域名，不再回显客户端。
-4. **配置**（[smtpsConfig.json](../../config/smtpsConfig.json)）：`enable_tls1_3: true`、`helo_hostname: mx1.scut.email`。
+4. **配置**（[smtpsConfig.json](../../config/smtpsConfig.json)）：`enable_tls1_3: true`、`helo_hostname: <MX_HOSTNAME>`。
 5. **测试断言更新**（[smtps_fsm_test.cpp](../../test/unit/smtps_fsm_test.cpp)）：4 处 `250-* Hello` → `250-test.local Hello`。
 
 smtpsServer + imapsServer 均已交叉编译部署（二进制备份 `smtpsServer.bak-tls13-*`）。
@@ -72,8 +72,8 @@ smtpsServer + imapsServer 均已交叉编译部署（二进制备份 `smtpsServe
 
 **Gmail 在 ClientHello 后 ~53μs 主动 RST，无视服务器所有响应**（RTT 13ms，不可能基于服务器响应决策）→ 必然基于**连接前可查信息**判断该 IP 不可投递：
 
-1. **PTR 缺失**：`120.24.169.213` 反向 DNS NXDOMAIN（Google DNS 8.8.8.8 视角确认）。
-   - Gmail 严格要求 FCrDNS（PTR 指向 `mx1.scut.email` 且 A 记录回指同 IP）。修复需阿里云 EIP 反向 DNS 设置（`mx1.scut.email`，阿里云收费 1 元/天/条）。
+1. **PTR 缺失**：`<SERVER_IP>` 反向 DNS NXDOMAIN（Google DNS 8.8.8.8 视角确认）。
+   - Gmail 严格要求 FCrDNS（PTR 指向 `<MX_HOSTNAME>` 且 A 记录回指同 IP）。修复需阿里云 EIP 反向 DNS 设置（`<MX_HOSTNAME>`，阿里云收费 1 元/天/条）。
 2. **Barracuda RBL 命中**：`b.barracudacentral.org` 返回 `127.0.0.2`。
 3. 阿里云深圳 IP 段 + 历史投递失败缓存。
 
@@ -81,7 +81,7 @@ smtpsServer + imapsServer 均已交叉编译部署（二进制备份 `smtpsServe
 
 ## 遗留待办
 
-- [ ] 开通阿里云 PTR（`mx1.scut.email`），验证 Gmail 投递恢复。
+- [ ] 开通阿里云 PTR（`<MX_HOSTNAME>`），验证 Gmail 投递恢复。
 - [ ] Barracuda RBL 移除申诉（barracudacentral.org/lookups）。
 - [ ] IMAP 用自签证书（Verify 18），用户邮件客户端连 IMAP 需信任，可换 Let's Encrypt 证书。
 
@@ -91,4 +91,4 @@ smtpsServer + imapsServer 均已交叉编译部署（二进制备份 `smtpsServe
 
 - 日志：`/tmp/logs/smtp-server.log`（垃圾扫描器 IP 178.16.55.89 等频繁探测，非 Gmail）。
 - tcpdump：`tcpdump -l -X -i eth0 'port 25 or port 465 or port 587'`（此机 tcpdump 写文件必须 `-l` 行缓冲，否则 0 包）。
-- Gmail 连接源 IP 段：74.125.x（Gmail MX），SNI = `mx1.scut.email`。
+- Gmail 连接源 IP 段：74.125.x（Gmail MX），SNI = `<MX_HOSTNAME>`。

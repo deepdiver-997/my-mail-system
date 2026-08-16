@@ -259,8 +259,8 @@ int main(int argc, char* argv[]) {
     }
 
     for (int i = 0; i < 10; ++i) {
-        g_senders[i]    = "user" + std::to_string(i) + "@scut.email";
-        g_recipients[i] = "dest"  + std::to_string(i) + "@scut.email";
+        g_senders[i]    = "user" + std::to_string(i) + "@test.local";
+        g_recipients[i] = "dest"  + std::to_string(i) + "@test.local";
     }
 
     // select worker: pipeline × reuse → 4 combos

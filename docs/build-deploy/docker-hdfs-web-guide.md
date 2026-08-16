@@ -48,9 +48,9 @@ mkdir -p deploy/config deploy/certs deploy/logs deploy/mail deploy/attachments
 可用仓库脚本生成：
 
 ```bash
-./scripts/generate_server_cert.sh -d mail.hgmail.xin -o ./deploy/certs -f
-./scripts/generate_dkim_keys.sh -d mail.hgmail.xin -s default -o ./deploy/certs -f
-cp ./deploy/certs/default.mail.hgmail.xin.private.pem ./deploy/certs/dkim_private.pem
+./scripts/generate_server_cert.sh -d <HGDOMAIN> -o ./deploy/certs -f
+./scripts/generate_dkim_keys.sh -d <HGDOMAIN> -s default -o ./deploy/certs -f
+cp ./deploy/certs/default.<HGDOMAIN>.private.pem ./deploy/certs/dkim_private.pem
 ```
 
 ## 5. 首次启动前的 HDFS 权限初始化

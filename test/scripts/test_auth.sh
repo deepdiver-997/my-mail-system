@@ -1,13 +1,13 @@
 #!/bin/bash
 # SMTP AUTH 测试脚本
 # 用法: ./test_auth.sh [email] [password]
-# 默认: t1@hgmail.hgmail.xin / 123456
+# 默认: t1@example.com / 123456
 
 set -e
 
 HOST="${SMTP_HOST:-127.0.0.1}"
 PORT="${SMTP_PORT:-465}"
-EMAIL="${1:-t1@hgmail.hgmail.xin}"
+EMAIL="${1:-t1@example.com}"
 PASSWORD="${2:-123456}"
 
 # 判断是完整邮箱还是本地部分（AUTH LOGIN 只用本地部分也能过，服务端会补全）

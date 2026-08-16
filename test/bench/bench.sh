@@ -22,7 +22,7 @@ RAMP_STEP="${RAMP_STEP:-50}"
 TIMEOUT="${TIMEOUT:-15}"
 
 # hardcoded credentials
-USER="test2@scut.email"
+USER="test2@test.local"
 PASSWORD="test123"
 
 MODE="all"

@@ -394,7 +394,7 @@ Worker 选择矩阵:
 | TCP_NODELAY | 开启 |
 | SO_REUSEADDR | 开启 |
 | 邮件体 | 单行 `hi` (~20 bytes) |
-| 发/收件人 | `user0~9@scut.email` → `dest0~9@scut.email` |
+| 发/收件人 | `user0~9@test.local` → `dest0~9@test.local` |
 
 ---
 

@@ -10,9 +10,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEST_DIR="$(dirname "$SCRIPT_DIR")"
 PROJECT_DIR="$(dirname "$TEST_DIR")"
 DB_USER="${DB_USER:-mail_test}"
-DB_PASS="${DB_PASS:-abjskKA09qjf}"
+# DB 密码不设默认值，由环境变量 DB_PASS 提供（真实密码见 docs/local/server-credentials.md）
+DB_PASS="${DB_PASS:-}"
 DB_HOST="${DB_HOST:-localhost}"
 DB_NAME="${DB_NAME:-mail}"
+if [[ -z "$DB_PASS" ]]; then
+    echo "Warning: DB_PASS is empty; DB operations may fail. Set DB_PASS=<password> to enable DB cleanup." >&2
+fi
 
 echo "=== Cleanup ==="
 

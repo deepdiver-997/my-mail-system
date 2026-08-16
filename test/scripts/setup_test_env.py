@@ -46,7 +46,7 @@ IMAP_PORTS = [
 ]
 
 # ── 测试账号（硬编码，不会删）────
-TEST_USER     = "test2@scut.email"
+TEST_USER     = "test2@test.local"
 TEST_PASSWORD = "test123"
 
 

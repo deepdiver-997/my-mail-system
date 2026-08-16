@@ -6,7 +6,7 @@
   python3 scripts/register_user.py <db_config.json> <email> <password> <name> [phone]
 
 示例:
-  python3 scripts/register_user.py config/db_config.json test@mail.hgmail.xin mypassword "Test User"
+  python3 scripts/register_user.py config/db_config.json test@example.com <PASSWORD> "Test User"
 
 依赖:
   pip install bcrypt mysql-connector-python
@@ -33,7 +33,7 @@ def main():
     if len(sys.argv) < 5:
         print(f"用法: {sys.argv[0]} <db_config.json> <email> <password> <name> [phone]")
         print(f"\n示例:")
-        print(f"  {sys.argv[0]} config/db_config.json test@mail.hgmail.xin mypassword 'Test User'")
+        print(f"  {sys.argv[0]} config/db_config.json test@example.com <PASSWORD> 'Test User'")
         sys.exit(1)
 
     db_config_path = sys.argv[1]

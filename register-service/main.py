@@ -124,7 +124,7 @@ def register(req: RegisterRequest, request: Request):
     if len(pwd) < 4:
         raise HTTPException(400, "Password must be at least 4 characters")
 
-    # Max email length check (invitor_999999@scut.email ≈ 30 chars, safe)
+    # Max email length check (invitor_999999@<DOMAIN> ≈ 30 chars, safe)
     if len(code) > 64:
         raise HTTPException(400, "Invite code too long")
 
@@ -144,9 +144,9 @@ def register(req: RegisterRequest, request: Request):
         if row["used_count"] >= row["max_uses"]:
             raise HTTPException(400, "Invite code has been fully used")
 
-        # Assign sequential email: invitor_N@scut.email
+        # Assign sequential email: invitor_N@<register_domain>（域名来自 config.json）
         seq = row["used_count"] + 1
-        email = f"invitor_{seq}@scut.email"
+        email = f"invitor_{seq}@{CONFIG.get('register_domain', 'example.com')}"
 
         # Check email uniqueness
         cur.execute("SELECT id FROM users WHERE mail_address = %s", (email,))

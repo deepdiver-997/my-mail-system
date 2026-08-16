@@ -1,8 +1,8 @@
 {
   "address": "0.0.0.0",
-  "system_name": "scut-email-smtp",
-  "system_domain": "scut.email",
-  "helo_hostname": "mx1.scut.email",
+  "system_name": "example-email-smtp",
+  "system_domain": "example.com",
+  "helo_hostname": "mx1.example.com",
 
   "listeners": [
     { "type": "tcp", "port": 25,  "auth_policy": "off" },
@@ -59,16 +59,16 @@
   "intrusion_ban_threshold": 5,
 
   "outbound": {
-    "helo_domain": "smtp.scut.email",
-    "mail_from_domain": "scut.email",
+    "helo_domain": "smtp.example.com",
+    "mail_from_domain": "example.com",
     "rewrite_header_from": true,
     "max_attempts": 8,
     "ports": [465],
     "dkim": {
       "enabled": true,
-      "selector": "202407",
-      "domain": "scut.email",
-      "private_key_file": "dkim/202407.scut.email.private.pem"
+      "selector": "example2024",
+      "domain": "example.com",
+      "private_key_file": "dkim/example2024.example.com.private.pem"
     }
   }
 }

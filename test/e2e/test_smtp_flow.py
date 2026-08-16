@@ -177,7 +177,7 @@ def main():
             r.skip("Port 587 EHLO advertises AUTH", "perf_mode disables AUTH")
         else:
             r.test("Port 587 rejects MAIL FROM before AUTH", lambda:
-                _smtp_cmd(host, 587, 'MAIL FROM:<user@scut.email>', '530'))
+                _smtp_cmd(host, 587, 'MAIL FROM:<user@test.local>', '530'))
             r.test("Port 587 EHLO advertises AUTH", lambda:
                 _smtp_ehlo_check_auth(host, 587))
 
@@ -195,7 +195,7 @@ def main():
                 r.skip("Port 465 rejects MAIL FROM before AUTH", "perf_mode disables AUTH")
             else:
                 r.test("Port 465 rejects MAIL FROM before AUTH", lambda:
-                    _ssl_cmd(host, 465, 'MAIL FROM:<user@scut.email>', '530'))
+                    _ssl_cmd(host, 465, 'MAIL FROM:<user@test.local>', '530'))
         else:
             r.skip("Port 465 SSL", "no SSL listener configured")
 
@@ -274,7 +274,7 @@ def _smtp_rcpt(host, port):
     s.recv(4096)
     s.sendall(b'MAIL FROM:<test@extern.com>\r\n')
     s.recv(1024)
-    s.sendall(b'RCPT TO:<user@scut.email>\r\n')
+    s.sendall(b'RCPT TO:<user@test.local>\r\n')
     resp = s.recv(1024).decode()
     s.close()
     assert resp.startswith('250'), f"RCPT TO rejected: {resp[:80]}"
@@ -286,7 +286,7 @@ def _smtp_data(host, port):
     s.recv(4096)
     s.sendall(b'MAIL FROM:<test@extern.com>\r\n')
     s.recv(1024)
-    s.sendall(b'RCPT TO:<user@scut.email>\r\n')
+    s.sendall(b'RCPT TO:<user@test.local>\r\n')
     s.recv(1024)
     s.sendall(b'DATA\r\n')
     resp = s.recv(1024).decode()
@@ -352,8 +352,8 @@ def _smtplib_send(host, port, db_cfg):
     pwd = db_cfg.get('password', '')
     if user and pwd:
         s.login(user, pwd)
-    s.sendmail('test@extern.com', 'user@scut.email',
-               'From: test@extern.com\r\nTo: user@scut.email\r\nSubject: E2E Test\r\n\r\nHello.')
+    s.sendmail('test@extern.com', 'user@test.local',
+               'From: test@extern.com\r\nTo: user@test.local\r\nSubject: E2E Test\r\n\r\nHello.')
     s.quit()
 
 

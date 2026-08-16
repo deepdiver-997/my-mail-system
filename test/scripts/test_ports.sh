@@ -4,7 +4,7 @@
 # 前提: smtpsServer 和 imapsServer 已在本地运行
 
 HOST="127.0.0.1"
-USER="test2@scut.email"
+USER="test2@test.local"
 PASS="test123"
 
 echo "=============================================="
@@ -56,7 +56,7 @@ echo "=============================================="
 
 # ---- SMTP :587 AUTH PLAIN ----
 echo ""
-echo "--- SMTP :587 AUTH PLAIN (test2@scut.email) ---"
+echo "--- SMTP :587 AUTH PLAIN (test2@test.local) ---"
 python3 << PYEOF
 import socket, ssl, base64, time
 
@@ -93,7 +93,7 @@ PYEOF
 
 # ---- IMAP :143 LOGIN ----
 echo ""
-echo "--- IMAP :143 LOGIN (test2@scut.email) ---"
+echo "--- IMAP :143 LOGIN (test2@test.local) ---"
 python3 << PYEOF
 import socket, ssl, time
 

@@ -6,7 +6,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVER="root@120.24.169.213"
+# 真实服务器地址通过环境变量 DEPLOY_SERVER 提供（默认占位符，真实值见 docs/local/server-credentials.md）
+SERVER="${DEPLOY_SERVER:-root@<SERVER_IP>}"
 TARGET_DIR="/opt/smtpServer"
 SYSROOT="${HOME}/.protorelay/sysroot/usr"
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
