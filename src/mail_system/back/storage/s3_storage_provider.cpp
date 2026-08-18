@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <cstring>
 
 namespace mail_system {
 namespace storage {

@@ -1,4 +1,6 @@
 #include "mail_system/back/algorithm/snow.h"
+#include <stdexcept>
+#include <string>
 
 namespace mail_system {
 namespace algorithm {
