@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  # ---- 单元测试 (快速反馈，2-3 分钟) ----
+  # ---- 单元测试 (Debug 构建全部单测 + 运行 ctest) ----
   unit-test:
     runs-on: ubuntu-latest
     steps:
@@ -23,11 +23,13 @@ jobs:
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
 
-      - name: Build test_inbound_verifier
-        run: cmake --build build --target test_inbound_verifier -j$(nproc)
+      - name: Build unit tests
+        run: cmake --build build --target smtps_fsm_test smtps_fsm_concurrency_test \
+                                imaps_fsm_test test_inbound_verifier outbound_smoke \
+                                sql_queries_test mime_parser_test -j$(nproc)
 
-      - name: Run tests
-        run: ./build/test_inbound_verifier
+      - name: Run unit tests (ctest)
+        run: ctest --test-dir build --output-on-failure
 
   # ---- 完整构建 (确认所有 target 能编译) ----
   full-build:
