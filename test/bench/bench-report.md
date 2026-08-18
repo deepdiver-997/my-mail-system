@@ -367,7 +367,7 @@ Worker 选择矩阵:
 | **OS** | macOS 15.7.7 |
 | **编译器** | Apple clang 17.0.0 (clang-1700.6.4.2) |
 | **编译选项** | `-O3 -march=native -DNDEBUG` (Release) |
-| **C++ 标准** | C++20 |
+| **C++ 标准** | C++17 |
 
 ### 服务器配置
 

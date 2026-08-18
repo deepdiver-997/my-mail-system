@@ -27,8 +27,10 @@ rm -rf "$PROJECT_DIR/attachments"   && mkdir -p "$PROJECT_DIR/attachments"
 rm -rf /tmp/protorelay_test
 rm -rf /tmp/fsm_bench_mail /tmp/fsm_bench_att
 rm -rf /tmp/smtps_fsm_test_mail /tmp/smtps_fsm_test_att
+rm -rf /tmp/smtps_fsm_conc_test_mail /tmp/smtps_fsm_conc_test_att
 rm -rf /tmp/imaps_fsm_test_mail /tmp/imaps_fsm_test_att
 rm -f  /tmp/smtps_fsm_test.log /tmp/imaps_fsm_test.log
+rm -f  /tmp/smtps_fsm_concurrency_test.log
 echo "done"
 
 # 2. 数据库（非用户表）

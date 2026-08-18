@@ -3,6 +3,10 @@
 build/
 build-tsan/
 build_nohdfs/
+
+# ==================== 任务/一次性文档 ====================
+# 任务与 TODO 文档（一次性任务做完即删，不纳入版本控制）
+tasks/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake

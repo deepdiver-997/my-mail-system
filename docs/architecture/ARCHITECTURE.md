@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-ProtoRelay is a C++20 multi-protocol mail server focused on reliable mail ingest, local persistence,
+ProtoRelay is a C++17 multi-protocol mail server focused on reliable mail ingest, local persistence,
 asynchronous outbound delivery, and remote mailbox access.
 
 **Supported protocols:**

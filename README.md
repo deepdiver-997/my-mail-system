@@ -1,6 +1,6 @@
 # ProtoRelay
 
-ProtoRelay is a C++20 mail relay core focused on SMTP protocol execution and delivery pipeline foundations.
+ProtoRelay is a C++17 mail relay core focused on SMTP protocol execution and delivery pipeline foundations.
 
 ## Framework / Application Separation
 

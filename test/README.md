@@ -5,13 +5,17 @@
 ```
 test/
 ├── unit/                        # C++ 单元测试（零 I/O，MockConnection）
-│   ├── smtps_fsm_test.cpp       # SMTP FSM 状态机测试 (26 tests)
-│   ├── imaps_fsm_test.cpp       # IMAP FSM 状态机测试 (30 tests)
-│   ├── test_inbound_verifier.cpp# InboundVerifier 组件测试 (55 tests)
-│   ├── sql_queries_test.cpp     # SQL 查询生成器测试 (30 tests)
+│   ├── smtps_fsm_test.cpp       # SMTP FSM 状态机测试（串行）
+│   ├── smtps_fsm_concurrency_test.cpp  # SMTP 入站异步并发测试（MockIoContext + TSan）
+│   ├── imaps_fsm_test.cpp       # IMAP FSM 状态机测试
+│   ├── test_inbound_verifier.cpp# InboundVerifier 组件测试 (86 tests)
+│   ├── sql_queries_test.cpp     # SQL 查询生成器测试
 │   ├── outbound_smoke.cpp       # 出站类型/FSM 烟雾测试
-│   ├── mock_connection.h        # 零 I/O Mock 连接
-│   ├── mock_dns_resolver.h      # Mock DNS 解析器
+│   ├── mime_parser_test.cpp     # MIME 解析器测试
+│   ├── mock_io_context.h        # 简化 asio io_context（任务队列+线程）
+│   ├── mock_connection.h        # 零 I/O Mock 连接（任务投递模型）
+│   ├── mock_dns_resolver.h      # Mock DNS（Sync/Manual/AutoDelay 三模式）
+│   ├── mock_db_pool.h           # Mock DB 连接池（延迟 async_query）
 │   └── mock_outbound_stream.h   # 出站流 Mock
 ├── bench/                       # 性能基准测试
 │   ├── fsm_bench.cpp            # FSM 吞吐基准

@@ -34,6 +34,7 @@ cleanup() {
     rm -rf /tmp/protorelay_test_mail /tmp/protorelay_test_att
     rm -f /tmp/protorelay_test_smtp.log /tmp/protorelay_test_imap.log
     rm -rf /tmp/smtps_fsm_test_mail /tmp/smtps_fsm_test_att
+    rm -rf /tmp/smtps_fsm_conc_test_mail /tmp/smtps_fsm_conc_test_att
     rm -rf /tmp/imaps_fsm_test_mail /tmp/imaps_fsm_test_att
     rm -f /tmp/smtps_fsm_test.log /tmp/imaps_fsm_test.log
     info "Cleanup complete"
@@ -54,7 +55,7 @@ cd "$BUILD_DIR"
 
 cmake "${PROJECT_DIR}" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON 2>&1 | tail -2
 NPROC=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
-cmake --build . -j"$NPROC" --target smtpsServer imapsServer smtps_fsm_test imaps_fsm_test test_inbound_verifier outbound_smoke sql_queries_test 2>&1 | tail -3
+cmake --build . -j"$NPROC" --target smtpsServer imapsServer smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test 2>&1 | tail -3
 
 for target in smtpsServer imapsServer; do
     if [ -x "${BUILD_DIR}/${target}" ]; then
@@ -86,11 +87,13 @@ run_ctest() {
     fi
 }
 
-run_ctest "smtps_fsm_test"   "smtps_fsm_test"
-run_ctest "imaps_fsm_test"   "imaps_fsm_test"
-run_ctest "inbound_verifier" "test_inbound_verifier"
-run_ctest "outbound_smoke"   "outbound_smoke"
-run_ctest "sql_queries_test" "sql_queries_test"
+run_ctest "smtps_fsm_test"          "smtps_fsm_test"
+run_ctest "smtps_fsm_concurrency_test" "smtps_fsm_concurrency_test"
+run_ctest "imaps_fsm_test"          "imaps_fsm_test"
+run_ctest "inbound_verifier"        "test_inbound_verifier"
+run_ctest "outbound_smoke"          "outbound_smoke"
+run_ctest "sql_queries_test"        "sql_queries_test"
+run_ctest "mime_parser_test"        "mime_parser_test"
 
 if [ "$CTEST_FAILED" -ne 0 ]; then
     fail "Some unit tests failed"

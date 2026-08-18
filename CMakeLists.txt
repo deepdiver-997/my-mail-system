@@ -65,7 +65,9 @@ if(BUILD_OBJECT_ONLY)
 endif()
 
 # ===== C++ 标准 =====
-set(CMAKE_CXX_STANDARD 20)
+# 代码仅使用 C++17 特性（if constexpr / std::optional / std::filesystem 等），
+# 未使用任何 C++20 特性。为降低编译器版本要求，标准定为 C++17。
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 

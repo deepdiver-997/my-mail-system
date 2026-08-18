@@ -59,7 +59,8 @@ if [ "$NO_BUILD" = false ]; then
     cmake -B "$BUILD_DIR" -S "$PROJECT_DIR" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON >/dev/null 2>&1
     NJ=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
     if cmake --build "$BUILD_DIR" -j"$NJ" --target smtpsServer imapsServer \
-        smtps_fsm_test imaps_fsm_test test_inbound_verifier outbound_smoke sql_queries_test 2>&1 | tail -3; then
+        smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test \
+        test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test 2>&1 | tail -3; then
         pass_msg "Build OK"
     else
         fail_msg "Build failed"
@@ -72,7 +73,8 @@ fi
 # ════════════════════════════════════════════════════════
 step "Step 3: Unit tests (C++)"
 # ════════════════════════════════════════════════════════
-for t in smtps_fsm_test imaps_fsm_test test_inbound_verifier outbound_smoke sql_queries_test; do
+for t in smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test \
+         test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test; do
     if [ -x "${BUILD_DIR}/${t}" ]; then
         if "${BUILD_DIR}/${t}" >/dev/null 2>&1; then
             pass_msg "$t"
