@@ -47,6 +47,57 @@ test/
 └── README.md
 ```
 
+## Mock 模型与并发测试写法
+
+> 写 SMTP/IMAP 协议 FSM 的并发/健壮性测试前先读本节。mock 已重构为**还原 asio
+> 投递语义**的任务模型（见 `smtps_fsm_concurrency_test.cpp`），串行 FSM 测试
+> （smtps/imaps_fsm_test）零改动。
+
+**Mock 三层**：
+
+- **`mock_io_context.h`** — 简化 asio io_context（任务队列 + 独立工作线程）。
+  - 同步模式（默认，未 `start()`）：`post()` 内联执行 → 串行测试。
+  - 线程模式（`start()` 后）：任务由独立线程 FIFO 执行 → 真实异步投递。
+- **`mock_connection.h`** — 异步读写包装为任务投递到 MockIoContext，工作线程把
+  数据跨线程拷进 session 的 `read_buffer_`；`written()` 返回加锁副本。
+- **`mock_dns_resolver.h`** — 三模式：
+  - `Sync`（默认）：立即回调，兼容 `SyncDnsWrapper`（`test_inbound_verifier` 依赖）。
+  - `Manual`：存回调（按 domain 入 deque，支持多会话同域），测试线程 `fire_*()` 手动触发。
+  - `AutoDelay`：后台线程延迟触发（压力用；delay 须匹配生产时序，否则产生假竞争）。
+- **`mock_db_pool.h`** — `async_query/async_execute` 延迟回调模拟 DB worker。
+  同步分支持回调必须在**锁外**调用（否则回调链重入非递归锁死锁）。
+
+**驱动时序（关键不变量）**：
+
+```
+run_on_io(h) = conn->start()                        // 线程模式
+             + context().post(process_read)         // 命令链在独立线程执行
+             + wait_idle()                          // ★ 等 io 线程完全退出命令链
+    ↓
+wait_until(dns->has_pending_txt("domain") / db->has_pending_query())
+    ↓
+fire_*() 触发异步回调（手动/后台线程）                // ★ 必须在 wait_idle 之后
+```
+
+- ★ 回调触发**必须**等 io 线程完全退出命令链（`wait_idle` 保证）。否则回调线程与
+  io 线程并发访问 session（`paused_`/`state_`/`command_read_buffer_`）产生真竞争。
+  生产时序（DNS 延迟 >> io 退出）不会触发，但测试会。
+- 断言回调 pending 用 `wait_until(has_pending_*)` 轮询；读响应用 `h->captured`
+  （`capture_to` 镜像，session 析构后仍可断言）。
+- **已修进代码的会话不变量**（不是 bug）：`paused_`/`state_` 是 `std::atomic`；
+  FSM 回调 `drain_buffered_commands()` 后 `!s->is_paused()` 才 `do_async_read()`。
+
+**TSan**：`cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DENABLE_TSAN=ON`，
+跑并发测试；判定用 `grep -c "WARNING: ThreadSanitizer"`（PASS 文案里的"无 data
+race"会被 `grep "data race"` 误计）。
+
+**写 IMAP 并发测试迁移清单**：
+1. mock 三层已在位，IMAP 串行测试用同步模式即可。
+2. 盘点 IMAP 异步路径（认证 / STORE / FETCH 是否走 async DB/DNS）；若无，重点
+   测 session 生命周期与关闭时序（IDLE/DONE deferred read、LOGOUT、异常关闭）。
+3. 沿用 `run_on_io`（post+wait_idle）+ Manual fire 模式。
+4. 边界用例照抄 `boundary_callback_after_session_release`（shared_ptr 保活）。
+
 ## 运行测试
 
 ### 快速运行
