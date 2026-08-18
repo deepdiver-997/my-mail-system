@@ -1,7 +1,7 @@
 # ProtoRelay 架构演进文档
 
 > 本文档记录了项目从单线程 SMTP 原型到分布式邮件系统的完整演进过程。
-> 基于 v1-v8 各版本 git 历史整理，2026-06-25。
+> 基于 v1-v8 各版本 git 历史整理，2026-06-25；v8 阶段 I 更新至 2026-08-18。
 
 ---
 
@@ -239,26 +239,26 @@ DATA_END (邮件接收完毕)
 **这是架构最重大的一次重构**：
 
 ```
-                      ┌─────────────────────────────┐
+                      ┌─────────────────────────-────┐
                       │       ServerBase             │
                       │  ┌───────────────────────┐   │
                       │  │ Listener 1 (port 25)  │   │
                       │  │  policy: mta_verify   │   │
                       │  ├───────────────────────┤   │
                       │  │ Listener 2 (port 587) │   │
-                      │  │  policy: mandatory_auth│  │
+                      │  │ policy: mandatory_auth│   │
                       │  ├───────────────────────┤   │
                       │  │ Listener 3 (port 993) │   │
                       │  │  type: IMAP SSL       │   │
                       │  └───────────────────────┘   │
                       │                              │
                       │  ┌───────────────────────┐   │
-                      │  │    IShardRouter        │   │
-                      │  │  ├─ route(email)→shard │  │
-                      │  │  ├─ get_db_pool(shard) │  │
-                      │  │  └─ get_storage(shard) │  │
+                      │  │    IShardRouter       │   │
+                      │  │  ├─ route(email)→shard│   │
+                      │  │  ├─ get_db_pool(shard)│   │
+                      │  │  └─ get_storage(shard)│   │
                       │  └───────────────────────┘   │
-                      └─────────────────────────────┘
+                      └────────────────────────────-─┘
 
 重构前: ServerBase 直接持有 m_dbPool, m_storageProvider
 重构后: ServerBase 通过 m_shardRouter 间接访问所有后端资源
@@ -321,7 +321,7 @@ OutboundServer 事件驱动拉取:
                  │                                          │
       completion_cb ──→ try_pull()          on_claim_complete: 修正水位
       submit() ──────→ try_pull()               ├─ 有数据 → 分发 → 续拉/释放
-      retry_timer ───→ 重新拉取                 └─ 无数据 → 指数退避(5→60s)
+      retry_timer ───→ 重新拉取                   └─ 无数据 → 指数退避(5→60s)
 
 PersistentQueue 异步事务链:
   persist_mail_transactional_async()
@@ -349,6 +349,50 @@ FSM 暂停流水线 (paused gate):
 - **FSM 暂停流水线**：`SessionBase::paused_` 标志位，DB 查询期间暂停流水线消费，回调中 `drain_buffered_commands()` 恢复
 - **SMTP/IMAP FSM handler 改造**：`auth_user → auth_user_async`(callback)，IMAP `handle_create/delete/rename` 改为 paused 模式
 - **sync-bridge helpers**：`sq()`/`se()` 封装 async API → sync 结果，供非关键路径使用
+
+#### 阶段 I：入站校验彻底异步化 + 并发测试（2026-08-18）
+
+> 提交 `b34b10e` / `6140ea8` / `fbd07ff` / `734ac64`
+
+**背景**：阶段 C 的 SPF/DKIM/DMARC 校验在 io_context 线程上同步执行——DNS 查询用
+`SyncDnsWrapper` 阻塞等待，高负载下 io 线程被 DNS 延迟卡死。
+
+**改进**：改用 `IDnsResolver` 原生异步接口（c-ares）+ CPS 续传。**不在 io 线程
+阻塞，也不丢给工作线程**，回调直接在 c-ares 线程触发；session 用 paused 互斥保证
+回调独占操作。
+
+```
+MAIL FROM 异步 SPF                     DATA_END 异步全量校验
+    │                                    │
+    ├─ set_paused(true) ← 暂停流水线       ├─ set_paused(true)
+    │                                    ├─ verify_all_from_file_async
+    ├─ check_spf_only_async              │   ├─ SPF (CPS 递归, include≤10层)
+    │    └─ dns.async_resolve_txt        │   ├─ DKIM (verify_dkim_with_pubkey)
+    │         └─ c-ares 线程触发回调       │   │    └─ 流式 body hash
+    │              ├─ set_paused(false)  │   └─ DMARC
+    │              └─ 续写 250/550        └─ c-ares 回调链独占 session
+    │                                    ├─ set_paused(false)
+    RCPT user_exists / AUTH 同模式        └─ verify→submit→ack 整体续传
+    (DB async_query 回调续传)
+```
+
+**关键变化**：
+- **InboundVerifier 异步入口**：`check_spf_only_async` / `verify_all_async` /
+  `verify_all_from_file_async`；SPF `include/redirect/a/mx` 机制递归 CPS（深度 ≤10）
+- **FSM 暂停互斥**：发起校验前 `set_paused(true)`（io 线程不再处理该 session），
+  c-ares 回调独占操作 session，**无需 post 回 io_context**
+- **DNS 记录缓存**：复用线程安全 `LruCache`（双锁+LRU），per-record TTL
+  （SPF 5min / DMARC 15min / DKIM 1h，负缓存 1min），静态共享，到期自动重查
+- **shared_ptr 保活**：`auth_user_async` / `user_exists_async` 回调持有 session
+  shared_ptr，DB 真异步时 session 不会提前析构（`6140ea8`）
+- **并发测试 + TSan**（`fbd07ff` / `734ac64`）：
+  - 新 mock 还原 asio 投递语义：`MockIoContext`（任务队列+独立线程）、
+    `MockDnsResolver`（Sync/Manual/AutoDelay 三模式）、`MockDbPool`（延迟 async_query）
+  - 9 个并发用例覆盖 SPF / user_exists / auth / DMARC / DKIM 异步路径，含
+    "回调晚于 session 结束"边界用例（shared_ptr 保活）
+  - 暴露并修复真实 bug：`paused_`/`state_` 跨线程竞争（改 `std::atomic`）；
+    MAIL/RCPT 回调 `drain` 后未检查 `is_paused` 导致过早 EOF 关闭 session
+  - TSan（`-fsanitize=thread`）下零 data race
 
 ---
 
