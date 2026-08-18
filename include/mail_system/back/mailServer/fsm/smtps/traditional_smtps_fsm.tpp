@@ -513,40 +513,65 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         ctx->recipient_addresses.clear();
         ctx->spf_checked = false;
 
-        // SPF check
+        // SPF check — 异步（worker 线程池执行 DNS 查询，不阻塞 io_context）
         auto cfg = std::atomic_load(&session->get_server()->m_config);
-        std::string spf_reject_reason;
-        if (!cfg->perf_mode && cfg->inbound_spf_mode != "off" &&
-            !ctx->sender_address.empty() && ctx->sender_address != "<>") {
-            auto* dns = session->get_server()->get_dns_resolver().get();
-            if (dns) {
-                outbound::SyncDnsWrapper sync(*dns);
-                auto spf = inbound::InboundVerifier::check_spf_only(*dns,
-                    session->get_client_ip(), ctx->sender_address, ctx->ehlo_domain);
-                ctx->spf_checked = true;
-                ctx->spf_result = spf.result;
-                if (spf.result == "fail" &&
-                    cfg->inbound_spf_mode == "hard") {
-                    spf_reject_reason = "SPF hard-fail for " + ctx->sender_address;
-                }
-            }
-        }
-
-        if (!spf_reject_reason.empty()) {
-            session->do_async_write("550 5.7.1 SPF verification failed: " + spf_reject_reason + "\r\n",
+        bool need_spf = !cfg->perf_mode && cfg->inbound_spf_mode != "off" &&
+                        !ctx->sender_address.empty() && ctx->sender_address != "<>";
+        if (!need_spf) {
+            session->do_async_write("250 Ok\r\n",
                 [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
                     if (ec) return;
-                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                     s->do_async_read();
                 });
             return;
         }
 
-        session->do_async_write("250 Ok\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                if (ec) return;
-                s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                s->do_async_read();
+        auto* dns = session->get_server()->get_dns_resolver().get();
+        if (!dns) {
+            session->do_async_write("250 Ok\r\n",
+                [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                    if (ec) return;
+                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
+                    s->do_async_read();
+                });
+            return;
+        }
+
+        std::string client_ip = session->get_client_ip();
+        std::string sender = ctx->sender_address;
+        std::string ehlo = ctx->ehlo_domain;
+        std::string spf_mode = cfg->inbound_spf_mode;
+
+        // 发起 DNS 前显式置阻塞：状态机函数返回后 io_context 线程不会继续处理本 session
+        // （do_async_read 流水线循环检查 is_paused），DNS 回调独占操作，无需 post 回 io_context
+        session->set_paused(true);
+        inbound::InboundVerifier::check_spf_only_async(*dns, client_ip, sender, ehlo,
+            [session, sender, spf_mode](inbound::SpfResult spf) {
+                session->set_paused(false);
+                auto* c = static_cast<SmtpsContext*>(session->get_context());
+                c->spf_checked = true;
+                c->spf_result = spf.result;
+                c->spf_reason = spf.reason;
+                std::string reject;
+                if (spf.result == "fail" && spf_mode == "hard")
+                    reject = "SPF hard-fail for " + sender;
+                if (!reject.empty()) {
+                    session->do_async_write("550 5.7.1 SPF verification failed: " + reject + "\r\n",
+                        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                            if (ec) return;
+                            s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                            s->do_async_read();
+                        });
+                } else {
+                    session->do_async_write("250 Ok\r\n",
+                        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                            if (ec) return;
+                            s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
+                            s->drain_buffered_commands();
+                            if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
+                        });
+                }
             });
     } else {
         session->do_async_write("501 Syntax error in parameters or arguments\r\n",
@@ -743,10 +768,87 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         } catch (...) { /* sidecar 写入失败不阻塞收信 */ }
     }
 
-    // Inbound verification (DKIM/DMARC) — 正文从 body 文件流式读取，不全量读回内存
+    // Inbound verification (DKIM/DMARC/SPF) — 异步（worker 线程池执行 DNS/验签，不阻塞 io_context）
     bool needs_verify = !cfg->perf_mode && (
         (!ctx->spf_checked && cfg->inbound_spf_mode != "off") ||
          cfg->inbound_dkim_mode != "off" || cfg->inbound_dmarc_mode != "off");
+
+    // 入队 + 响应（after_enqueue / after_persist）。vr 有值则先记录校验结果。
+    auto finalize_mail = [session, smtp_session](std::optional<inbound::VerificationResult> vr) {
+        try {
+            if (vr) {
+                auto* c = static_cast<SmtpsContext*>(session->get_context());
+                c->dkim_result = vr->dkim.result;
+                c->dmarc_result = vr->dmarc.result;
+                if (!c->spf_checked) { c->spf_result = vr->spf.result; c->spf_checked = true; }
+                c->verification_run = true;
+            }
+            auto submit_result = smtp_session->submit_mail_to_queue();
+            if (!submit_result.accepted) {
+                smtp_session->discard_current_mail();
+                session->do_async_write("451 Requested action aborted: insufficient storage or backend pressure\r\n",
+                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
+                return;
+            }
+            const bool ack_after_enqueue =
+                std::atomic_load(&session->get_server()->m_config)->inbound_ack_mode == InboundAckMode::AFTER_ENQUEUE;
+            if (ack_after_enqueue) {
+                session->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
+                smtp_session->reset_mail_state();
+                session->get_server()->increment_mails_accepted();
+                session->do_async_write("250 OK\r\n",
+                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                        if (ec) return;
+                        s->do_async_read();
+                    });
+                return;
+            }
+            // after_persist: wait for persistence, then reply
+            auto pool = session->get_server()->m_workerThreadPool;
+            pool->post([s = session]() mutable {
+                auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(s.get());
+                if (!smtp_s) { if (s) s->close(); return; }
+                if (!smtp_s->has_pending_mail_submission()) { s->close(); return; }
+
+                const auto wait_to = std::chrono::milliseconds(
+                    std::atomic_load(&s->get_server()->m_config)->inbound_persist_wait_timeout_ms);
+                auto deadline = std::chrono::steady_clock::now() + wait_to;
+                auto backoff = std::chrono::milliseconds(50);
+                while (std::chrono::steady_clock::now() < deadline) {
+                    auto status = smtp_s->get_pending_mail_persist_status();
+                    if (status == persist_storage::PersistStatus::SUCCESS) {
+                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
+                        smtp_s->reset_mail_state();
+                        s->get_server()->increment_mails_accepted();
+                        s->do_async_write("250 OK\r\n",
+                            [](std::shared_ptr<SessionBase<ConnectionType>> ss, const boost::system::error_code& ec) mutable {
+                                if (ec) return;
+                                ss->do_async_read();
+                            });
+                        return;
+                    }
+                    if (status == persist_storage::PersistStatus::FAILED ||
+                        status == persist_storage::PersistStatus::CANCELLED) {
+                        smtp_s->clear_pending_mail_submission();
+                        s->do_async_write("451 Requested action aborted: local processing error\r\n",
+                            [](std::shared_ptr<SessionBase<ConnectionType>> ss, const boost::system::error_code&) mutable { ss->close(); });
+                        return;
+                    }
+                    std::this_thread::sleep_for(backoff);
+                    backoff = std::min(backoff * 2, std::chrono::milliseconds(400));
+                }
+                smtp_s->cancel_pending_mail_submission();
+                smtp_s->clear_pending_mail_submission();
+                s->do_async_write("451 Requested action aborted: local processing timeout\r\n",
+                    [](std::shared_ptr<SessionBase<ConnectionType>> ss, const boost::system::error_code&) mutable { ss->close(); });
+            });
+        } catch (const std::exception& e) {
+            LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());
+            if (smtp_session) smtp_session->discard_current_mail();
+            session->do_async_write("451 Requested action aborted: local processing error\r\n",
+                [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
+        }
+    };
 
     if (needs_verify && !ctx->verification_run) {
         std::string client_ip = session->get_client_ip();
@@ -758,28 +860,23 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
 
         auto* dns = session->get_server()->get_dns_resolver().get();
         if (dns && !body_path.empty()) {
-            inbound::VerificationResult vr;
-            inbound::InboundVerifier verifier(*dns);
             inbound::SpfResult pre_spf{ctx->spf_result, ""};
-            verifier.verify_all_from_file(client_ip, mail_from, helo, headers, body_path, *cfg, vr,
-                                          ctx->spf_checked ? &pre_spf : nullptr);
-            ctx->dkim_result = vr.dkim.result;
-            ctx->dmarc_result = vr.dmarc.result;
-            if (!ctx->spf_checked) {
-                ctx->spf_result = vr.spf.result;
-                ctx->spf_checked = true;
-            }
-            ctx->verification_run = true;
+            session->set_paused(true);   // 校验期间暂停流水线，回调中恢复
+            inbound::InboundVerifier::verify_all_from_file_async(*dns,
+                client_ip, mail_from, helo, headers, body_path, *cfg,
+                [session, finalize_mail = std::move(finalize_mail)](inbound::VerificationResult vr) mutable {
+                    // c-ares 回调独占操作（session 已 paused），直接执行，无需 post 回 io_context
+                    session->set_paused(false);
+                    finalize_mail(std::move(vr));
+                },
+                ctx->spf_checked ? &pre_spf : nullptr);
+            return;
         }
+        // dns 不可用或 body_path 空 → 跳过校验，直接入队
     }
 
-    auto submit_result = smtp_session->submit_mail_to_queue();
-    if (!submit_result.accepted) {
-        smtp_session->discard_current_mail();
-        session->do_async_write("451 Requested action aborted: insufficient storage or backend pressure\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
-        return;
-    }
+    // 同步路径：不需要校验 或 无法校验 → 直接入队 + 响应
+    finalize_mail(std::nullopt);
     } catch (const std::exception& e) {
         LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());
         if (smtp_session) smtp_session->discard_current_mail();
@@ -787,60 +884,6 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
             [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
         return;
     }
-
-    const bool ack_after_enqueue =
-        std::atomic_load(&session->get_server()->m_config)->inbound_ack_mode == InboundAckMode::AFTER_ENQUEUE;
-    if (ack_after_enqueue) {
-        session->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
-        smtp_session->reset_mail_state();
-        session->get_server()->increment_mails_accepted();
-        session->do_async_write("250 OK\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                if (ec) return;
-                s->do_async_read();
-            });
-        return;
-    }
-
-    // after_persist: wait for persistence, then reply
-    auto pool = session->get_server()->m_workerThreadPool;
-    pool->post([s = session]() mutable {
-        auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(s.get());
-        if (!smtp_s) { if (s) s->close(); return; }
-        if (!smtp_s->has_pending_mail_submission()) { s->close(); return; }
-
-        const auto wait_to = std::chrono::milliseconds(
-            std::atomic_load(&s->get_server()->m_config)->inbound_persist_wait_timeout_ms);
-        auto deadline = std::chrono::steady_clock::now() + wait_to;
-        auto backoff = std::chrono::milliseconds(50);
-        while (std::chrono::steady_clock::now() < deadline) {
-            auto status = smtp_s->get_pending_mail_persist_status();
-            if (status == persist_storage::PersistStatus::SUCCESS) {
-                s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
-                smtp_s->reset_mail_state();
-                s->get_server()->increment_mails_accepted();
-                s->do_async_write("250 OK\r\n",
-                    [](std::shared_ptr<SessionBase<ConnectionType>> ss, const boost::system::error_code& ec) mutable {
-                        if (ec) return;
-                        ss->do_async_read();
-                    });
-                return;
-            }
-            if (status == persist_storage::PersistStatus::FAILED ||
-                status == persist_storage::PersistStatus::CANCELLED) {
-                smtp_s->clear_pending_mail_submission();
-                s->do_async_write("451 Requested action aborted: local processing error\r\n",
-                    [](std::shared_ptr<SessionBase<ConnectionType>> ss, const boost::system::error_code&) mutable { ss->close(); });
-                return;
-            }
-            std::this_thread::sleep_for(backoff);
-            backoff = std::min(backoff * 2, std::chrono::milliseconds(400));
-        }
-        smtp_s->cancel_pending_mail_submission();
-        smtp_s->clear_pending_mail_submission();
-        s->do_async_write("451 Requested action aborted: local processing timeout\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> ss, const boost::system::error_code&) mutable { ss->close(); });
-    });
 }
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::handle_wait_quit_quit(

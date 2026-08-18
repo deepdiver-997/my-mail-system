@@ -671,6 +671,104 @@ static void test_streaming_dkim_body_hash() {
 }
 
 // ================================================================
+// Phase 3b: 异步接口测试（check_spf_only_async / verify_all_async）
+// ================================================================
+
+static void test_async_verify_all() {
+    std::cout << "\n=== async verify_all ===" << std::endl;
+
+    TEST("async check_spf_only pass");
+    {
+        InboundVerifier::clear_dns_cache();   // 隔离 static 缓存
+        MockDnsResolver dns;
+        dns.set_txt("example.com", {"v=spf1 ip4:192.0.2.0/24 -all"});
+        bool called = false;
+        InboundVerifier::check_spf_only_async(dns, "192.0.2.10", "<user@example.com>",
+            "mx.example.com", [&](SpfResult r) {
+                called = true;
+                check("async spf=pass", r.result == "pass");
+            });
+        check("async spf callback invoked", called);
+    }
+
+    TEST("async check_spf_only fail (hard qualifier)");
+    {
+        InboundVerifier::clear_dns_cache();
+        MockDnsResolver dns;
+        dns.set_txt("example.com", {"v=spf1 ip4:198.51.100.0/24 -all"});
+        bool called = false;
+        InboundVerifier::check_spf_only_async(dns, "192.0.2.10", "<user@example.com>",
+            "mx.example.com", [&](SpfResult r) {
+                called = true;
+                check("async spf=fail", r.result == "fail");
+            });
+        check("async spf-fail callback invoked", called);
+    }
+
+    TEST("async SPF include recursion");
+    {
+        InboundVerifier::clear_dns_cache();
+        MockDnsResolver dns;
+        dns.set_txt("example.com", {"v=spf1 include:_spf.example.net -all"});
+        dns.set_txt("_spf.example.net", {"v=spf1 ip4:192.0.2.0/24 -all"});
+        bool called = false;
+        InboundVerifier::check_spf_only_async(dns, "192.0.2.10", "<user@example.com>",
+            "mx.example.com", [&](SpfResult r) {
+                called = true;
+                check("async include spf=pass", r.result == "pass");
+            });
+        check("async include callback invoked", called);
+    }
+
+    TEST("async verify_all SPF pass");
+    {
+        InboundVerifier::clear_dns_cache();
+        MockDnsResolver dns;
+        dns.set_txt("example.com", {"v=spf1 ip4:192.0.2.0/24 -all"});
+        ServerConfig cfg;
+        cfg.inbound_spf_mode = "hard";
+        cfg.inbound_dkim_mode = "off";
+        cfg.inbound_dmarc_mode = "off";
+
+        bool called = false;
+        InboundVerifier::verify_all_async(dns, "192.0.2.10", "<user@example.com>",
+            "mx.example.com", "From: user@example.com\r\n\r\n", "Hello\r\n", cfg,
+            [&](VerificationResult vr) {
+                called = true;
+                check("async spf=pass", vr.spf.result == "pass");
+                check("async dkim=none", vr.dkim.result == "none");
+                check("async dmarc=none", vr.dmarc.result == "none");
+            });
+        check("async verify_all callback invoked", called);
+    }
+
+    TEST("async verify_all precomputed SPF");
+    {
+        InboundVerifier::clear_dns_cache();
+        MockDnsResolver dns;   // 不设置 TXT，若查询会得 none
+        ServerConfig cfg;
+        cfg.inbound_spf_mode = "hard";
+        cfg.inbound_dkim_mode = "off";
+        cfg.inbound_dmarc_mode = "off";
+
+        SpfResult pre_spf;
+        pre_spf.result = "pass";
+        pre_spf.reason = "precomputed";
+
+        bool called = false;
+        InboundVerifier::verify_all_async(dns, "192.0.2.10", "<user@example.com>",
+            "mx.example.com", "From: sender@example.com\r\n\r\n", "Hello\r\n", cfg,
+            [&](VerificationResult vr) {
+                called = true;
+                check("async precomputed spf=pass", vr.spf.result == "pass");
+                check("async precomputed reason preserved", vr.spf.reason == "precomputed");
+            },
+            &pre_spf);
+        check("async precomputed callback invoked", called);
+    }
+}
+
+// ================================================================
 // Main
 // ================================================================
 
@@ -685,6 +783,9 @@ int main() {
 
     // Phase 3: verify_all tests
     test_verify_all();
+
+    // Phase 3b: async interfaces
+    test_async_verify_all();
 
     // Phase 4: DKIM QQ fixture
     test_dkim_qq_fixture();

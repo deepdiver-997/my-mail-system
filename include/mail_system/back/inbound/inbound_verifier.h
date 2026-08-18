@@ -2,6 +2,9 @@
 #define MAIL_SYSTEM_INBOUND_VERIFIER_H
 
 #include "mail_system/back/outbound/dns_resolver.h"
+#include <chrono>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -85,16 +88,65 @@ public:
                                     const std::string& mail_from,
                                     const std::string& helo_domain);
 
+    // ---- 异步入口（直接用 IDnsResolver 原生异步接口，CPS 续传）----
+    // 回调在 c-ares 线程触发；FSM 需用 connection->get_executor() post 回 io_context 后再操作 session。
+    static void check_spf_only_async(outbound::IDnsResolver& dns,
+                                     const std::string& client_ip,
+                                     const std::string& mail_from,
+                                     const std::string& helo_domain,
+                                     std::function<void(SpfResult)> cb);
+
+    // 完整校验（内存版）异步
+    static void verify_all_async(outbound::IDnsResolver& dns,
+                                 const std::string& client_ip,
+                                 const std::string& mail_from,
+                                 const std::string& helo_domain,
+                                 const std::string& raw_headers,
+                                 const std::string& raw_body,
+                                 const ServerConfig& config,
+                                 std::function<void(VerificationResult)> cb,
+                                 const SpfResult* precomputed_spf = nullptr);
+
+    // 清空共享 DNS 记录缓存（测试隔离 / 手动失效）
+    static void clear_dns_cache();
+
+    // 完整校验（body 文件流式版）异步 — 生产 DATA_END 用
+    static void verify_all_from_file_async(outbound::IDnsResolver& dns,
+                                           const std::string& client_ip,
+                                           const std::string& mail_from,
+                                           const std::string& helo_domain,
+                                           const std::string& raw_headers,
+                                           const std::string& body_path,
+                                           const ServerConfig& config,
+                                           std::function<void(VerificationResult)> cb,
+                                           const SpfResult* precomputed_spf = nullptr);
+
     // 域名提取
     static std::string extract_domain(const std::string& addr);
     static std::string extract_from_header_domain(const std::string& headers);
 
 private:
-    // SPF 验证
+    struct SpfMechanism;   // 前向声明（定义见下），供 eval_spf_mechanisms_async 签名使用
+
+    // SPF 验证（同步，内部用 SyncDnsWrapper；保留给单元测试）
     SpfResult check_spf(const std::string& client_ip,
                        const std::string& mail_from,
                        const std::string& helo_domain,
                        int depth = 0);
+
+    // SPF 验证（异步 CPS：DNS 查询通过回调续传）
+    void check_spf_async(const std::string& client_ip,
+                         const std::string& mail_from,
+                         const std::string& helo_domain,
+                         std::function<void(SpfResult)> cb);
+
+    // 异步评估 SPF 机制列表（从 idx 续传），cb 传 "match"/"no_match"/"temperror"/"permerror"
+    void eval_spf_mechanisms_async(const std::vector<SpfMechanism>& mechs,
+                                   size_t idx,
+                                   const std::string& client_ip,
+                                   const std::string& domain,
+                                   int depth,
+                                   std::function<void(std::string)> cb);
 
     // DKIM 验证（正文在内存字符串中）
     DkimResult check_dkim(const std::string& raw_headers,
@@ -104,11 +156,30 @@ private:
     DkimResult check_dkim_from_file(const std::string& raw_headers,
                                     const std::string& body_path);
 
-    // DMARC 验证
+    // DKIM 验证（异步 CPS：body hash 本地计算，仅 key DNS 查询异步）
+    void check_dkim_async(const std::string& raw_headers,
+                          const std::string& raw_body,
+                          std::function<void(DkimResult)> cb);
+    void check_dkim_from_file_async(const std::string& raw_headers,
+                                    const std::string& body_path,
+                                    std::function<void(DkimResult)> cb);
+
+    // DMARC 验证（同步）
     DmarcResult check_dmarc(const std::string& from_domain,
                             const SpfResult& spf,
                             const DkimResult& dkim,
                             const std::string& mail_from_domain);
+
+    // DMARC 验证（异步 CPS：_dmarc DNS 查询异步）
+    void check_dmarc_async(const std::string& from_domain,
+                           const SpfResult& spf,
+                           const DkimResult& dkim,
+                           const std::string& mail_from_domain,
+                           std::function<void(DmarcResult)> cb);
+
+    // 查 TXT（带 DNS 记录缓存：命中直接回调；未命中异步查 + 回填缓存）
+    void get_txt_async(const std::string& key, std::chrono::seconds ttl,
+                       std::function<void(std::vector<std::string>)> cb);
 
     // SPF 记录解析辅助
     struct SpfMechanism {
@@ -152,11 +223,18 @@ private:
                                     const std::string& computed_bh,
                                     std::string& error_out);
 
+    // 验签核心（pubkey 已从 DNS 获取；供异步 DKIM 复用，避免重复 DNS 代码路径）
+    bool verify_dkim_with_pubkey(const DkimSignature& sig,
+                                 const std::string& raw_headers,
+                                 const std::string& computed_bh,
+                                 const std::string& pubkey_b64,
+                                 std::string& error_out);
+
     // 对齐检查
     static bool is_aligned(const std::string& auth_domain,
                           const std::string& from_domain);
 
-    outbound::SyncDnsWrapper dns_;
+    outbound::IDnsResolver& dns_;   // 原生异步 DNS 接口
 };
 
 } // namespace inbound

@@ -1,6 +1,7 @@
 #include "mail_system/back/inbound/inbound_verifier.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/mail_crypto.h"
+#include "mail_system/back/common/lru_cache.h"
 #include "framework/server_config.h"
 
 #include <openssl/evp.h>
@@ -17,6 +18,14 @@
 namespace mail_system {
 namespace inbound {
 namespace {
+
+// ---------- DNS 记录缓存 TTL（阶段 2） ----------
+// SPF/DMARC/DKIM 均为 DNS TXT 记录（非 X.509 证书），有 DNS TTL。
+// 当前 IDnsResolver 不返回 TTL，故用固定 TTL + 负缓存短 TTL，到期自动重查，不会永久用旧值。
+constexpr std::chrono::seconds kSpfTtl{300};      // SPF 记录：5 min
+constexpr std::chrono::seconds kDmarcTtl{900};    // DMARC 记录：15 min
+constexpr std::chrono::seconds kDkimTtl{3600};    // DKIM 公钥：1 h
+constexpr std::chrono::seconds kNegativeTtl{60};  // 负缓存（无记录/失败）：1 min
 
 // ---------- helpers ----------
 
@@ -157,6 +166,123 @@ SpfResult InboundVerifier::check_spf_only(outbound::IDnsResolver& dns,
                                           const std::string& helo_domain) {
     InboundVerifier verifier(dns);
     return verifier.check_spf(client_ip, mail_from, helo_domain);
+}
+
+void InboundVerifier::check_spf_only_async(outbound::IDnsResolver& dns,
+                                           const std::string& client_ip,
+                                           const std::string& mail_from,
+                                           const std::string& helo_domain,
+                                           std::function<void(SpfResult)> cb) {
+    // shared_ptr 持有 verifier，保证异步链期间 this 存活（dns 由调用方 server 持有）
+    auto verifier = std::make_shared<InboundVerifier>(dns);
+    verifier->check_spf_async(client_ip, mail_from, helo_domain,
+        [verifier, cb = std::move(cb)](SpfResult r) mutable { cb(std::move(r)); });
+}
+
+void InboundVerifier::verify_all_async(outbound::IDnsResolver& dns,
+                                       const std::string& client_ip,
+                                       const std::string& mail_from,
+                                       const std::string& helo_domain,
+                                       const std::string& raw_headers,
+                                       const std::string& raw_body,
+                                       const ServerConfig& config,
+                                       std::function<void(VerificationResult)> cb,
+                                       const SpfResult* precomputed_spf) {
+    auto verifier = std::make_shared<InboundVerifier>(dns);
+    auto config_copy = config;
+    auto pre = (precomputed_spf ? std::optional<SpfResult>(*precomputed_spf) : std::nullopt);
+    auto vr = std::make_shared<VerificationResult>();
+
+    std::function<void()> step_dkim, step_dmarc, step_done;
+    step_done = [verifier, cb = std::move(cb), vr]() mutable { cb(std::move(*vr)); };
+
+    step_dmarc = [verifier, vr, step_done, raw_headers, mail_from, config_copy]() {
+        if (config_copy.inbound_dmarc_mode != "off") {
+            std::string from_domain = extract_from_header_domain(raw_headers);
+            std::string mf_domain = extract_domain(mail_from);
+            verifier->check_dmarc_async(from_domain, vr->spf, vr->dkim, mf_domain,
+                [vr, step_done, from_domain](DmarcResult dm) mutable {
+                    vr->dmarc = std::move(dm);
+                    vr->dmarc.header_from_domain = from_domain;
+                    step_done();
+                });
+        } else {
+            vr->dmarc.result = "none"; vr->dmarc.reason = "DMARC check disabled";
+            step_done();
+        }
+    };
+
+    step_dkim = [verifier, vr, step_dmarc, raw_headers, raw_body, config_copy]() {
+        if (config_copy.inbound_dkim_mode != "off") {
+            verifier->check_dkim_async(raw_headers, raw_body,
+                [vr, step_dmarc](DkimResult dk) mutable { vr->dkim = std::move(dk); step_dmarc(); });
+        } else {
+            vr->dkim.result = "none"; vr->dkim.reason = "DKIM check disabled";
+            step_dmarc();
+        }
+    };
+
+    if (pre) {
+        vr->spf = *pre; step_dkim();
+    } else if (config_copy.inbound_spf_mode != "off") {
+        verifier->check_spf_async(client_ip, mail_from, helo_domain,
+            [vr, step_dkim](SpfResult r) mutable { vr->spf = std::move(r); step_dkim(); });
+    } else {
+        vr->spf = {"none", "SPF check disabled"}; step_dkim();
+    }
+}
+
+void InboundVerifier::verify_all_from_file_async(outbound::IDnsResolver& dns,
+                                                 const std::string& client_ip,
+                                                 const std::string& mail_from,
+                                                 const std::string& helo_domain,
+                                                 const std::string& raw_headers,
+                                                 const std::string& body_path,
+                                                 const ServerConfig& config,
+                                                 std::function<void(VerificationResult)> cb,
+                                                 const SpfResult* precomputed_spf) {
+    auto verifier = std::make_shared<InboundVerifier>(dns);
+    auto config_copy = config;
+    auto pre = (precomputed_spf ? std::optional<SpfResult>(*precomputed_spf) : std::nullopt);
+    auto vr = std::make_shared<VerificationResult>();
+
+    std::function<void()> step_dkim, step_dmarc, step_done;
+    step_done = [verifier, cb = std::move(cb), vr]() mutable { cb(std::move(*vr)); };
+
+    step_dmarc = [verifier, vr, step_done, raw_headers, mail_from, config_copy]() {
+        if (config_copy.inbound_dmarc_mode != "off") {
+            std::string from_domain = extract_from_header_domain(raw_headers);
+            std::string mf_domain = extract_domain(mail_from);
+            verifier->check_dmarc_async(from_domain, vr->spf, vr->dkim, mf_domain,
+                [vr, step_done, from_domain](DmarcResult dm) mutable {
+                    vr->dmarc = std::move(dm);
+                    vr->dmarc.header_from_domain = from_domain;
+                    step_done();
+                });
+        } else {
+            vr->dmarc.result = "none"; vr->dmarc.reason = "DMARC check disabled";
+            step_done();
+        }
+    };
+
+    step_dkim = [verifier, vr, step_dmarc, raw_headers, body_path, config_copy]() {
+        if (config_copy.inbound_dkim_mode != "off") {
+            verifier->check_dkim_from_file_async(raw_headers, body_path,
+                [vr, step_dmarc](DkimResult dk) mutable { vr->dkim = std::move(dk); step_dmarc(); });
+        } else {
+            vr->dkim.result = "none"; vr->dkim.reason = "DKIM check disabled";
+            step_dmarc();
+        }
+    };
+
+    if (pre) {
+        vr->spf = *pre; step_dkim();
+    } else if (config_copy.inbound_spf_mode != "off") {
+        verifier->check_spf_async(client_ip, mail_from, helo_domain,
+            [vr, step_dkim](SpfResult r) mutable { vr->spf = std::move(r); step_dkim(); });
+    } else {
+        vr->spf = {"none", "SPF check disabled"}; step_dkim();
+    }
 }
 
 void InboundVerifier::verify_all(const std::string& client_ip,
@@ -361,7 +487,7 @@ std::string InboundVerifier::eval_spf_mechanism(const SpfMechanism& mech,
 
     if (m == "a") {
         std::string target = mech.value.empty() ? domain : mech.value;
-        auto addrs = dns_.resolve_host_addresses(target);
+        auto addrs = outbound::SyncDnsWrapper(dns_).resolve_host_addresses(target);
         for (const auto& a : addrs) {
             if (a == client_ip) return "match";
         }
@@ -370,9 +496,9 @@ std::string InboundVerifier::eval_spf_mechanism(const SpfMechanism& mech,
 
     if (m == "mx") {
         std::string target = mech.value.empty() ? domain : mech.value;
-        auto mx_records = dns_.resolve_mx(target);
+        auto mx_records = outbound::SyncDnsWrapper(dns_).resolve_mx(target);
         for (const auto& mx : mx_records) {
-            auto addrs = dns_.resolve_host_addresses(mx.host);
+            auto addrs = outbound::SyncDnsWrapper(dns_).resolve_host_addresses(mx.host);
             for (const auto& a : addrs) {
                 if (a == client_ip) return "match";
             }
@@ -383,7 +509,7 @@ std::string InboundVerifier::eval_spf_mechanism(const SpfMechanism& mech,
     if (m == "include") {
         if (depth >= 10) return "permerror"; // RFC 7208: max 10 include levels
         std::string target = mech.value;
-        auto txt_records = dns_.resolve_txt(target);
+        auto txt_records = outbound::SyncDnsWrapper(dns_).resolve_txt(target);
         std::string spf_record;
         for (const auto& rec : txt_records) {
             if (rec.find("v=spf1") == 0) {
@@ -407,7 +533,7 @@ std::string InboundVerifier::eval_spf_mechanism(const SpfMechanism& mech,
 
     if (m == "redirect") {
         std::string target = mech.value;
-        auto txt_records = dns_.resolve_txt(target);
+        auto txt_records = outbound::SyncDnsWrapper(dns_).resolve_txt(target);
         std::string spf_record;
         for (const auto& rec : txt_records) {
             if (rec.find("v=spf1") == 0) {
@@ -454,8 +580,8 @@ SpfResult InboundVerifier::check_spf(const std::string& client_ip,
         return result;
     }
 
-    // Query TXT records
-    auto txt_records = dns_.resolve_txt(domain);
+    // Query TXT records（同步方法用 SyncDnsWrapper 临时包装）
+    auto txt_records = outbound::SyncDnsWrapper(dns_).resolve_txt(domain);
     std::string spf_record;
     for (const auto& rec : txt_records) {
         if (rec.find("v=spf1") == 0) {
@@ -506,6 +632,203 @@ SpfResult InboundVerifier::check_spf(const std::string& client_ip,
     result.result = "neutral";
     result.reason = "no SPF mechanism matched";
     return result;
+}
+
+// ---- 异步 SPF（CPS：DNS 查询通过回调续传，回调在 c-ares 线程触发）----
+
+// 共享 DNS 记录缓存（跨 InboundVerifier 实例，供不同邮件的校验复用）
+// 复用通用线程安全 LruCache（shared_mutex+mutex 双锁 + LRU 淘汰），value 携带自定义 TTL
+// （SPF/DMARC/DKIM/负缓存 TTL 不同，LruCache 的 m_ttl 仅作 fallback）
+struct DnsCacheValue {
+    std::vector<std::string> records;
+    std::chrono::steady_clock::time_point expires;
+};
+static LruCache<std::string, DnsCacheValue>& inbound_dns_cache() {
+    static constexpr size_t kCacheCapacity = 4096;
+    static LruCache<std::string, DnsCacheValue> cache(kCacheCapacity, std::chrono::seconds(300));
+    return cache;
+}
+
+void InboundVerifier::clear_dns_cache() {
+    inbound_dns_cache().clear();
+}
+
+void InboundVerifier::get_txt_async(const std::string& key, std::chrono::seconds ttl,
+                                    std::function<void(std::vector<std::string>)> cb) {
+    bool stale = false;
+    DnsCacheValue v;
+    if (inbound_dns_cache().get(key, v, stale) &&
+        std::chrono::steady_clock::now() < v.expires) {
+        cb(v.records);   // 命中且未过期
+        return;
+    }
+    dns_.async_resolve_txt(key,
+        [key, ttl, cb = std::move(cb)](std::vector<std::string> records) mutable {
+            auto exp = std::chrono::steady_clock::now() + (records.empty() ? kNegativeTtl : ttl);
+            inbound_dns_cache().put(key, DnsCacheValue{records, exp});
+            cb(std::move(records));
+        });
+}
+
+void InboundVerifier::check_spf_async(const std::string& client_ip,
+                                      const std::string& mail_from,
+                                      const std::string& helo_domain,
+                                      std::function<void(SpfResult)> cb) {
+    std::string domain;
+    if (mail_from.empty() || mail_from == "<>") {
+        domain = helo_domain;
+    } else {
+        domain = extract_domain(mail_from);
+    }
+    if (domain.empty()) {
+        cb({"none", "no valid domain for SPF check"});
+        return;
+    }
+
+    get_txt_async(domain, kSpfTtl,
+        [this, client_ip, domain, cb = std::move(cb)](std::vector<std::string> txt_records) mutable {
+            SpfResult result;
+            std::string spf_record;
+            for (const auto& rec : txt_records) {
+                if (rec.find("v=spf1") == 0) {
+                    if (!spf_record.empty()) {
+                        cb({"permerror", "multiple SPF records for " + domain});
+                        return;
+                    }
+                    spf_record = rec;
+                }
+            }
+            if (spf_record.empty()) {
+                cb({"none", "no SPF record for " + domain});
+                return;
+            }
+            auto mechanisms = parse_spf_record(spf_record);
+            eval_spf_mechanisms_async(mechanisms, 0, client_ip, domain, 0,
+                [cb = std::move(cb)](std::string eval) mutable {
+                    SpfResult r;
+                    if (eval == "pass")       { r.result = "pass"; }
+                    else if (eval == "fail")  { r.result = "fail"; r.reason = "SPF hard fail"; }
+                    else if (eval == "softfail") { r.result = "softfail"; r.reason = "SPF soft fail"; }
+                    else if (eval == "neutral")  { r.result = "neutral"; r.reason = "no SPF mechanism matched"; }
+                    else if (eval == "temperror"){ r.result = "temperror"; r.reason = "SPF temporary error"; }
+                    else if (eval == "permerror"){ r.result = "permerror"; r.reason = "SPF permanent error"; }
+                    else                         { r.result = "neutral"; r.reason = "no SPF mechanism matched"; }
+                    cb(std::move(r));
+                });
+        });
+}
+
+void InboundVerifier::eval_spf_mechanisms_async(
+    const std::vector<SpfMechanism>& mechs, size_t idx,
+    const std::string& client_ip, const std::string& domain, int depth,
+    std::function<void(std::string)> cb)
+{
+    if (idx >= mechs.size()) { cb("neutral"); return; }
+    const auto& mech = mechs[idx];
+
+    // 单个机制评估（本地机制同步返回；DNS 机制走异步回调）
+    // 捕获 this：递归续传 eval_spf_mechanisms_async（verifier 由 check_spf_async 的 shared_ptr 持有）
+    auto continue_after = [this, mechs, idx, client_ip, domain, depth,
+                           cb = std::move(cb)](std::string eval) mutable {
+        if (eval == "match") {
+            if (mechs[idx].qualifier == "+") cb("pass");
+            else if (mechs[idx].qualifier == "-") cb("fail");
+            else if (mechs[idx].qualifier == "~") cb("softfail");
+            else cb("neutral");
+            return;
+        }
+        if (eval == "temperror") { cb("temperror"); return; }
+        if (eval == "permerror") { cb("permerror"); return; }
+        // no_match → 评估下一个机制
+        this->eval_spf_mechanisms_async(
+            mechs, idx + 1, client_ip, domain, depth, std::move(cb));
+    };
+
+    const auto& m = mech.mechanism;
+    if (m == "ip4") {
+        continue_after(ip4_match(client_ip, mech.value, mech.cidr) ? "match" : "no_match");
+        return;
+    }
+    if (m == "ip6") {
+        continue_after((client_ip == mech.value) ? "match" : "no_match");
+        return;
+    }
+    if (m == "a") {
+        std::string target = mech.value.empty() ? domain : mech.value;
+        dns_.async_resolve_host(target,
+            [client_ip, continue_after = std::move(continue_after)](std::vector<std::string> addrs) mutable {
+                for (const auto& a : addrs) if (a == client_ip) { continue_after("match"); return; }
+                continue_after("no_match");
+            });
+        return;
+    }
+    if (m == "mx") {
+        std::string target = mech.value.empty() ? domain : mech.value;
+        dns_.async_resolve_mx(target,
+            [this, client_ip, continue_after = std::move(continue_after)](std::vector<outbound::MxRecord> mxs) mutable {
+                // 用 shared_ptr 持有 continue_after 与递归步进器，避免多级 move 陷阱
+                auto cont = std::make_shared<std::function<void(std::string)>>(std::move(continue_after));
+                auto addrs = std::make_shared<std::vector<std::string>>();
+                auto mxs_s = std::make_shared<std::vector<outbound::MxRecord>>(std::move(mxs));
+                auto check_one = std::make_shared<std::function<void(size_t)>>();
+                *check_one = [this, client_ip, addrs, mxs_s, cont, check_one](size_t i) mutable {
+                    if (i >= mxs_s->size()) { (*cont)("no_match"); return; }
+                    dns_.async_resolve_host((*mxs_s)[i].host,
+                        [client_ip, addrs, mxs_s, i, cont, check_one](std::vector<std::string> h) mutable {
+                            addrs->insert(addrs->end(), h.begin(), h.end());
+                            for (const auto& a : *addrs) if (a == client_ip) { (*cont)("match"); return; }
+                            (*check_one)(i + 1);   // 继续下一个 MX
+                        });
+                };
+                (*check_one)(0);
+            });
+        return;
+    }
+    if (m == "include") {
+        if (depth >= 10) { continue_after("permerror"); return; }
+        std::string target = mech.value;
+        get_txt_async(target, kSpfTtl,
+            [this, client_ip, target, depth, continue_after = std::move(continue_after)](std::vector<std::string> txt_records) mutable {
+                std::string spf_record;
+                for (const auto& rec : txt_records) {
+                    if (rec.find("v=spf1") == 0) { spf_record = rec; break; }
+                }
+                if (spf_record.empty()) { continue_after("temperror"); return; }
+                auto sub_mechs = parse_spf_record(spf_record);
+                eval_spf_mechanisms_async(sub_mechs, 0, client_ip, target, depth + 1,
+                    [continue_after = std::move(continue_after)](std::string sub_eval) mutable {
+                        // include 命中条件：子 SPF 为 pass；fail/softfail/neutral 视为不匹配继续外层
+                        if (sub_eval == "pass") continue_after("match");
+                        else if (sub_eval == "temperror" || sub_eval == "permerror") continue_after(sub_eval);
+                        else continue_after("no_match");
+                    });
+            });
+        return;
+    }
+    if (m == "redirect") {
+        std::string target = mech.value;
+        get_txt_async(target, kSpfTtl,
+            [this, client_ip, target, depth, continue_after = std::move(continue_after)](std::vector<std::string> txt_records) mutable {
+                std::string spf_record;
+                for (const auto& rec : txt_records) {
+                    if (rec.find("v=spf1") == 0) { spf_record = rec; break; }
+                }
+                if (spf_record.empty()) { continue_after("temperror"); return; }
+                auto sub_mechs = parse_spf_record(spf_record);
+                // redirect 结果直接作为最终结果（透传子 SPF 评估结果）
+                eval_spf_mechanisms_async(sub_mechs, 0, client_ip, target, depth + 1,
+                    [continue_after = std::move(continue_after)](std::string sub_eval) mutable {
+                        continue_after(sub_eval);
+                    });
+            });
+        return;
+    }
+    if (m == "all") {
+        continue_after("match");
+        return;
+    }
+    // exp/ptr 等未支持机制 → 不匹配
+    continue_after("no_match");
 }
 
 // ========== DKIM ==========
@@ -593,7 +916,7 @@ bool InboundVerifier::verify_dkim_signature_impl(const DkimSignature& sig,
     try {
     // 1. Fetch public key via DNS
     std::string key_domain = sig.selector + "._domainkey." + sig.domain;
-    auto txt_records = dns_.resolve_txt(key_domain);
+    auto txt_records = outbound::SyncDnsWrapper(dns_).resolve_txt(key_domain);
 
     std::string pubkey_b64;
     for (const auto& rec : txt_records) {
@@ -785,6 +1108,273 @@ bool InboundVerifier::verify_dkim_signature_impl(const DkimSignature& sig,
     }
 }
 
+// 验签核心（pubkey 已从 DNS 获取）—— 供异步 DKIM 复用，避免复制 DNS 代码路径
+bool InboundVerifier::verify_dkim_with_pubkey(const DkimSignature& sig,
+                                              const std::string& raw_headers,
+                                              const std::string& computed_bh,
+                                              const std::string& pubkey_b64,
+                                              std::string& error_out) {
+    try {
+    // body hash 校验（computed_bh 由调用方计算：字符串版或流式文件版）
+    LOG_INBOUND_DEBUG("DKIM body hash: expected={}.. computed={}.. canon={}",
+                     sig.body_hash.substr(0, 8), computed_bh.substr(0, 8),
+                     sig.body_canon);
+    if (computed_bh != sig.body_hash) {
+        error_out = "DKIM body hash mismatch (canon=" + sig.body_canon + ")";
+        LOG_INBOUND_WARN("DKIM bh mismatch: domain={}, selector={}, canon={}, exp={}, got={}",
+                         sig.domain, sig.selector, sig.body_canon,
+                         sig.body_hash.substr(0, 16), computed_bh.substr(0, 16));
+        return false;
+    }
+
+    // Build signing input
+    LOG_INBOUND_DEBUG("DKIM step3: building signing input, headers={} h_count={}",
+                    raw_headers.size(), sig.signed_headers.size());
+    auto header_map = parse_headers_map(raw_headers);
+    std::string signing_input;
+    for (const auto& hname : sig.signed_headers) {
+        auto it = header_map.find(to_lower(hname));
+        if (it == header_map.end()) continue;  // Header not present — skip (DKIM allows)
+        auto orig_vals = get_header_values(raw_headers, to_lower(hname));
+        if (orig_vals.empty()) continue;
+        signing_input += outbound::canonicalize_header_relaxed(hname, orig_vals[0]);
+    }
+    // DKIM-Signature 是最后一个头，b= 置空后再规范化（去掉尾部 CRLF）
+    std::string dkim_for_signing = sig.raw_value;
+    auto b_pos = dkim_for_signing.find("b=");
+    if (b_pos != std::string::npos) {
+        auto end_pos = dkim_for_signing.find(';', b_pos);
+        if (end_pos != std::string::npos) {
+            dkim_for_signing = dkim_for_signing.substr(0, b_pos + 2) +
+                               dkim_for_signing.substr(end_pos);
+        } else {
+            dkim_for_signing = dkim_for_signing.substr(0, b_pos + 2);
+        }
+    }
+    std::string dkim_canon = outbound::canonicalize_header_relaxed("DKIM-Signature", dkim_for_signing);
+    if (dkim_canon.size() >= 2 && dkim_canon.substr(dkim_canon.size() - 2) == "\r\n") {
+        dkim_canon.resize(dkim_canon.size() - 2);
+    }
+    signing_input += dkim_canon;
+
+    // RSA-SHA256 验签
+    LOG_INBOUND_DEBUG("DKIM step4: decoding key, key_b64_len={}", pubkey_b64.size());
+    std::string clean_key;
+    clean_key.reserve(pubkey_b64.size());
+    for (char ch : pubkey_b64) {
+        if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') clean_key += ch;
+    }
+    int missing_pad = (4 - (clean_key.size() % 4)) % 4;
+    clean_key.append(missing_pad, '=');
+    int pubkey_len = static_cast<int>(clean_key.size());
+    std::vector<unsigned char> pubkey_decoded(pubkey_len);
+    int decoded = EVP_DecodeBlock(pubkey_decoded.data(),
+                                  reinterpret_cast<const unsigned char*>(clean_key.data()),
+                                  pubkey_len);
+    if (decoded <= 0) {
+        error_out = "failed to base64-decode DKIM public key (len="
+                  + std::to_string(pubkey_len) + ")";
+        return false;
+    }
+    if (pubkey_len > 0 && clean_key.back() == '=') decoded--;
+    if (pubkey_len > 1 && clean_key[pubkey_len - 2] == '=') decoded--;
+    pubkey_decoded.resize(static_cast<size_t>(decoded));
+    const unsigned char* key_ptr = pubkey_decoded.data();
+    EVP_PKEY* pkey = d2i_PUBKEY(nullptr, &key_ptr, static_cast<long>(decoded));
+    if (!pkey) {
+        error_out = "failed to parse DKIM public key (DER, decoded_len="
+                  + std::to_string(decoded) + ")";
+        return false;
+    }
+
+    std::string clean_sig;
+    clean_sig.reserve(sig.signature.size());
+    for (char ch : sig.signature) {
+        if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') clean_sig += ch;
+    }
+    int missing_sig_pad = (4 - (clean_sig.size() % 4)) % 4;
+    clean_sig.append(missing_sig_pad, '=');
+    int sig_b64_len = static_cast<int>(clean_sig.size());
+    std::vector<unsigned char> sig_decoded(sig_b64_len);
+    int sig_decoded_len = EVP_DecodeBlock(sig_decoded.data(),
+                                          reinterpret_cast<const unsigned char*>(clean_sig.data()),
+                                          sig_b64_len);
+    if (sig_decoded_len <= 0) {
+        EVP_PKEY_free(pkey);
+        error_out = "failed to base64-decode DKIM signature (sig_len="
+                  + std::to_string(sig_b64_len) + ")";
+        return false;
+    }
+    if (sig_b64_len > 0 && clean_sig.back() == '=') sig_decoded_len--;
+    if (sig_b64_len > 1 && clean_sig[clean_sig.size() - 2] == '=') sig_decoded_len--;
+
+    EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
+    bool ok = false;
+    do {
+        if (EVP_DigestVerifyInit(md_ctx, nullptr, EVP_sha256(), nullptr, pkey) <= 0) {
+            error_out = "EVP_DigestVerifyInit failed";
+            break;
+        }
+        if (EVP_DigestVerifyUpdate(md_ctx, signing_input.data(), signing_input.size()) <= 0) {
+            error_out = "EVP_DigestVerifyUpdate failed";
+            break;
+        }
+        int verify_result = EVP_DigestVerifyFinal(md_ctx, sig_decoded.data(),
+                                                   static_cast<size_t>(sig_decoded_len));
+        if (verify_result == 1) {
+            ok = true;
+            LOG_INBOUND_INFO("DKIM VERIFY PASS: domain={}, selector={}", sig.domain, sig.selector);
+            Logger::get_instance().flush();
+        } else {
+            error_out = "DKIM signature verification failed";
+            LOG_INBOUND_WARN("DKIM VERIFY FAIL: domain={}, selector={}, sig_len={}",
+                            sig.domain, sig.selector, sig_decoded_len);
+            Logger::get_instance().flush();
+        }
+    } while (false);
+    EVP_MD_CTX_free(md_ctx);
+    EVP_PKEY_free(pkey);
+    return ok;
+    } catch (const std::exception& e) {
+        error_out = std::string("DKIM verify exception: ") + e.what();
+        return false;
+    } catch (...) {
+        error_out = "DKIM verify unknown exception";
+        return false;
+    }
+}
+
+// 从 TXT 记录提取 rsa DKIM 公钥（p= 值）
+static std::string extract_dkim_pubkey(const std::vector<std::string>& txt_records) {
+    for (const auto& rec : txt_records) {
+        auto tags = parse_tags(rec);
+        auto it_k = tags.find("k");
+        std::string ktype = (it_k != tags.end()) ? to_lower(it_k->second) : "rsa";
+        if (ktype != "rsa") continue;
+        auto it_p = tags.find("p");
+        if (it_p != tags.end() && !it_p->second.empty()) return it_p->second;
+    }
+    return {};
+}
+
+// ---- 异步 DKIM（CPS：body hash 本地计算，仅 key DNS 查询异步）----
+
+void InboundVerifier::check_dkim_async(const std::string& raw_headers,
+                                       const std::string& raw_body,
+                                       std::function<void(DkimResult)> cb) {
+    DkimResult result;
+    result.result = "none";
+    auto sigs = parse_dkim_signatures(raw_headers);
+    if (sigs.empty()) { result.reason = "no DKIM-Signature header found"; cb(result); return; }
+
+    auto try_sig = std::make_shared<std::function<void(size_t)>>();
+    *try_sig = [this, sigs, raw_headers, raw_body, result,
+                try_sig, cb = std::move(cb)](size_t idx) mutable {
+        if (idx >= sigs.size()) {
+            if (result.result == "none") result.result = "fail";
+            if (result.reason.empty()) result.reason = "no valid DKIM signature";
+            cb(std::move(result));
+            *try_sig = nullptr;   // 打破自引用环
+            return;
+        }
+        const auto& sig = sigs[idx];
+        if (sig.algorithm != "rsa-sha256") { (*try_sig)(idx + 1); return; }
+
+        std::string canonical_body = (sig.body_canon == "relaxed")
+            ? outbound::normalize_body_relaxed(raw_body)
+            : outbound::normalize_body_simple(raw_body);
+        std::string computed_bh = outbound::sha256_base64(canonical_body);
+
+        std::string key_domain = sig.selector + "._domainkey." + sig.domain;
+        get_txt_async(key_domain, kDkimTtl,
+            [this, sig, raw_headers, computed_bh, key_domain, idx, result,
+             cb, try_sig](std::vector<std::string> txt_records) mutable {
+                std::string pubkey_b64 = extract_dkim_pubkey(txt_records);
+                if (pubkey_b64.empty()) {
+                    if (result.reason.empty()) result.reason = "no DKIM public key found in DNS for " + key_domain;
+                    (*try_sig)(idx + 1);
+                    return;
+                }
+                std::string error;
+                if (verify_dkim_with_pubkey(sig, raw_headers, computed_bh, pubkey_b64, error)) {
+                    result.result = "pass";
+                    result.reason = "";
+                    result.selector = sig.selector;
+                    result.signing_domain = sig.domain;
+                    cb(std::move(result));
+                    *try_sig = nullptr;
+                    return;
+                }
+                if (result.reason.empty()) result.reason = error;
+                (*try_sig)(idx + 1);
+            });
+    };
+    (*try_sig)(0);
+}
+
+void InboundVerifier::check_dkim_from_file_async(const std::string& raw_headers,
+                                                 const std::string& body_path,
+                                                 std::function<void(DkimResult)> cb) {
+    DkimResult result;
+    result.result = "none";
+    auto sigs = parse_dkim_signatures(raw_headers);
+    if (sigs.empty()) { result.reason = "no DKIM-Signature header found"; cb(result); return; }
+
+    auto try_sig = std::make_shared<std::function<void(size_t)>>();
+    *try_sig = [this, sigs, raw_headers, body_path, result,
+                try_sig, cb = std::move(cb)](size_t idx) mutable {
+        if (idx >= sigs.size()) {
+            if (result.result == "none") result.result = "fail";
+            if (result.reason.empty()) result.reason = "no valid DKIM signature";
+            cb(std::move(result));
+            *try_sig = nullptr;
+            return;
+        }
+        const auto& sig = sigs[idx];
+        if (sig.algorithm != "rsa-sha256") { (*try_sig)(idx + 1); return; }
+
+        std::string computed_bh;
+        {
+            std::ifstream body_file(body_path, std::ios::binary);
+            if (!body_file.is_open()) {
+                if (result.reason.empty()) result.reason = "cannot open DKIM body file: " + body_path;
+                (*try_sig)(idx + 1);
+                return;
+            }
+            if (!outbound::dkim_body_hash_stream(body_file, sig.body_canon, computed_bh)) {
+                if (result.reason.empty()) result.reason = "streaming DKIM body hash failed";
+                (*try_sig)(idx + 1);
+                return;
+            }
+        }
+
+        std::string key_domain = sig.selector + "._domainkey." + sig.domain;
+        get_txt_async(key_domain, kDkimTtl,
+            [this, sig, raw_headers, computed_bh, key_domain, idx, result,
+             cb, try_sig](std::vector<std::string> txt_records) mutable {
+                std::string pubkey_b64 = extract_dkim_pubkey(txt_records);
+                if (pubkey_b64.empty()) {
+                    if (result.reason.empty()) result.reason = "no DKIM public key found in DNS for " + key_domain;
+                    (*try_sig)(idx + 1);
+                    return;
+                }
+                std::string error;
+                if (verify_dkim_with_pubkey(sig, raw_headers, computed_bh, pubkey_b64, error)) {
+                    result.result = "pass";
+                    result.reason = "";
+                    result.selector = sig.selector;
+                    result.signing_domain = sig.domain;
+                    cb(std::move(result));
+                    *try_sig = nullptr;
+                    return;
+                }
+                if (result.reason.empty()) result.reason = error;
+                (*try_sig)(idx + 1);
+            });
+    };
+    (*try_sig)(0);
+}
+
 DkimResult InboundVerifier::check_dkim(const std::string& raw_headers,
                                        const std::string& raw_body) {
     DkimResult result;
@@ -904,7 +1494,7 @@ DmarcResult InboundVerifier::check_dmarc(const std::string& from_domain,
 
     // Query DMARC record
     std::string dmarc_domain = "_dmarc." + from_domain;
-    auto txt_records = dns_.resolve_txt(dmarc_domain);
+    auto txt_records = outbound::SyncDnsWrapper(dns_).resolve_txt(dmarc_domain);
 
     std::string dmarc_record;
     for (const auto& rec : txt_records) {
@@ -950,6 +1540,65 @@ DmarcResult InboundVerifier::check_dmarc(const std::string& from_domain,
     }
 
     return result;
+}
+
+void InboundVerifier::check_dmarc_async(const std::string& from_domain,
+                                        const SpfResult& spf,
+                                        const DkimResult& dkim,
+                                        const std::string& mail_from_domain,
+                                        std::function<void(DmarcResult)> cb) {
+    DmarcResult result;
+    result.result = "none";
+    result.policy = "none";
+    if (from_domain.empty()) {
+        result.reason = "no From domain for DMARC check";
+        cb(result);
+        return;
+    }
+
+    std::string dmarc_domain = "_dmarc." + from_domain;
+    get_txt_async(dmarc_domain, kDmarcTtl,
+        [this, from_domain, spf, dkim, mail_from_domain, cb = std::move(cb)](std::vector<std::string> txt_records) mutable {
+            DmarcResult r;
+            r.result = "none";
+            r.policy = "none";
+            std::string dmarc_record;
+            for (const auto& rec : txt_records) {
+                if (rec.find("v=DMARC1") == 0) { dmarc_record = rec; break; }
+            }
+            if (dmarc_record.empty()) {
+                r.reason = "no DMARC record for " + from_domain;
+                cb(std::move(r));
+                return;
+            }
+
+            auto tags = parse_tags(dmarc_record);
+            auto it_p = tags.find("p");
+            r.policy = (it_p != tags.end()) ? to_lower(it_p->second) : "none";
+
+            // SPF/DKIM alignment + 策略评估（与同步 check_dmarc 一致）
+            bool spf_aligned = is_aligned(mail_from_domain, from_domain);
+            bool spf_ok = (spf.result == "pass") && spf_aligned;
+            bool dkim_aligned = is_aligned(dkim.signing_domain, from_domain);
+            bool dkim_ok = (dkim.result == "pass") && dkim_aligned;
+
+            if (spf_ok || dkim_ok) {
+                r.result = "pass";
+                r.reason = spf_ok ? "SPF aligned and passed" : "DKIM aligned and passed";
+            } else {
+                if (r.policy == "reject") {
+                    r.result = "fail";
+                    r.reason = "DMARC policy is reject, no aligned auth passed";
+                } else if (r.policy == "quarantine") {
+                    r.result = "fail";
+                    r.reason = "DMARC policy is quarantine, no aligned auth passed";
+                } else {
+                    r.result = "none";
+                    r.reason = "DMARC policy is none";
+                }
+            }
+            cb(std::move(r));
+        });
 }
 
 // ========== Auth Results Header ==========
