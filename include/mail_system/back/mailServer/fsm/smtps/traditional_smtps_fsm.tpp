@@ -321,7 +321,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                 username += "@" + cfg->system_domain;
                 ctx->client_username = username;
             }
-            this->auth_user_async(session.get(), username, password,
+            this->auth_user_async(session, username, password,
                 [session, ctx](bool ok, int shard) {
                     if (ok) {
                         ctx->is_authenticated = true; ctx->shard_index = shard;
@@ -372,7 +372,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                 username += "@" + cfg->system_domain;
                 ctx->client_username = username;
             }
-            this->auth_user_async(session.get(), username, password,
+            this->auth_user_async(session, username, password,
                 [session, ctx](bool ok, int shard) {
                     if (ok) {
                         ctx->is_authenticated = true; ctx->shard_index = shard;
@@ -437,7 +437,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
         username += "@" + cfg->system_domain;
         static_cast<SmtpsContext*>(session->get_context())->client_username = username;
     }
-    this->auth_user_async(session.get(), username, password,
+    this->auth_user_async(session, username, password,
         [session](bool ok, int shard) {
             auto* ctx = static_cast<SmtpsContext*>(session->get_context());
             if (ok) {
@@ -663,7 +663,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
     }
 
     // 本地域名 → 校验用户存在性（DB 或缓存）
-    this->user_exists_async(session.get(), recipient,
+    this->user_exists_async(session, recipient,
         [session, recipient](bool exists) {
             auto* c = static_cast<SmtpsContext*>(session->get_context());
             const char* resp = exists ? "250 Ok\r\n" : "550 5.1.1 User unknown\r\n";
@@ -977,7 +977,7 @@ std::string TraditionalSmtpsFsm<ConnectionType>::get_event_name(SmtpsEvent event
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
-    SessionBase<ConnectionType>* session, const std::string& mail_address,
+    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& mail_address,
     const std::string& password, AuthCallback cb)
 {
     if (!session) { LOG_AUTH_ERROR("Session is null in auth_user"); cb(false, 0); return; }
@@ -1034,7 +1034,7 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
 
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
-    SessionBase<ConnectionType>* session, const std::string& mail_address,
+    std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& mail_address,
     std::function<void(bool exists)> cb)
 {
     if (!session) { cb(false); return; }
