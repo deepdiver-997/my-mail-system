@@ -290,6 +290,47 @@ TEST(user_exists_db_async_not_found) {
     std::cout << "  [PASS] user_exists_db_async_not_found (DB 回调触发 → 550)" << std::endl;
 }
 
+// ========== 2b. AUTH auth_user_async DB 异步路径 ==========
+
+TEST(auth_user_db_async) {
+    fx.apply_config(fx.with_spf("off"));
+    fx.db_pool->mock_conn()->set_deferred(true);
+    fx.db_pool->mock_conn()->clear_pending();   // 排除持久化 worker 等其它查询来源
+
+    // dbuser@test.local 不在认证缓存 → 走 DB：async_query(取 password) → async_execute(update_last_login)
+    std::string user_plain = "dbuser@test.local";
+    std::string user_b64 = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(user_plain.data()), user_plain.size());
+    std::string pass_plain = "test123";
+    std::string pass_b64 = mail_system::outbound::base64_encode(
+        reinterpret_cast<const unsigned char*>(pass_plain.data()), pass_plain.size());
+
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "AUTH LOGIN\r\n"
+        + user_b64 + "\r\n"
+        + pass_b64 + "\r\n",
+        InboundAuthPolicy::ON);
+    fx.run_on_io(h);
+
+    auto* db = fx.db_pool->mock_conn().get();
+    // 第一步：auth_user_async 的 DB 查询 pending（密码哈希）
+    assert(wait_until([&] {
+        return db->has_pending_query() &&
+               !db->last_query_params().empty() && db->last_query_params()[0] == "dbuser@test.local";
+    }));
+    // 触发查询：status=1 + 明文密码 test123 → verify_password 通过
+    db->fire_query(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"status", "1"}, {"password", "test123"}}}));
+
+    // 第二步：密码验证通过后 auth_user_async 发 async_execute(update_last_login)
+    assert(wait_until([&] { return db->has_pending_execute(); }));
+    db->fire_execute(true);
+
+    assert(HAS(h->captured, "235 Authentication successful"));
+    std::cout << "  [PASS] auth_user_db_async (auth_user_async DB 查询+登录记录 回调 → 235)" << std::endl;
+}
+
 // ========== 3. DATA_END verify_all_from_file 异步路径 ==========
 
 TEST(verify_all_from_file_async) {
@@ -325,6 +366,77 @@ TEST(verify_all_from_file_async) {
     // 等待持久化 worker 处理完入队邮件，避免其后台查询干扰后续测试的 DB mock 状态
     assert(wait_until([&] { return fx.persist_q->inflight_count() == 0; }, 5000));
     std::cout << "  [PASS] verify_all_from_file_async (DMARC DNS 回调 → 入队 + 250 OK)" << std::endl;
+}
+
+TEST(verify_all_from_file_dkim_async) {
+    inbound::InboundVerifier::clear_dns_cache();
+    ServerConfig c = fx.cfg;
+    c.inbound_spf_mode   = "off";    // MAIL FROM 不查 SPF
+    c.inbound_dkim_mode  = "on";     // DATA_END 走 DKIM 异步 DNS（_domainkey TXT）
+    c.inbound_dmarc_mode = "off";
+    c.inbound_mime_parse_limit_bytes = 1;   // 跳过 eager MIME 解析，聚焦 DKIM 异步链
+    fx.apply_config(c);
+    fx.db_pool->mock_conn()->set_deferred(false);   // 入队后持久化链同步完成
+    fx.dns->set_txt("s201512._domainkey.qq.com",
+        {"v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDPsFIOSteMStsN615gUWK2RpNJ"
+         "/B/ekmm4jVlu2fNzXADFkjF8mCMgh0uYe8w46FVqxUS97habZq6P5jmCj/WvtPGZ"
+         "AX49jmdaB38hzZ5cUmwYZkdue6dM17sWocPZO8e7HVdq7bQwfGuUjVuMKfeTB3i"
+         "Neo6/hFhb9TmUgnwjpQIDAQAB"});
+
+    // 真实 QQ 邮件 fixture（有效 RSA-SHA256 签名，d=qq.com s=s201512）
+    const std::string dkim_headers =
+        "DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=qq.com; s=s201512;\r\n"
+        "\tt=1783353315; bh=SFMxKRJds/1H9Vt0wd2tUM7QaMLL1sR7/mbKAGx4Jy4=;\r\n"
+        "\th=From:To:Subject:Date;\r\n"
+        "\tb=uGVkjlFb0ckSVEqYgpUGCQIfM4UjVj8Q3wvytvUwku4Egcfz1kiT7aF03OIomBUIv\r\n"
+        "\t SVmQRpZRmkRD6857P85DEcdLfhR2DQ1tq09Evvzx7x6SgrkMDAAxA2Jd213cP48Sp2\r\n"
+        "\t Ao6gyOhmg3kqHF4Mbe4pdBUGBUigc6Jog3rLlYbs=\r\n"
+        "From: \"=?utf-8?B?Oi0p6Zu377yIICfilr8gJyDvvInnpZ4=?=\" <2466245103@qq.com>\r\n"
+        "To: \"=?utf-8?B?cXQ=?=\" <qt@scut.email>\r\n"
+        "Subject: =?utf-8?B?5rWL6K+V?=\r\n"
+        "Date: Mon, 6 Jul 2026 23:55:14 +0800\r\n";
+    const std::string dkim_body =
+        "This is a multi-part message in MIME format.\r\n"
+        "\r\n"
+        "------=_NextPart_6A4BCFE2_D3382C80_59309AE2\r\n"
+        "Content-Type: text/plain;\r\n"
+        "\tcharset=\"utf-8\"\r\n"
+        "Content-Transfer-Encoding: base64\r\n"
+        "\r\n"
+        "UVENCg0KDQoNCuWPkeiHquaIkeeahGlQaG9uZQ==\r\n"
+        "\r\n"
+        "------=_NextPart_6A4BCFE2_D3382C80_59309AE2\r\n"
+        "Content-Type: text/html;\r\n"
+        "\tcharset=\"utf-8\"\r\n"
+        "Content-Transfer-Encoding: base64\r\n"
+        "\r\n"
+        "PGRpdiBzdHlsZT0ibWluLWhlaWdodDoyMnB4O21hcmdpbi1ib3R0b206OHB4OyI+UVE8L2Rp\r\n"
+        "dj48ZGl2IHN0eWxlPSJtaW4taGVpZ2h0OjIycHg7bWFyZ2luLWJvdHRvbTo4cHg7Ij48YnIg\r\n"
+        "IC8+PC9kaXY+PGRpdiBpZD0iUVFNYWlsU2lnbmF0dXJlIiBjbGFzcz0ibWFpbC1mb290ZXIi\r\n"
+        "IGFyaWEtaGlkZGVuPSJ0cnVlIj48aHIgc3R5bGU9Im1hcmdpbjogMCAwIDEwcHggMDtib3Jk\r\n"
+        "ZXI6IDA7Ym9yZGVyLWJvdHRvbToxcHggc29saWQgI0U2RThFQjtoZWlnaHQ6MDtsaW5lLWhl\r\n"
+        "aWdodDowO2ZvbnQtc2l6ZTowO3BhZGRpbmc6IDIwcHggMCAwIDA7d2lkdGg6IDUwcHg7IiAg\r\n"
+        "Lz7lj5Hoh6rmiJHnmoRpUGhvbmU8L2Rpdj48ZGl2IGlkPSJvcmlnaW5hbC1jb250ZW50Ij48\r\n"
+        "L2Rpdj4=\r\n"
+        "\r\n"
+        "------=_NextPart_6A4BCFE2_D3382C80_59309AE2--";
+    const std::string msg = dkim_headers + "\r\n" + dkim_body + "\r\n.\r\n";
+
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<s@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "DATA\r\n" + msg);
+    fx.run_on_io(h);
+
+    // DATA_END 已暂停，等待 DKIM 公钥 TXT 回调（证明 DKIM 异步路径被触发）
+    assert(wait_until([&] { return fx.dns->has_pending_txt("s201512._domainkey.qq.com"); }));
+    fx.dns->fire_txt("s201512._domainkey.qq.com");
+
+    // DKIM 校验完成 → 入队 + AFTER_ENQUEUE 响应 "250 OK"
+    assert(HAS(h->captured, "250 OK"));
+    assert(wait_until([&] { return fx.persist_q->inflight_count() == 0; }, 5000));
+    std::cout << "  [PASS] verify_all_from_file_dkim_async (DKIM 异步 DNS 回调 → 入队 + 250 OK)" << std::endl;
 }
 
 // ========== 4. 关键边界：回调晚于 session 逻辑结束 → shared_ptr 保活不悬垂 ==========
@@ -419,8 +531,12 @@ int main() {
         test_user_exists_db_async_exists(fx);
         test_user_exists_db_async_not_found(fx);
 
+        // 2b. AUTH auth_user_async DB 异步
+        test_auth_user_db_async(fx);
+
         // 3. DATA_END verify_all_from_file 异步
         test_verify_all_from_file_async(fx);
+        test_verify_all_from_file_dkim_async(fx);
 
         // 4. 边界：回调晚于 session 结束
         test_boundary_callback_after_session_release(fx);
