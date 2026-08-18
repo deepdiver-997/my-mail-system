@@ -169,7 +169,7 @@ struct FsmTestFixture {
 TEST(greeting_220) {
     auto h = fx.make_session();
     fx.fsm->process_event(h.session, SmtpsEvent::CONNECT);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "220 SMTPS Server"));
     std::cout << "  [PASS] greeting_220: " << w.substr(0, w.find('\r')) << std::endl;
 }
@@ -178,7 +178,7 @@ TEST(ehlo_capabilities) {
     // 预加载 EHLO，CONNECT→greeting→do_async_read→吃 EHLO→EHLO handler
     auto h = fx.make_session("EHLO mail.test.local\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "220 SMTPS Server"));
     assert(HAS(w, "250-test.local Hello"));   // RFC 5321: EHLO 响应首行=服务器域名
     assert(HAS(w, "250-SIZE"));
@@ -191,7 +191,7 @@ TEST(ehlo_capabilities) {
 TEST(ehlo_with_auth_policy_on) {
     auto h = fx.make_session("EHLO test\r\n", InboundAuthPolicy::ON);
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "AUTH LOGIN PLAIN"));  // auth_policy=ON 时宣告 AUTH
     std::cout << "  [PASS] ehlo_with_auth_policy_on" << std::endl;
 }
@@ -199,7 +199,7 @@ TEST(ehlo_with_auth_policy_on) {
 TEST(ehlo_with_auth_policy_off) {
     auto h = fx.make_session("EHLO test\r\n", InboundAuthPolicy::OFF);
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(!HAS(w, "AUTH LOGIN PLAIN")); // auth_policy=OFF 不宣告 AUTH
     std::cout << "  [PASS] ehlo_with_auth_policy_off" << std::endl;
 }
@@ -209,7 +209,7 @@ TEST(mail_from_ok) {
         "EHLO test\r\n"
         "MAIL FROM:<sender@test.local>\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "250 Ok"));
     std::cout << "  [PASS] mail_from_ok" << std::endl;
 }
@@ -220,7 +220,7 @@ TEST(rcpt_to_ok) {
         "MAIL FROM:<sender@test.local>\r\n"
         "RCPT TO:<rcpt@test.local>\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "250 Ok"));
     std::cout << "  [PASS] rcpt_to_ok" << std::endl;
 }
@@ -232,7 +232,7 @@ TEST(data_354) {
         "RCPT TO:<rcpt@test.local>\r\n"
         "DATA\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "354 Start mail input"));
     std::cout << "  [PASS] data_354" << std::endl;
 }
@@ -251,7 +251,7 @@ TEST(full_delivery_pipeline) {
         ".\r\n"
         "QUIT\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "220 SMTPS Server"));
     assert(HAS(w, "250-test.local Hello"));  // EHLO 响应首行=服务器域名
     assert(HAS(w, "250 Ok"));       // MAIL FROM + RCPT TO
@@ -270,7 +270,7 @@ TEST(multiple_rcpt) {
         "RCPT TO:<rcpt3@test.local>\r\n"
         "QUIT\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     // 每个 RCPT TO 都返回 250 Ok
     size_t cnt = 0;
     size_t pos = 0;
@@ -282,7 +282,7 @@ TEST(multiple_rcpt) {
 TEST(quit_221) {
     auto h = fx.make_session("QUIT\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "221 Bye"));
     std::cout << "  [PASS] quit_221" << std::endl;
 }
@@ -293,7 +293,7 @@ TEST(re_ehlo_in_wait_auth) {
         "EHLO first\r\n"
         "EHLO second\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "250-test.local Hello"));  // EHLO 后再次 EHLO，首行仍=服务器域名
     assert(HAS(w, "250-test.local Hello"));
     std::cout << "  [PASS] re_ehlo_in_wait_auth" << std::endl;
@@ -305,7 +305,7 @@ TEST(invalid_command_sequence) {
     // 不发 EHLO 直接 MAIL FROM
     auto h = fx.make_session("MAIL FROM:<x@y>\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "500 Error"));
     std::cout << "  [PASS] invalid_command_sequence" << std::endl;
 }
@@ -315,7 +315,7 @@ TEST(mail_from_bad_syntax) {
         "EHLO test\r\n"
         "MAIL FROM:bad-syntax\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "501 Syntax error"));
     std::cout << "  [PASS] mail_from_bad_syntax" << std::endl;
 }
@@ -326,7 +326,7 @@ TEST(rcpt_to_bad_syntax) {
         "MAIL FROM:<sender@test.local>\r\n"
         "RCPT TO:bad\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "501 Syntax error"));
     std::cout << "  [PASS] rcpt_to_bad_syntax" << std::endl;
 }
@@ -340,7 +340,7 @@ TEST(rcpt_relay_denied) {
         "MAIL FROM:<spam@attacker.com>\r\n"
         "RCPT TO:<victim@gmail.com>\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "550 5.7.1 Relay access denied"));
     std::cout << "  [PASS] rcpt_relay_denied" << std::endl;
 }
@@ -352,7 +352,7 @@ TEST(rcpt_unknown_local_rejected) {
         "MAIL FROM:<spam@attacker.com>\r\n"
         "RCPT TO:<nobody@test.local>\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "550 5.1.1 User unknown"));
     std::cout << "  [PASS] rcpt_unknown_local_rejected" << std::endl;
 }
@@ -364,7 +364,7 @@ TEST(rcpt_local_known_accepted) {
         "MAIL FROM:<sender@test.local>\r\n"
         "RCPT TO:<rcpt@test.local>\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "250 Ok"));
     std::cout << "  [PASS] rcpt_local_known_accepted" << std::endl;
 }
@@ -380,7 +380,7 @@ TEST(rcpt_auth_client_any_recipient) {
         "RCPT TO:<forward@example.com>\r\n",
         InboundAuthPolicy::ON);
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "235 Authentication successful"));
     assert(HAS(w, "250 Ok"));   // RCPT 接受外部域名
     std::cout << "  [PASS] rcpt_auth_client_any_recipient" << std::endl;
@@ -394,7 +394,7 @@ TEST(auth_required_rejected) {
         "MAIL FROM:<sender@test.local>\r\n",
         InboundAuthPolicy::ON);
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "530 5.7.1 Authentication required"));
     std::cout << "  [PASS] auth_required_rejected" << std::endl;
 }
@@ -405,7 +405,7 @@ TEST(auth_login_username_prompt) {
         "AUTH LOGIN\r\n",
         InboundAuthPolicy::ON);
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "334 VXNlcm5hbWU6")); // base64("Username:")
     std::cout << "  [PASS] auth_login_username_prompt" << std::endl;
 }
@@ -419,7 +419,7 @@ TEST(auth_login_full_flow) {
         "dGVzdDEyMw==\r\n",                   // base64("test123")
         InboundAuthPolicy::ON);
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "334 VXNlcm5hbWU6"));       // Username prompt
     assert(HAS(w, "334 UGFzc3dvcmQ6"));       // Password prompt
     assert(HAS(w, "235 Authentication successful"));
@@ -434,7 +434,7 @@ TEST(auth_login_wrong_password) {
         "d3JvbmdwYXNz\r\n",                   // base64("wrongpass")
         InboundAuthPolicy::ON);
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "535 Authentication failed"));
     std::cout << "  [PASS] auth_login_wrong_password" << std::endl;
 }
@@ -454,7 +454,7 @@ TEST(auth_failures_exceed_close) {
         "d3JvbmdwYXNz\r\n",                  // attempt 3 → close
         InboundAuthPolicy::ON);
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
 
     size_t cnt = 0;
     size_t pos = 0;
@@ -477,7 +477,7 @@ TEST(auth_plain_single_step) {
         "AUTH PLAIN " + token + "\r\n",
         InboundAuthPolicy::ON);
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "235 Authentication successful"));
     std::cout << "  [PASS] auth_plain_single_step" << std::endl;
 }
@@ -492,7 +492,7 @@ TEST(auth_plain_two_step) {
             reinterpret_cast<const unsigned char*>(plain2.data()), plain2.size()) + "\r\n",
         InboundAuthPolicy::ON);
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "334 "));                      // continue prompt
     assert(HAS(w, "235 Authentication successful"));
     std::cout << "  [PASS] auth_plain_two_step" << std::endl;
@@ -528,7 +528,7 @@ TEST(helo_not_ehlo) {
     // HELO 应返回基本问候，不扩展 ESMTP 能力
     auto h = fx.make_session("HELO test.local\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     // HELO 响应格式验证
     assert(HAS(w, "250"));
     std::cout << "  [PASS] helo_not_ehlo" << std::endl;
@@ -541,7 +541,7 @@ TEST(noop_response) {
         "NOOP\r\n"
         "QUIT\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     // NOOP 在 wait_auth 状态下返回响应
     assert(HAS(w, "250"));
     std::cout << "  [PASS] noop_response" << std::endl;
@@ -558,7 +558,7 @@ TEST(rset_envelope_reset) {
         "RCPT TO:<r2@test.local>\r\n"
         "QUIT\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "250"));  // RSET 响应或后续 MAIL FROM 的 250
     std::cout << "  [PASS] rset_envelope_reset" << std::endl;
 }
@@ -585,7 +585,7 @@ TEST(multiple_transactions) {
         ".\r\n"
         "QUIT\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     // 应该有两次 250 OK (排队 ID)
     size_t cnt = 0;
     size_t pos = 0;
@@ -606,7 +606,7 @@ TEST(empty_body) {
         ".\r\n"
         "QUIT\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "250 "));  // 空 body 也接受
     std::cout << "  [PASS] empty_body" << std::endl;
 }
@@ -625,7 +625,7 @@ TEST(dot_stuffing) {
         ".\r\n"
         "QUIT\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     assert(HAS(w, "250 "));  // dot-stuffing 处理正确
     std::cout << "  [PASS] dot_stuffing" << std::endl;
 }
@@ -637,7 +637,7 @@ TEST(data_without_rcpt) {
         "MAIL FROM:<s@test.local>\r\n"
         "DATA\r\n");
     fx.start(h);
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     // 没有 RCPT TO 就发 DATA → 应返回错误
     assert(HAS(w, "50") || HAS(w, "503"));  // 503 Bad sequence
     std::cout << "  [PASS] data_without_rcpt" << std::endl;
@@ -670,7 +670,7 @@ TEST(ehlo_resets_auth_in_progress) {
     // AUTH 已开始，现在连接仍开着，追加 EHLO
     h.conn->append_read_data("EHLO reset\r\nQUIT\r\n");
     h.session->process_read();
-    auto& w = h.conn->written();
+    auto w = h.conn->written();
     // EHLO 应重置 AUTH 状态并返回 250 问候
     assert(HAS(w, "250"));
     std::cout << "  [PASS] ehlo_resets_auth_in_progress" << std::endl;

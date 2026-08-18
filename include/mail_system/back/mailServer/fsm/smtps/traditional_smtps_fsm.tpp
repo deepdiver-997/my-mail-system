@@ -329,7 +329,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                             [session](auto s, auto& ec) {
                                 if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
                                 s->drain_buffered_commands();
-                                if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
+                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                             });
                     } else {
                         if (session->record_auth_failure_and_check()) { session->close(); return; }
@@ -337,7 +337,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                             [session](auto s, auto& ec) {
                                 if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
                                 s->drain_buffered_commands();
-                                if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
+                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                             });
                     }
                 });
@@ -380,7 +380,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                             [session](auto s, auto& ec) {
                                 if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
                                 s->drain_buffered_commands();
-                                if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
+                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                             });
                     } else {
                         if (session->record_auth_failure_and_check()) { session->close(); return; }
@@ -388,7 +388,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_auth(
                             [session](auto s, auto& ec) {
                                 if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
                                 s->drain_buffered_commands();
-                                if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
+                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                             });
                     }
                 });
@@ -446,7 +446,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
                     [session](auto s, auto& ec) {
                         if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_MAIL_FROM));
                         s->drain_buffered_commands();
-                        if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
+                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                     });
             } else {
                 if (session->record_auth_failure_and_check()) { session->close(); return; }
@@ -454,7 +454,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_password(
                     [session](auto s, auto& ec) {
                         if (!ec) s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
                         s->drain_buffered_commands();
-                        if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
+                        if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                     });
             }
         });
@@ -569,7 +569,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
                             if (ec) return;
                             s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                             s->drain_buffered_commands();
-                            if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
+                            if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                         });
                 }
             });
@@ -674,7 +674,7 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
                     if (ec) return;
                     s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
                     s->drain_buffered_commands();
-                    if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
+                    if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
                 });
         });
 }

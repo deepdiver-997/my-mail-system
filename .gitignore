@@ -1,6 +1,7 @@
 # ==================== 编译产物 ====================
 # CMake 构建目录
 build/
+build-tsan/
 build_nohdfs/
 CMakeCache.txt
 CMakeFiles/

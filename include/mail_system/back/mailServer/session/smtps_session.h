@@ -110,7 +110,9 @@ private:
     void wait_for_async_writes();
 
     std::shared_ptr<TraditionalSmtpsFsm<ConnectionType>> fsm_;
-    SmtpsState state_;
+    // state_ 跨线程访问：io 线程在 has_buffered_input() 中读取，异步回调线程在
+    // set_current_state() 中写入（DNS/DB 回调直接续跑 FSM）。用 atomic 消除竞争。
+    std::atomic<int> state_{static_cast<int>(SmtpsState::INIT)};
     SmtpsEvent next_event_;
     bool ignore_current_command_;
     SmtpsContext context_;

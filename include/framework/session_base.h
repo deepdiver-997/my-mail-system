@@ -120,9 +120,10 @@ public:
     // ── 4. 命令缓冲与流水线 ────────────────────────────────────
     std::string pop_buffered_line();
 
-    // 暂停流水线消费（DB 异步查询期间）
-    bool is_paused() const { return paused_; }
-    void set_paused(bool v) { paused_ = v; }
+    // 暂停流水线消费（DB/DNS 异步查询期间）
+    // 跨线程访问：io 线程读（is_paused 决定是否继续消费），异步回调线程写（恢复）。
+    bool is_paused() const { return paused_.load(std::memory_order_acquire); }
+    void set_paused(bool v) { paused_.store(v, std::memory_order_release); }
     // 排空暂停期间积累的缓冲命令
     void drain_buffered_commands();
 
@@ -181,7 +182,7 @@ protected:
     std::string pending_write_buf_;
     mutable std::string client_address_;
     bool closed_ = false;
-    bool paused_ = false;
+    std::atomic<bool> paused_{false};
     bool session_authenticated_ = false;
     int  auth_attempt_count_ = 0;
     SessionError last_error_ = SessionError::None;

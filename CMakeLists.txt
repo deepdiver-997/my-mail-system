@@ -22,6 +22,7 @@ option(ENABLE_INBOUND_DEDUP_CHECK "Enable inbound duplicate check" ON)
 option(ENABLE_HDFS_WEB_STORAGE "Enable WebHDFS storage (requires libcurl)" ON)
 option(ENABLE_S3_STORAGE "Enable S3/MinIO storage (requires libcurl, OpenSSL)" ON)
 option(BUILD_TESTS "Build test and benchmark targets" ON)
+option(ENABLE_TSAN "Build FSM test targets with ThreadSanitizer (-fsanitize=thread -g -O1)" OFF)
 
 # ===== Feature flags — 必须始终定义为 0/1（help_text.cpp 等 #if 使用）=====
 if(USE_SSL)
@@ -404,6 +405,21 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(smtps_fsm_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(smtps_fsm_test)
 
+    # 异步/并发 FSM 测试（Mock DNS/DB 延迟回调 + 真实 IO 线程）
+    add_executable(smtps_fsm_concurrency_test
+        ${COMMON_SRCS}
+        src/mail_system/back/mailServer/smtps/smtps_server.cpp
+        test/unit/smtps_fsm_concurrency_test.cpp
+    )
+    target_include_directories(smtps_fsm_concurrency_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(smtps_fsm_concurrency_test)
+    if(ENABLE_TSAN)
+        target_compile_options(smtps_fsm_test PRIVATE -fsanitize=thread -g -O1)
+        target_link_options(smtps_fsm_test PRIVATE -fsanitize=thread)
+        target_compile_options(smtps_fsm_concurrency_test PRIVATE -fsanitize=thread -g -O1)
+        target_link_options(smtps_fsm_concurrency_test PRIVATE -fsanitize=thread)
+    endif()
+
     add_executable(imaps_fsm_test
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/imaps/imaps_server.cpp
@@ -429,6 +445,7 @@ endif()
 if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     enable_testing()
     add_test(NAME smtps_fsm_test   COMMAND smtps_fsm_test)
+    add_test(NAME smtps_fsm_concurrency_test COMMAND smtps_fsm_concurrency_test)
     add_test(NAME imaps_fsm_test   COMMAND imaps_fsm_test)
     add_test(NAME inbound_verifier COMMAND test_inbound_verifier)
     add_test(NAME outbound_smoke   COMMAND outbound_smoke)

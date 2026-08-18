@@ -11,7 +11,6 @@ SmtpsSession<ConnectionType>::SmtpsSession(
     std::shared_ptr<TraditionalSmtpsFsm<ConnectionType>> fsm
 ) : SessionBase<ConnectionType>(std::move(connection), server)
     , fsm_(std::move(fsm))
-    , state_(SmtpsState::INIT)
     , next_event_(SmtpsEvent::CONNECT)
     , ignore_current_command_(false)
     , context_()
@@ -65,7 +64,7 @@ void SmtpsSession<ConnectionType>::handle_read(const std::string& data) {
 template <typename ConnectionType>
 bool SmtpsSession<ConnectionType>::has_buffered_input() const {
     // SMTP 保持对裸 \n 的兼容性（部分客户端不遵守 CRLF 规范）
-    if (state_ == SmtpsState::IN_MESSAGE)
+    if (static_cast<SmtpsState>(state_.load(std::memory_order_acquire)) == SmtpsState::IN_MESSAGE)
         return !this->command_read_buffer_.empty();
     return this->command_read_buffer_.find('\n') != std::string::npos;
 }
@@ -73,7 +72,7 @@ bool SmtpsSession<ConnectionType>::has_buffered_input() const {
 template <typename ConnectionType>
 std::string SmtpsSession<ConnectionType>::extract_one_line() {
     // IN_MESSAGE 状态下返回全部缓冲数据（body 按块处理）
-    if (state_ == SmtpsState::IN_MESSAGE)
+    if (static_cast<SmtpsState>(state_.load(std::memory_order_acquire)) == SmtpsState::IN_MESSAGE)
         return this->take_buffered_input();
 
     auto pos = this->command_read_buffer_.find('\n');
@@ -111,7 +110,7 @@ void* SmtpsSession<ConnectionType>::get_context() {
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::set_current_state(int state) {
-    state_ = static_cast<SmtpsState>(state);
+    state_.store(state, std::memory_order_release);
 }
 
 template <typename ConnectionType>
@@ -121,7 +120,7 @@ void SmtpsSession<ConnectionType>::set_next_event(int event) {
 
 template <typename ConnectionType>
 int SmtpsSession<ConnectionType>::get_current_state() const {
-    return int(state_);
+    return state_.load(std::memory_order_acquire);
 }
 
 template <typename ConnectionType>
@@ -587,7 +586,7 @@ template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
     std::string trimmed;
 
-    if (state_ != SmtpsState::IN_MESSAGE) {
+    if (static_cast<SmtpsState>(state_.load(std::memory_order_acquire)) != SmtpsState::IN_MESSAGE) {
         // extract_one_line 已返回一条完整命令（含 \n），直接 trim 即可
         trimmed = algorithm::trim(data);
 
@@ -603,7 +602,7 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
         LOG_SESSION_DEBUG("Handling data: {}", data);
     }
 
-    if (state_ == SmtpsState::IN_MESSAGE) {
+    if (static_cast<SmtpsState>(state_.load(std::memory_order_acquire)) == SmtpsState::IN_MESSAGE) {
         process_message_data(data);
 
         bool data_end_seen = (trimmed == ".") || (data.find("\r\n.\r\n") != std::string::npos);
@@ -672,8 +671,9 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
 
     ignore_current_command_ = false;
 
-    if (state_ == SmtpsState::WAIT_AUTH_USERNAME || state_ == SmtpsState::WAIT_AUTH_PASSWORD ||
-        (state_ == SmtpsState::WAIT_AUTH && context_.plain_auth_expected)) {
+    auto st = static_cast<SmtpsState>(state_.load(std::memory_order_acquire));
+    if (st == SmtpsState::WAIT_AUTH_USERNAME || st == SmtpsState::WAIT_AUTH_PASSWORD ||
+        (st == SmtpsState::WAIT_AUTH && context_.plain_auth_expected)) {
         next_event_ = SmtpsEvent::AUTH;
         last_command_args_ = trimmed;
         if (fsm_) {
