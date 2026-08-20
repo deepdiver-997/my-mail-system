@@ -392,6 +392,13 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(mime_parser_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(mime_parser_test)
 
+    add_executable(mail_body_writer_test
+        test/unit/mail_body_writer_test.cpp
+        src/mail_system/back/storage/local_file_write_stream.cpp
+    )
+    target_include_directories(mail_body_writer_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(mail_body_writer_test)
+
     add_executable(fsm_bench
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/smtps/smtps_server.cpp
@@ -454,6 +461,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME outbound_smoke   COMMAND outbound_smoke)
     add_test(NAME sql_queries_test COMMAND sql_queries_test)
     add_test(NAME mime_parser_test COMMAND mime_parser_test)
+    add_test(NAME mail_body_writer_test COMMAND mail_body_writer_test)
 endif()
 
 if(NOT BUILD_OBJECT_ONLY)
