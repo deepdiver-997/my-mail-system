@@ -1,5 +1,7 @@
 #include "mail_system/back/storage/local_file_storage_provider.h"
 
+#include "mail_system/back/storage/local_file_write_stream.h"
+
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -74,6 +76,11 @@ bool LocalFileStorageProvider::append_binary(const std::string& storage_key,
         error = e.what();
         return false;
     }
+}
+
+std::unique_ptr<IWriteStream> LocalFileStorageProvider::open_write(const std::string& storage_key,
+                                                                   std::string& error) {
+    return LocalFileWriteStream::open(storage_key, error);
 }
 
 bool LocalFileStorageProvider::remove_object(const std::string& storage_key,

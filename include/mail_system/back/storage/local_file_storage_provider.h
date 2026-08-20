@@ -4,6 +4,7 @@
 #include "mail_system/back/storage/i_storage_provider.h"
 
 #include <atomic>
+#include <memory>
 #include <string>
 
 namespace mail_system {
@@ -27,6 +28,11 @@ public:
 
     bool remove_object(const std::string& storage_key,
                        std::string& error) override;
+
+    // 覆写默认的 append_binary 适配：常开 fd + pwrite，
+    // 每块数据省掉一次父目录 stat + open + close。
+    std::unique_ptr<IWriteStream> open_write(const std::string& storage_key,
+                                            std::string& error) override;
 
 private:
     static std::string ensure_trailing_slash(const std::string& path);

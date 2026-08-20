@@ -716,7 +716,18 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
 
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
     if (!smtp_session) { session->close(); return; }
-    smtp_session->flush_body_and_wait();
+
+    // 正文没能落盘就绝不能往下走去回 250：那等于骗发送方 MTA 把邮件从队列里删掉。
+    // 回 451 让对方稍后重投。
+    if (!smtp_session->commit_body()) {
+        cleanup_streamed_attachments(ctx);
+        smtp_session->discard_current_mail();
+        session->do_async_write("451 4.3.0 Failed to store message, try again later\r\n",
+            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable {
+                s->close();
+            });
+        return;
+    }
 
     try {
     auto cfg = std::atomic_load(&session->get_server()->m_config);

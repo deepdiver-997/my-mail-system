@@ -253,6 +253,7 @@ set(COMMON_SRCS
     src/mail_system/back/algorithm/snow.cpp
     src/mail_system/back/storage/distributed_file_storage_provider.cpp
     src/mail_system/back/storage/local_file_storage_provider.cpp
+    src/mail_system/back/storage/local_file_write_stream.cpp
     src/mail_system/back/outbound/outbox_repository.cpp
     src/mail_system/back/outbound/outbound_utils.cpp
     src/mail_system/back/outbound/mx_routing_utils.cpp

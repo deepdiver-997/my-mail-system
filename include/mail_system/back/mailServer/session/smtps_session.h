@@ -12,6 +12,8 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
+#include "mail_system/back/storage/local_file_write_stream.h"
+#include "mail_system/back/storage/mail_body_writer.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -29,9 +31,6 @@ template <typename ConnectionType>
 class SmtpsSession : public SessionBase<ConnectionType> {
     friend class TraditionalSmtpsFsm<ConnectionType>;
     static constexpr size_t MAX_BODY_BYTES = 10 * 1024 * 1024;
-    static constexpr size_t INITIAL_BUFFER_SIZE = 8192;
-    static constexpr size_t MAX_BUFFER_SIZE = 1048576;
-    static constexpr size_t BUFFER_GROWTH_FACTOR = 2;
 
 public:
     SmtpsSession(
@@ -70,7 +69,11 @@ public:
     void create_mail_on_data_command();
     persist_storage::SubmitOwnedMailResult submit_mail_to_queue();
     bool check_mail_persist_status();
-    void flush_body_and_wait();
+
+    // 冲刷剩余缓冲并持久化正文（含 fsync）。返回 false 表示正文未能落盘，
+    // 调用方必须回 4xx 而不是 250 —— 否则就是骗发送方 MTA 把邮件从队列里删掉。
+    bool commit_body();
+
     void reset_mail_state();
     void discard_current_mail();
     bool has_pending_mail_submission() const;
@@ -83,31 +86,17 @@ public:
     void parse_smtp_command(const std::string& data);
 
 private:
-    // 扩展邮件体缓冲区，当缓冲区空间不足时调用
-    // 扩展会触发异步刷盘，最多扩展 MAX_BUFFER_EXPAND_COUNT 次
-    void expand_buffer();
-
-    // 将邮件体缓冲区的内容同步写入磁盘
-    // 在邮件传输完成或缓冲区满时调用
-    void flush_buffer_to_disk();
-
-    // 异步将邮件体缓冲区的内容写入磁盘
-    // 提交到线程池执行，避免阻塞网络IO线程
-    void async_flush_buffer_to_disk();
-
     // 处理写入失败的情况
     // 根据邮件的持久化状态标记为 CANCELLED 或提交删除任务
     void handle_write_failure();
 
-    // 将数据追加到邮件体缓冲区
-    // 当缓冲区空间不足时会触发扩容或刷盘
-    void append_to_buffer(const char* data, size_t size);
+    // 将 DATA 阶段收到的正文数据交给 body_writer_
+    // 缓冲、刷盘与偏移推进全部由 MailBodyWriter 负责
+    void append_body_data(const char* data, size_t size);
 
     // 清理邮件相关的所有文件（邮件体和附件）
     // 在邮件持久化失败或需要删除时调用
     void cleanup_mail_files(mail* mail_ptr);
-
-    void wait_for_async_writes();
 
     std::shared_ptr<TraditionalSmtpsFsm<ConnectionType>> fsm_;
     // state_ 跨线程访问：io 线程在 has_buffered_input() 中读取，异步回调线程在
@@ -118,13 +107,10 @@ private:
     SmtpsContext context_;
     std::string last_command_args_;
 
-    size_t buffer_size_;
-    std::unique_ptr<char[]> buffer_;
-    size_t buffer_used_;
-    size_t buffer_expand_count_;
-    static constexpr size_t MAX_BUFFER_EXPAND_COUNT = 3;
+    // 正文写入器。DATA 命令时创建，reset_mail_state() 时销毁；
+    // 未 commit 就销毁会自动 abort 并删掉半成品文件。
+    std::unique_ptr<storage::MailBodyWriter> body_writer_;
 
-    std::vector<std::future<bool>> async_write_futures_;
     std::shared_ptr<persist_storage::PersistentQueue> persistent_queue_;
     persist_storage::PersistSubmissionTicket pending_submission_;
 

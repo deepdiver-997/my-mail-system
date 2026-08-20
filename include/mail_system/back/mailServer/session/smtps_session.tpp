@@ -14,10 +14,6 @@ SmtpsSession<ConnectionType>::SmtpsSession(
     , next_event_(SmtpsEvent::CONNECT)
     , ignore_current_command_(false)
     , context_()
-    , buffer_size_(INITIAL_BUFFER_SIZE)
-    , buffer_(new char[INITIAL_BUFFER_SIZE])
-    , buffer_used_(0)
-    , buffer_expand_count_(0)
     // TODO: `static_cast<SmtpsServer*>(server)` 假定 server 一定是 SmtpsServer。
     // 传非 SmtpsServer（如测试里的 ServerBase 派生类）会在 server+0x228 处越界读堆垃圾，
     // 构造野 shared_ptr 导致间歇性 SIGBUS/SIGSEGV（smtps_fsm_test 曾 ~70% 崩溃）。
@@ -134,145 +130,31 @@ std::string SmtpsSession<ConnectionType>::get_last_command_args() const {
 }
 
 template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::expand_buffer() {
-    if (buffer_expand_count_ >= MAX_BUFFER_EXPAND_COUNT) {
-        LOG_SESSION_INFO("Buffer expansion limit reached, flushing to disk asynchronously");
-        async_flush_buffer_to_disk();
-        return;
+bool SmtpsSession<ConnectionType>::commit_body() {
+    if (!this->get_mail()) {
+        // 压根没有邮件（例如 DATA 之前就被拒），无正文可提交
+        return true;
     }
-
-    size_t new_size = buffer_size_ * BUFFER_GROWTH_FACTOR;
-    if (new_size > MAX_BUFFER_SIZE) {
-        LOG_SESSION_WARN("Buffer expansion would exceed MAX_BUFFER_SIZE, flushing asynchronously");
-        async_flush_buffer_to_disk();
-        return;
-    }
-
-    async_flush_buffer_to_disk();
-
-    LOG_SESSION_DEBUG("Expanding buffer from {} to {} bytes", buffer_size_, new_size);
-    auto new_buffer = std::make_unique<char[]>(new_size);
-    buffer_ = std::move(new_buffer);
-    buffer_size_ = new_size;
-    buffer_used_ = 0;
-    buffer_expand_count_++;
-
-    LOG_SESSION_INFO("Buffer expanded, expand count: {}", buffer_expand_count_);
-}
-
-template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::flush_buffer_to_disk() {
-    if (buffer_used_ == 0 || !this->get_mail()) {
-        return;
+    if (!body_writer_) {
+        // 有邮件却没有写入器 = 打开写入流时就失败了，正文从未落盘。
+        // 这里绝不能返回 true，否则会放一封空正文的邮件过去并回 250。
+        LOG_SESSION_ERROR("Mail {} has no body write stream, cannot commit",
+                          this->get_mail()->id);
+        handle_write_failure();
+        return false;
     }
 
     std::string error;
-    if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
-        if (!this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(this->get_mail()->body_path,
-                                                              buffer_.get(),
-                                                              buffer_used_,
-                                                              error)) {
-            LOG_SESSION_ERROR("Failed to write mail body via storage provider: {}, error={}",
-                              this->get_mail()->body_path,
-                              error);
-            return;
-        }
-    } else {
-        std::ofstream out(this->get_mail()->body_path, std::ios::binary | std::ios::app);
-        if (!out.is_open()) {
-            LOG_SESSION_ERROR("Failed to open mail body file for writing: {}", this->get_mail()->body_path);
-            return;
-        }
-
-        out.write(buffer_.get(), static_cast<std::streamsize>(buffer_used_));
-        if (!out.good()) {
-            LOG_SESSION_ERROR("Failed to write mail body to file: {}", this->get_mail()->body_path);
-            out.close();
-            return;
-        }
-
-        out.close();
+    if (!body_writer_->commit(error)) {
+        LOG_SESSION_ERROR("Failed to commit mail body for mail {}: {}",
+                          this->get_mail() ? this->get_mail()->id : 0,
+                          error);
+        handle_write_failure();
+        return false;
     }
 
-    LOG_SESSION_DEBUG("Flushed {} bytes to mail body file", buffer_used_);
-    LOG_SESSION_INFO("Synchronous flush completed for mail {}, buffer_used_={}", this->get_mail()->id, buffer_used_);
-    buffer_used_ = 0;
-}
-
-template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::wait_for_async_writes() {
-    for (auto& f : async_write_futures_) {
-        if (!f.valid()) {
-            continue;
-        }
-        bool ok = false;
-        try {
-            ok = f.get();
-        } catch (const std::exception& e) {
-            LOG_SESSION_ERROR("Exception waiting async write: {}", e.what());
-            ok = false;
-        }
-        if (!ok) {
-            handle_write_failure();
-        }
-    }
-    async_write_futures_.clear();
-}
-
-template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::flush_body_and_wait() {
-    flush_buffer_to_disk();
-    wait_for_async_writes();
-}
-
-template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::async_flush_buffer_to_disk() {
-    if (buffer_used_ == 0 || !this->get_mail()) {
-        return;
-    }
-
-    std::string buffer_data(buffer_.get(), buffer_used_);
-    buffer_used_ = 0;
-
-    std::string body_path = this->get_mail()->body_path;
-
-    auto future = this->m_server->m_workerThreadPool->submit([this, body_path, buffer_data]() -> bool {
-        try {
-            if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
-                std::string error;
-                if (!this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(body_path,
-                                                                      buffer_data.data(),
-                                                                      buffer_data.size(),
-                                                                      error)) {
-                    LOG_SESSION_ERROR("Failed async write via storage provider: {}, error={}", body_path, error);
-                    return false;
-                }
-            } else {
-                std::ofstream out(body_path, std::ios::binary | std::ios::app);
-                if (!out.is_open()) {
-                    LOG_SESSION_ERROR("Failed to open file for async write: {}", body_path);
-                    return false;
-                }
-
-                out.write(buffer_data.data(), static_cast<std::streamsize>(buffer_data.size()));
-                if (!out.good()) {
-                    LOG_SESSION_ERROR("Failed to write data to file: {}", body_path);
-                    out.close();
-                    return false;
-                }
-
-                out.close();
-            }
-            LOG_SESSION_DEBUG("Async write {} bytes to file: {}", buffer_data.size(), body_path);
-            return true;
-        } catch (const std::exception& e) {
-            LOG_SESSION_ERROR("Exception during async write: {}", e.what());
-            return false;
-        }
-    });
-
-    async_write_futures_.push_back(std::move(future));
-    LOG_SESSION_INFO("Submitted async write task, pending tasks: {}", async_write_futures_.size());
+    LOG_SESSION_INFO("Committed mail body, {} bytes", body_writer_->bytes_total());
+    return true;
 }
 
 template <typename ConnectionType>
@@ -296,42 +178,19 @@ void SmtpsSession<ConnectionType>::handle_write_failure() {
 }
 
 template <typename ConnectionType>
-void SmtpsSession<ConnectionType>::append_to_buffer(const char* data, size_t size) {
-    if (buffer_used_ + size > buffer_size_) {
-        if (buffer_expand_count_ >= MAX_BUFFER_EXPAND_COUNT) {
-            async_flush_buffer_to_disk();
-        } else {
-            expand_buffer();
-        }
-
-        if (size > buffer_size_) {
-            if (this->get_mail()) {
-                if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
-                    std::string error;
-                    if (!this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->append_binary(this->get_mail()->body_path,
-                                                                          data,
-                                                                          size,
-                                                                          error)) {
-                        LOG_SESSION_ERROR("Failed direct write via storage provider: {}, error={}",
-                                          this->get_mail()->body_path,
-                                          error);
-                    }
-                } else {
-                    std::ofstream out(this->get_mail()->body_path, std::ios::binary | std::ios::app);
-                    if (out.is_open()) {
-                        out.write(data, static_cast<std::streamsize>(size));
-                        out.close();
-                    } else {
-                        LOG_SESSION_ERROR("Failed to open mail body file for direct write: {}", this->get_mail()->body_path);
-                    }
-                }
-            }
-            return;
-        }
+void SmtpsSession<ConnectionType>::append_body_data(const char* data, size_t size) {
+    if (!body_writer_) {
+        LOG_SESSION_WARN("Body data arrived without an open write stream, dropping {} bytes", size);
+        return;
     }
 
-    std::memcpy(buffer_.get() + buffer_used_, data, size);
-    buffer_used_ += size;
+    std::string error;
+    if (!body_writer_->write(data, size, error)) {
+        LOG_SESSION_ERROR("Failed to write mail body for mail {}: {}",
+                          this->get_mail() ? this->get_mail()->id : 0,
+                          error);
+        handle_write_failure();
+    }
 }
 
 template <typename ConnectionType>
@@ -356,8 +215,10 @@ void SmtpsSession<ConnectionType>::create_mail_on_data_command() {
     this->get_mail()->subject = "(无主题)";
     this->get_mail()->persist_status = persist_storage::PersistStatus::PENDING;
 
-    if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
-        this->get_mail()->body_path = this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->build_mail_body_key(this->get_mail()->id);
+    auto storage_provider = this->m_server->m_shardRouter->get_storage(
+        static_cast<size_t>(this->context_.shard_index));
+    if (storage_provider) {
+        this->get_mail()->body_path = storage_provider->build_mail_body_key(this->get_mail()->id);
     } else {
         auto cfg = std::atomic_load(&this->m_server->m_config);
         std::string body_path = cfg->mail_storage_path;
@@ -367,6 +228,23 @@ void SmtpsSession<ConnectionType>::create_mail_on_data_command() {
         body_path += std::to_string(this->get_mail()->id);
         this->get_mail()->body_path = body_path;
     }
+
+    // 整个 DATA 阶段只打开一次写入句柄，写入位置由 MailBodyWriter 用显式 offset 管理。
+    // 没有 storage provider 时直接用本地文件流，不再各处重复手写 ofstream。
+    std::string open_error;
+    std::unique_ptr<storage::IWriteStream> stream;
+    if (storage_provider) {
+        stream = storage_provider->open_write(this->get_mail()->body_path, open_error);
+    } else {
+        stream = storage::LocalFileWriteStream::open(this->get_mail()->body_path, open_error);
+    }
+    if (!stream) {
+        LOG_SESSION_ERROR("Failed to open mail body write stream for {}: {}",
+                          this->get_mail()->body_path, open_error);
+        handle_write_failure();
+        return;
+    }
+    body_writer_ = std::make_unique<storage::MailBodyWriter>(std::move(stream));
 
     LOG_SESSION_INFO("Created mail {} on DATA command, from: {}, recipients: {}",
         this->get_mail()->id, this->get_mail()->from, this->get_mail()->to.size());
@@ -530,9 +408,8 @@ void SmtpsSession<ConnectionType>::cleanup_mail_files(mail* mail_ptr) {
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::reset_mail_state() {
     this->mail_ = nullptr;
-    buffer_used_ = 0;
-    buffer_expand_count_ = 0;
-    async_write_futures_.clear();
+    // 未 commit 就销毁 → MailBodyWriter 析构自动 abort，半成品文件不会留在盘上
+    body_writer_.reset();
     clear_pending_mail_submission();
 
     context_.mail_data.clear();
@@ -643,7 +520,7 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
                 }
                 write_chunk = std::move(unstuffed);
             }
-            append_to_buffer(write_chunk.data(), write_chunk.size());
+            append_body_data(write_chunk.data(), write_chunk.size());
         }
 
         if (data_end_seen) {
