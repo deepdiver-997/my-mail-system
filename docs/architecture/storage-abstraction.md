@@ -61,6 +61,9 @@ IStorageProvider
   read_all(key, out, error)            // 纯虚：读进调用方可改的缓冲
   open_read(key, error) -> IReadStream  // 默认 read_all 兜底；本地覆写为 mmap
   object_size(key, size, error)         // 默认读下来算大小；本地覆写为一次 stat
+  async_open_read(key, cb)              // 默认内联；真异步覆写在 provider 线程回调
+  async_read_all(key, cb)               //   同上 —— 与 commit_async 同一契约
+  async_object_size(key, cb)            //   同上
 ```
 
 - **view() 只读契约**是后端能用 mmap 的前提。生命周期：view 随流对象销毁而失效，不得跨临时对象取 view。
@@ -110,5 +113,8 @@ IStorageProvider
 
 ## 后续方向
 
-- 读侧 `read_all` / `object_size` 的「默认内联 + 真异步覆写」异步形状（同 commit_async）。
 - 超大对象 multipart/并行分片上传（当前邮件上限 10MB 用不上）。
+- S3 覆写 `object_size` 为一次 HEAD（Content-Length）：默认实现为了拿大小会把
+  整个对象下载一遍，IMAP FETCH RFC822.SIZE 逐封调用时对远程后端偏贵。
+- 远程后端覆写 `commit_async` / `async_open_read` 等为真异步（provider 线程 +
+  回调，pause 独占约定不变）——接口与调用点已就绪，只差后端实现。
