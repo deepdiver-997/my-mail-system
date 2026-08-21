@@ -1,7 +1,7 @@
 #include "mail_system/back/storage/local_file_storage_provider.h"
 
-#include "mail_system/back/storage/local_file_read_stream.h"
-#include "mail_system/back/storage/local_file_write_stream.h"
+#include "framework/storage/local_file_read_stream.h"
+#include "framework/storage/local_file_write_stream.h"
 
 #include <cstdio>
 #include <filesystem>

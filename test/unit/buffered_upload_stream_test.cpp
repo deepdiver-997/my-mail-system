@@ -19,7 +19,7 @@
 #include <thread>
 #include <vector>
 
-#include "mail_system/back/storage/buffered_upload_stream.h"
+#include "framework/storage/buffered_upload_stream.h"
 #include "mail_system/back/storage/mail_body_writer.h"
 
 using namespace mail_system::storage;

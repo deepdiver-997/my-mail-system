@@ -1,8 +1,11 @@
 #ifndef MAIL_SYSTEM_STORAGE_I_STORAGE_PROVIDER_H
 #define MAIL_SYSTEM_STORAGE_I_STORAGE_PROVIDER_H
 
-#include "mail_system/back/storage/i_read_stream.h"
-#include "mail_system/back/storage/i_write_stream.h"
+#include "framework/storage/i_read_stream.h"
+#include "framework/storage/i_write_stream.h"
+#include "framework/storage/buffered_upload_stream.h"
+#include "framework/storage/local_file_read_stream.h"
+#include "framework/storage/local_file_write_stream.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +14,17 @@
 
 namespace mail_system {
 namespace storage {
+
+// 向后兼容：通用流原语已上移到 framework/storage（namespace pr，与
+// framework/db 同层）。IStorageProvider 与邮件命名规则（build_mail_body_key
+// 等）留在应用层。
+using pr::IReadStream;
+using pr::IWriteStream;
+using pr::BufferedReadStream;
+using pr::BufferedUploadStream;
+using pr::LocalFileWriteStream;
+using pr::MappedReadStream;
+using CommitCallback = pr::IWriteStream::CommitCallback;
 
 class IStorageProvider {
 public:

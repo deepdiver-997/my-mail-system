@@ -1,5 +1,5 @@
-#ifndef MAIL_SYSTEM_STORAGE_I_WRITE_STREAM_H
-#define MAIL_SYSTEM_STORAGE_I_WRITE_STREAM_H
+#ifndef PR_FRAMEWORK_STORAGE_I_WRITE_STREAM_H
+#define PR_FRAMEWORK_STORAGE_I_WRITE_STREAM_H
 
 #include <cstddef>
 #include <cstdint>
@@ -7,8 +7,8 @@
 #include <string>
 #include <utility>
 
-namespace mail_system {
-namespace storage {
+namespace pr {
+
 
 // 单个存储对象的写入句柄。
 //
@@ -56,7 +56,7 @@ public:
     virtual void abort() noexcept = 0;
 };
 
-} // namespace storage
-} // namespace mail_system
 
-#endif // MAIL_SYSTEM_STORAGE_I_WRITE_STREAM_H
+} // namespace pr
+
+#endif // PR_FRAMEWORK_STORAGE_I_WRITE_STREAM_H

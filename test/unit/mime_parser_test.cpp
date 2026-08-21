@@ -13,13 +13,14 @@
 #include <string>
 #include <vector>
 
-#include "mail_system/back/common/mapped_file.h"
+#include "framework/storage/mapped_file.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/mime_parser.h"
 #include "mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.h"
 #include "mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.tpp"
 
 using namespace mail_system;
+using namespace pr;
 
 struct DummyConn {};
 using Fsm = TraditionalImapsFsm<DummyConn>;

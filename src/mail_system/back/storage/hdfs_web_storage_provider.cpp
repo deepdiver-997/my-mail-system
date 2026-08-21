@@ -1,6 +1,6 @@
 #include "mail_system/back/storage/hdfs_web_storage_provider.h"
 
-#include "mail_system/back/storage/buffered_upload_stream.h"
+#include "framework/storage/buffered_upload_stream.h"
 
 #include <curl/curl.h>
 

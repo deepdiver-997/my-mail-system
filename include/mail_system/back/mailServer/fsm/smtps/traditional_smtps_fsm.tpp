@@ -4,7 +4,7 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
-#include "mail_system/back/storage/local_file_read_stream.h"
+#include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/common/mime_parser.h"
 #include <filesystem>
 #include <openssl/md5.h>

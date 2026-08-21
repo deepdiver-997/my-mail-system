@@ -1,7 +1,7 @@
-#ifndef MAIL_SYSTEM_STORAGE_BUFFERED_UPLOAD_STREAM_H
-#define MAIL_SYSTEM_STORAGE_BUFFERED_UPLOAD_STREAM_H
+#ifndef PR_FRAMEWORK_STORAGE_BUFFERED_UPLOAD_STREAM_H
+#define PR_FRAMEWORK_STORAGE_BUFFERED_UPLOAD_STREAM_H
 
-#include "mail_system/back/storage/i_write_stream.h"
+#include "framework/storage/i_write_stream.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -9,8 +9,8 @@
 #include <string>
 #include <utility>
 
-namespace mail_system {
-namespace storage {
+namespace pr {
+
 
 // 整对象内存缓冲写入句柄：write_at 只攒缓冲，commit 时把整个对象一次性交给
 // 上传函数。给「按块追加 = 每块一次网络往返」的远程后端（S3/WebHDFS）用：
@@ -115,7 +115,7 @@ private:
     bool upload_attempted_ = false;
 };
 
-} // namespace storage
-} // namespace mail_system
 
-#endif // MAIL_SYSTEM_STORAGE_BUFFERED_UPLOAD_STREAM_H
+} // namespace pr
+
+#endif // PR_FRAMEWORK_STORAGE_BUFFERED_UPLOAD_STREAM_H

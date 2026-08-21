@@ -253,7 +253,7 @@ set(COMMON_SRCS
     src/mail_system/back/algorithm/snow.cpp
     src/mail_system/back/storage/distributed_file_storage_provider.cpp
     src/mail_system/back/storage/local_file_storage_provider.cpp
-    src/mail_system/back/storage/local_file_write_stream.cpp
+    src/framework/storage/local_file_write_stream.cpp
     src/mail_system/back/outbound/outbox_repository.cpp
     src/mail_system/back/outbound/outbound_utils.cpp
     src/mail_system/back/outbound/mx_routing_utils.cpp
@@ -394,7 +394,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
 
     add_executable(mail_body_writer_test
         test/unit/mail_body_writer_test.cpp
-        src/mail_system/back/storage/local_file_write_stream.cpp
+        src/framework/storage/local_file_write_stream.cpp
         src/mail_system/back/storage/local_file_storage_provider.cpp
     )
     target_include_directories(mail_body_writer_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")

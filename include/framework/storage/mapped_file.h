@@ -1,5 +1,5 @@
-#ifndef MAIL_SYSTEM_COMMON_MAPPED_FILE_H
-#define MAIL_SYSTEM_COMMON_MAPPED_FILE_H
+#ifndef PR_FRAMEWORK_STORAGE_MAPPED_FILE_H
+#define PR_FRAMEWORK_STORAGE_MAPPED_FILE_H
 
 #include <cerrno>
 #include <cstring>
@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-namespace mail_system {
+namespace pr {
 
 // 只读文件映射（RAII）。
 //
@@ -85,6 +85,6 @@ private:
     std::size_t size_;
 };
 
-} // namespace mail_system
+} // namespace pr
 
 #endif // MAIL_SYSTEM_COMMON_MAPPED_FILE_H

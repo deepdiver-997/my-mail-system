@@ -1,4 +1,4 @@
-#include "mail_system/back/storage/local_file_write_stream.h"
+#include "framework/storage/local_file_write_stream.h"
 
 #include <cerrno>
 #include <cstring>
@@ -7,8 +7,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-namespace mail_system {
-namespace storage {
+namespace pr {
+
 
 namespace {
 
@@ -128,5 +128,5 @@ void LocalFileWriteStream::close_fd() noexcept {
     }
 }
 
-} // namespace storage
-} // namespace mail_system
+
+} // namespace pr

@@ -1,14 +1,14 @@
-#ifndef MAIL_SYSTEM_STORAGE_LOCAL_FILE_READ_STREAM_H
-#define MAIL_SYSTEM_STORAGE_LOCAL_FILE_READ_STREAM_H
+#ifndef PR_FRAMEWORK_STORAGE_LOCAL_FILE_READ_STREAM_H
+#define PR_FRAMEWORK_STORAGE_LOCAL_FILE_READ_STREAM_H
 
-#include "mail_system/back/common/mapped_file.h"
-#include "mail_system/back/storage/i_read_stream.h"
+#include "framework/storage/mapped_file.h"
+#include "framework/storage/i_read_stream.h"
 
 #include <memory>
 #include <utility>
 
-namespace mail_system {
-namespace storage {
+namespace pr {
+
 
 // 本地文件的只读句柄：mmap 支撑，零拷贝。
 //
@@ -33,7 +33,7 @@ private:
     std::unique_ptr<MappedFile> mapped_;
 };
 
-} // namespace storage
-} // namespace mail_system
 
-#endif // MAIL_SYSTEM_STORAGE_LOCAL_FILE_READ_STREAM_H
+} // namespace pr
+
+#endif // PR_FRAMEWORK_STORAGE_LOCAL_FILE_READ_STREAM_H

@@ -1,12 +1,12 @@
-#ifndef MAIL_SYSTEM_STORAGE_LOCAL_FILE_WRITE_STREAM_H
-#define MAIL_SYSTEM_STORAGE_LOCAL_FILE_WRITE_STREAM_H
+#ifndef PR_FRAMEWORK_STORAGE_LOCAL_FILE_WRITE_STREAM_H
+#define PR_FRAMEWORK_STORAGE_LOCAL_FILE_WRITE_STREAM_H
 
-#include "mail_system/back/storage/i_write_stream.h"
+#include "framework/storage/i_write_stream.h"
 
 #include <memory>
 
-namespace mail_system {
-namespace storage {
+namespace pr {
+
 
 // 本地文件写入句柄：整个对象生命周期只 open 一次 fd，落盘走 pwrite。
 //
@@ -45,7 +45,7 @@ private:
     bool committed_ = false;
 };
 
-} // namespace storage
-} // namespace mail_system
 
-#endif // MAIL_SYSTEM_STORAGE_LOCAL_FILE_WRITE_STREAM_H
+} // namespace pr
+
+#endif // PR_FRAMEWORK_STORAGE_LOCAL_FILE_WRITE_STREAM_H

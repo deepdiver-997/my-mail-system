@@ -1,7 +1,7 @@
 #ifndef MAIL_SYSTEM_STORAGE_MAIL_BODY_WRITER_H
 #define MAIL_SYSTEM_STORAGE_MAIL_BODY_WRITER_H
 
-#include "mail_system/back/storage/i_write_stream.h"
+#include "mail_system/back/storage/i_storage_provider.h"
 
 #include <cstring>
 #include <functional>

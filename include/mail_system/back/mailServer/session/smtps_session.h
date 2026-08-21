@@ -12,7 +12,7 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/algorithm/snow.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
-#include "mail_system/back/storage/local_file_write_stream.h"
+#include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/storage/mail_body_writer.h"
 #include <algorithm>
 #include <cctype>
