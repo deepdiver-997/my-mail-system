@@ -50,40 +50,27 @@ EXTRA_CMAKE_ARGS="-DENABLE_S3_STORAGE=OFF" bash build.sh Release cross-x64 8
 - `cross-x64` 自动使用 `x86_64-linux-gnu-g++` 并跳过链接（object-only）
 - 产物在 `artifacts/linux-x86_64/Release/obj/`
 
-### 2. 上传
+### 2. 上传与链接（推荐用 deploy.sh，见下）
 
-```bash
-rsync -avz artifacts/linux-x86_64/Release/obj/ root@<SERVER_IP>:/opt/smtpServer/build-obj/
-```
-
-### 3. 服务器链接
+手工方式仅作理解用。核心注意点：**link.sh 必须显式给 `--obj-root`**，否则它会把
+当前目录下所有 `.o`（包括历史遗留的 `build-obj/`）一并收集 → `multiple definition of main`。
+过去靠"把 link.sh 拷到 /tmp 再跑"绕开，现在直接 `--obj-root` 指定即可。
 
 ```bash
 ssh root@<SERVER_IP> "
-cd /opt/smtpServer/build-obj
-chmod +x link.sh
-
-# 删除冲突的 test entry points（避免 multiple main）
-rm -f CMakeFiles/mailServer_obj.dir/test/mail_server_combined.cpp.o
-rm -f CMakeFiles/smtpsServer_obj.dir/test/smtps_test.cpp.o
-
-# 链接 imapsServer
-./link.sh CMakeFiles/imapsServer_obj.dir/test/imaps_test.cpp.o \
-  -o /tmp/imapsServer_new --compiler g++-13
-
-# 部署
-systemctl stop imapserver.service
-mv /tmp/imapsServer_new /opt/smtpServer/imapsServer
-chmod +x /opt/smtpServer/imapsServer
-systemctl start imapserver.service
+cd /opt/smtpServer
+# 入口 .o 在 test/server/ 下，注意这一层
+bash link.sh obj/CMakeFiles/imapsServer_obj.dir/test/server/imaps_test.cpp.o \
+  --obj-root obj -o imapsServer --compiler g++-13 \
+  --exclude smtps_test --exclude mail_server
 "
 ```
 
-- link.sh 自动找到所有 `.o` 文件并链接
-- 必须删除 smtps_test.cpp.o 和 mail_server_combined.cpp.o，否则 `multiple definition of main`
+- `--obj-root obj`：只收集该目录下的 .o，不再碰 `build-obj/`
+- `--exclude` 排除其它入口的 main（等价于旧的"删除 test entry point"，但不改文件）
 - 用 `--compiler g++-13` 指定服务器编译器
 
-### 4. 快速部署（smtpsServer）
+### 3. 快速部署（smtpsServer）
 
 ```bash
 # 同上，但入口文件是 smtps_test.cpp.o
@@ -94,12 +81,16 @@ systemctl start imapserver.service
 ## 一键部署
 
 ```bash
-# 完整流程：同步 sysroot → 编译 → 上传 → 链接 → 重启服务
-bash deploy.sh
+# 空跑：构建/上传/链接/校验全跑，但不替换线上二进制
+DEPLOY_SERVER=root@<SERVER_IP> ./deploy.sh clean --dry-run
 
-# 全量重新编译
-bash deploy.sh clean
+# 完整部署（先传后换 + 冒烟测试 + 失败自动回滚，详见 operations.md）
+DEPLOY_SERVER=root@<SERVER_IP> ./deploy.sh clean
 ```
+
+发布一律带 `clean`（避免 make 同秒时间戳跳过重编）。完整流程：同步 sysroot → 编译 →
+rsync 增量上传到 `obj.new/` → 服务器链接成 `*.new` → 产物校验 → 自动备份 → 原子替换 →
+重启 → 冒烟测试。
 
 ## 常见问题
 
@@ -125,7 +116,7 @@ bash deploy.sh clean
 
 **原因**：link.sh 包含了所有目标的 `.o` 文件，包括 smtps_test.cpp.o 和 mail_server_combined.cpp.o
 
-**解决**：链接前删除不相关的 test entry point `.o` 文件
+**解决**：用 `--obj-root` 限定对象根目录，并用 `--exclude` 排除不相关的 test entry point（不必删文件）。参见上文"上传与链接"。
 
 ### S3 storage undefined reference
 

@@ -7,7 +7,7 @@
 | 服务器 IP | `<SERVER_IP>` |
 | SSH 登录 | `ssh root@<SERVER_IP>`（免密） |
 | 项目根目录 | `/opt/smtpServer/` |
-| 编译链接目录 | `/opt/imapServer/`（存放 .o 和 link.sh） |
+| 对象树 | `/opt/smtpServer/obj/`（当前）、`obj.old/`（上一版） |
 
 ## 服务列表
 
@@ -15,9 +15,6 @@
 |---------------|-----------|---------|------|
 | `imapserver` | `/opt/smtpServer/imapsServer` | `/opt/smtpServer/config/imapsConfig.json` | 993 (SSL), 143 (TCP) |
 | `smtpserver` | `/opt/smtpServer/smtpsServer` | `/opt/smtpServer/config/smtpsConfig.json` | 25, 465, 587 |
-
-**注意**：systemd 的 WorkingDirectory 是 `/opt/smtpServer`，但 .o 文件上传和链接都在 `/opt/imapServer/` 进行。
-链接完成后必须 **先 stop 服务** 再把二进制 cp 到 `/opt/smtpServer/`（否则 "Text file busy"）。
 
 ## 数据库
 
@@ -36,66 +33,34 @@ MySQL 裸连：`ssh root@<SERVER_IP> 'mysql mail'`
 git@github.com:deepdiver-997/ProtoRelay.git
 ```
 
-## 完整部署流程
+## 部署（deploy.sh 一键，推荐）
 
-### 1. 本地交叉编译
-
-```bash
-cd /Users/zhuhongrui/Desktop/code/c++/project/mail-system/v8
-bash build.sh Release cross-x64
-```
-
-产物在 `artifacts/linux-x86_64/Release/obj/`。
-
-### 2. 上传 .o 文件到服务器
+部署入口是仓库根目录的 `deploy.sh`（详见 `cross-compile-guide.md` 的交叉编译部分）。
+它已内置：交叉编译 → rsync 增量上传到 `obj.new/` → 服务器链接成 `*.new` → 产物校验 →
+自动备份 → 原子替换 → 重启 → 冒烟测试 → 失败自动回滚。
 
 ```bash
-scp -r artifacts/linux-x86_64/Release/obj/* root@<SERVER_IP>:/opt/imapServer/
+# 空跑：构建/上传/链接/校验全跑，但不替换线上二进制
+DEPLOY_SERVER=root@<SERVER_IP> ./deploy.sh clean --dry-run
+
+# 完整部署（发布一律带 clean，避免 make 同秒时间戳跳过重编）
+DEPLOY_SERVER=root@<SERVER_IP> ./deploy.sh clean
 ```
 
-### 3. 在服务器上链接
+**发布务必先 `--dry-run` 再完整部署。** 空跑第一次运行就曾抓到一个会把旧代码链接进二进制的
+路径 bug（入口 `.o` 少一层目录 + `find` 模糊匹配命中历史对象树）。
 
-**IMAP 服务器：**
-```bash
-ssh root@<SERVER_IP> "cd /opt/imapServer && bash link.sh imaps_test.cpp.o -o imapsServer --exclude smtps_test --exclude smtp_test --exclude mail_server_combined --exclude test_inbound_verifier"
-```
-
-**SMTP 服务器：**
-```bash
-ssh root@<SERVER_IP> "cd /opt/imapServer && bash link.sh smtps_test.cpp.o -o smtpsServer --exclude imaps_test --exclude mail_server_combined --exclude test_inbound_verifier"
-```
-
-### 4. 部署二进制并重启
-
-**IMAP：**
-```bash
-ssh root@<SERVER_IP> "systemctl stop imapserver && cp /opt/imapServer/imapsServer /opt/smtpServer/imapsServer && systemctl start imapserver && sleep 2 && systemctl status imapserver --no-pager | head -5"
-```
-
-**SMTP：**
-```bash
-ssh root@<SERVER_IP> "systemctl stop smtpserver && cp /opt/imapServer/smtpsServer /opt/smtpServer/smtpsServer && systemctl start smtpserver && sleep 2 && systemctl status smtpserver --no-pager | head -5"
-```
-
-### 5. 一键部署（IMAP + SMTP）
+### 手工回滚
 
 ```bash
-# 编译 + 上传 + 链接 + 部署
-bash build.sh Release cross-x64 && \
-scp -r artifacts/linux-x86_64/Release/obj/* root@<SERVER_IP>:/opt/imapServer/ && \
-ssh root@<SERVER_IP> "
-  cd /opt/imapServer &&
-  bash link.sh imaps_test.cpp.o -o imapsServer --exclude smtps_test --exclude smtp_test --exclude mail_server_combined --exclude test_inbound_verifier &&
-  bash link.sh smtps_test.cpp.o -o smtpsServer --exclude imaps_test --exclude mail_server_combined --exclude test_inbound_verifier &&
-  systemctl stop imapserver &&
-  cp imapsServer /opt/smtpServer/imapsServer &&
-  systemctl start imapserver &&
-  systemctl stop smtpserver &&
-  cp smtpsServer /opt/smtpServer/smtpsServer &&
-  systemctl start smtpserver
-" && \
-ssh root@<SERVER_IP> "systemctl status imapserver smtpserver --no-pager | grep -E '(Active|service)'"
+ssh root@<SERVER_IP> "cd /opt/smtpServer && \
+  cp -p \$(ls -1t smtpsServer.bak-* | head -1) smtpsServer && \
+  cp -p \$(ls -1t imapsServer.bak-* | head -1) imapsServer && \
+  systemctl restart smtpserver imapserver"
 ```
+
+备份自动保留最近 5 份（只回收 `deploy.sh` 生成的 `.bak-<日期>-<时刻>`，手工打标签的
+如 `.bak-tls13-...` 不会被误删）。
 
 ## 查看日志
 
@@ -160,9 +125,9 @@ A5 LOGOUT
 
 ## 注意事项
 
-1. **部署路径陷阱**：二进制链接在 `/opt/imapServer/`，但 systemd 使用 `/opt/smtpServer/imapsServer`，必须手动 cp
-2. **"Text file busy"**：直接 cp 会失败，必须先 `systemctl stop` 再 cp
-3. **exclude 陷阱**：link.sh 的 `--exclude` 是子串匹配，`--exclude smtps` 会误排除所有含 "smtps" 的 .o 文件。务必使用精确模式如 `--exclude smtps_test`
-4. **入口文件**：IMAP 入口是 `imaps_test.cpp.o`（因为历史原因在 test 目录），SMTP 入口是 `smtps_test.cpp.o`
-5. **IMAP 日志关键字**：`[IMAP]` 前缀，含 state/event/tag 等信息
-6. **数据库**：两个服务共用 MySQL，通过 db_config.json 配置
+1. **发布带 `clean`**：make 判断重编要求依赖「严格新于」目标，同秒修改会被静默跳过（曾因此拿到陈旧二进制）。
+2. **`link.sh` 要显式 `--obj-root`**：不传会收集整个目录下所有 `.o`，服务器上若同时存在 `obj/` 与历史 `build-obj/` 会混链出重复符号。deploy.sh 已内置。
+3. **config/ 同步不能加 `--delete`**：会删掉服务器侧独有的 `dkim/*.private.pem`（DKIM 私钥）、`crt/*` 等。只有 `obj.new/`（纯构建产物）可以用 `--delete`。
+4. **入口文件**：IMAP 入口是 `test/server/imaps_test.cpp.o`，SMTP 是 `test/server/smtps_test.cpp.o`（注意 `server/` 这一层）。
+5. **`--exclude` 是子串匹配**：`--exclude smtps` 会误排除所有含 "smtps" 的 .o。用 `smtps_test` / `imaps_test` 这种精确些的模式。
+6. **数据库**：两个服务共用 MySQL，通过 db_config.json 配置。
