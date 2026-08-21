@@ -1,5 +1,7 @@
 #include "mail_system/back/storage/hdfs_web_storage_provider.h"
 
+#include "mail_system/back/storage/buffered_upload_stream.h"
+
 #include <curl/curl.h>
 
 #include <algorithm>
@@ -101,12 +103,16 @@ HdfsWebStorageProvider::HdfsWebStorageProvider(std::string endpoint,
                                                std::string base_path,
                                                std::string user,
                                                std::size_t replica_count,
-                                               long timeout_ms)
+                                               long timeout_ms,
+                                               std::size_t max_write_buffer_bytes)
     : endpoint_(normalize_endpoint(endpoint)),
       base_path_(normalize_base_path(base_path)),
       user_(std::move(user)),
       replica_count_(replica_count == 0 ? 1 : replica_count),
-      timeout_ms_(timeout_ms <= 0 ? 5000 : timeout_ms) {}
+      timeout_ms_(timeout_ms <= 0 ? 5000 : timeout_ms),
+      max_write_buffer_bytes_(max_write_buffer_bytes == 0
+                                  ? kDefaultWriteBufferBytes
+                                  : max_write_buffer_bytes) {}
 
 bool HdfsWebStorageProvider::ensure_ready(std::string& error) {
     static std::once_flag curl_init_once;
@@ -215,6 +221,29 @@ bool HdfsWebStorageProvider::remove_object(const std::string& storage_key,
         return true;
     }
     return webhdfs_delete(storage_key, error);
+}
+
+std::unique_ptr<IWriteStream> HdfsWebStorageProvider::open_write(
+    const std::string& storage_key, std::string& error) {
+    if (storage_key.empty()) {
+        error = "hdfs storage key is empty";
+        return nullptr;
+    }
+    return std::make_unique<BufferedUploadStream>(
+        [this, storage_key](const char* data, std::size_t size, std::string& err) {
+            // 流式写入的 key 总是新邮件，直接 CREATE(overwrite=true) 覆盖写，
+            // 不走 append_binary 的「先试 APPEND 失败再 CREATE」多两次往返。
+            // size==0 也要创建空文件，与本地后端打开即建空文件对齐。
+            if (!ensure_remote_directory(get_parent_dir(storage_key), err)) {
+                return false;
+            }
+            return webhdfs_create_with_payload(storage_key, data, size, err);
+        },
+        [this, storage_key]() {
+            std::string ignored;
+            webhdfs_delete(storage_key, ignored);
+        },
+        max_write_buffer_bytes_);
 }
 
 std::string HdfsWebStorageProvider::normalize_endpoint(const std::string& endpoint) {

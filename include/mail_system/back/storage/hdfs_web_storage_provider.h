@@ -17,7 +17,11 @@ public:
                            std::string base_path,
                            std::string user,
                            std::size_t replica_count = 1,
-                           long timeout_ms = 5000);
+                           long timeout_ms = 5000,
+                           std::size_t max_write_buffer_bytes = kDefaultWriteBufferBytes);
+
+    // 与 S3StorageProvider 同一常数：SMTP 正文上限 10MB，64MB 留足余量。
+    static constexpr std::size_t kDefaultWriteBufferBytes = 64ull * 1024 * 1024;
 
     bool ensure_ready(std::string& error) override;
 
@@ -38,6 +42,11 @@ public:
     bool read_all(const std::string& storage_key,
                   std::string& out,
                   std::string& error) override;
+
+    // 整对象缓冲 + commit 时单次 CREATE(overwrite)，替代逐块 APPEND 的
+    // 每块 MKDIRS + 307 + POST 多次往返。
+    std::unique_ptr<IWriteStream> open_write(const std::string& storage_key,
+                                             std::string& error) override;
 
 private:
     static std::string normalize_endpoint(const std::string& endpoint);
@@ -62,6 +71,7 @@ private:
     std::string user_;
     std::size_t replica_count_;
     long timeout_ms_;
+    std::size_t max_write_buffer_bytes_;
 
     std::atomic<std::uint64_t> attachment_seq_{0};
 };

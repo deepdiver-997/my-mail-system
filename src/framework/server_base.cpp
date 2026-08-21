@@ -74,7 +74,8 @@ ServerBase::ServerBase(const ServerConfig& config,
 #if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
             main_storage = std::make_shared<storage::HdfsWebStorageProvider>(
                 sc.hdfs.endpoint, sc.hdfs.base_path, sc.hdfs.user,
-                sc.hdfs.replication, static_cast<long>(sc.hdfs.timeout_ms));
+                sc.hdfs.replication, static_cast<long>(sc.hdfs.timeout_ms),
+                sc.hdfs.max_write_buffer_bytes);
             break;
 #else
             throw std::runtime_error("hdfs_web requires ENABLE_HDFS_WEB_STORAGE=ON");
@@ -88,7 +89,7 @@ ServerBase::ServerBase(const ServerConfig& config,
                 sc.s3.endpoint, sc.s3.bucket,
                 sc.s3.access_key, sc.s3.secret_key,
                 sc.s3.region, static_cast<long>(sc.s3.timeout_ms),
-                sc.s3.use_path_style);
+                sc.s3.use_path_style, sc.s3.max_write_buffer_bytes);
             break;
 #else
             throw std::runtime_error("s3 requires ENABLE_S3_STORAGE=ON");

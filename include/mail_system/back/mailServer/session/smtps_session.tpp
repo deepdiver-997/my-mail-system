@@ -184,6 +184,12 @@ void SmtpsSession<ConnectionType>::append_body_data(const char* data, size_t siz
         return;
     }
 
+    // 首次失败已通过 handle_write_failure 标记 CANCELLED / 提交清理任务；
+    // 之后每个 chunk 都只是丢弃，避免重复提交 delete_task 刷爆工作线程池。
+    if (body_writer_->failed()) {
+        return;
+    }
+
     std::string error;
     if (!body_writer_->write(data, size, error)) {
         LOG_SESSION_ERROR("Failed to write mail body for mail {}: {}",

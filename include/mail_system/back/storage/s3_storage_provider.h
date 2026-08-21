@@ -13,7 +13,8 @@ namespace mail_system {
 namespace storage {
 
 // S3/MinIO 对象存储驱动 — 通过 HTTP PUT/GET/DELETE + AWS Signature V4
-// append_binary 每次 PUT 全量对象（小文件模式），大附件后续可改为 multipart
+// 流式写入走 open_write：整对象内存缓冲，commit 时一次 PUT（PUT 即整对象原子替换）。
+// append_binary 保留给一次性写完整内容的场景（如 IMAP APPEND）。
 class S3StorageProvider : public IStorageProvider {
 public:
     S3StorageProvider(std::string endpoint,
@@ -22,7 +23,11 @@ public:
                       std::string secret_key,
                       std::string region = "us-east-1",
                       long timeout_ms = 5000,
-                      bool use_path_style = true);
+                      bool use_path_style = true,
+                      std::size_t max_write_buffer_bytes = kDefaultWriteBufferBytes);
+
+    // SMTP 正文上限 10MB，64MB 给整对象缓冲留足余量（附件随正文一起落盘）。
+    static constexpr std::size_t kDefaultWriteBufferBytes = 64ull * 1024 * 1024;
 
     bool ensure_ready(std::string& error) override;
 
@@ -43,6 +48,10 @@ public:
     bool read_all(const std::string& storage_key,
                   std::string& out,
                   std::string& error) override;
+
+    // 整对象缓冲 + commit 时单次 s3_put，替代逐块 GET+PUT 的 O(n²) 老路径。
+    std::unique_ptr<IWriteStream> open_write(const std::string& storage_key,
+                                             std::string& error) override;
 
 private:
     // --- HTTP 底层 ---
@@ -71,6 +80,7 @@ private:
     std::string region_;
     long timeout_ms_;
     bool use_path_style_;
+    std::size_t max_write_buffer_bytes_;
 
     std::atomic<std::uint64_t> attachment_seq_{0};
 };

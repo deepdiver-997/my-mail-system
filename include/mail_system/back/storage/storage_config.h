@@ -23,6 +23,8 @@ struct S3StorageConfig {
     std::string region     = "us-east-1";
     uint32_t timeout_ms    = 5000;
     bool use_path_style    = true;
+    // 流式写入的整对象内存缓冲上限（open_write 攒到 commit 一次上传）。
+    uint64_t max_write_buffer_bytes = 64ull * 1024 * 1024;
 };
 
 struct HdfsStorageConfig {
@@ -31,6 +33,8 @@ struct HdfsStorageConfig {
     std::string user        = "hdfs";
     uint32_t timeout_ms     = 5000;
     size_t replication      = 1;
+    // 同 S3StorageConfig::max_write_buffer_bytes。
+    uint64_t max_write_buffer_bytes = 64ull * 1024 * 1024;
 };
 
 struct DistributedStorageConfig {
@@ -81,6 +85,8 @@ struct StorageConfig {
             cfg.s3.region         = s.value("region", cfg.s3.region);
             cfg.s3.timeout_ms     = s.value("timeout_ms", cfg.s3.timeout_ms);
             cfg.s3.use_path_style = s.value("use_path_style", cfg.s3.use_path_style);
+            cfg.s3.max_write_buffer_bytes = s.value("max_write_buffer_bytes",
+                                                    cfg.s3.max_write_buffer_bytes);
         }
 
         if (j.contains("hdfs")) {
@@ -90,6 +96,8 @@ struct StorageConfig {
             cfg.hdfs.user        = h.value("user", cfg.hdfs.user);
             cfg.hdfs.timeout_ms  = h.value("timeout_ms", cfg.hdfs.timeout_ms);
             cfg.hdfs.replication = h.value("replication", cfg.hdfs.replication);
+            cfg.hdfs.max_write_buffer_bytes = h.value("max_write_buffer_bytes",
+                                                      cfg.hdfs.max_write_buffer_bytes);
         }
 
         if (j.contains("distributed")) {

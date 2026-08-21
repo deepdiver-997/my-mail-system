@@ -1,5 +1,7 @@
 #include "mail_system/back/storage/s3_storage_provider.h"
 
+#include "mail_system/back/storage/buffered_upload_stream.h"
+
 #include <curl/curl.h>
 #include <openssl/hmac.h>
 #include <openssl/sha.h>
@@ -57,9 +59,10 @@ bool curl_perform(CURL* curl, const std::string& url, const std::string& method,
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     }
 
-    // For PUT, set upload data
+    // For PUT, set upload data. body 非空但 size 为 0 也走这里：
+    // 空对象 PUT 必须是 Content-Length: 0 的合法上传。
     std::pair<const char*, std::size_t> upload_src{nullptr, 0};
-    if (method == "PUT" && body && body_size > 0) {
+    if (method == "PUT" && body) {
         upload_src = {body, body_size};
         curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
         curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_callback);
@@ -310,7 +313,8 @@ S3StorageProvider::S3StorageProvider(std::string endpoint,
                                      std::string secret_key,
                                      std::string region,
                                      long timeout_ms,
-                                     bool use_path_style)
+                                     bool use_path_style,
+                                     std::size_t max_write_buffer_bytes)
     : endpoint_(std::move(endpoint))
     , bucket_(std::move(bucket))
     , access_key_(std::move(access_key))
@@ -318,6 +322,9 @@ S3StorageProvider::S3StorageProvider(std::string endpoint,
     , region_(std::move(region))
     , timeout_ms_(timeout_ms)
     , use_path_style_(use_path_style)
+    , max_write_buffer_bytes_(max_write_buffer_bytes == 0
+                                  ? kDefaultWriteBufferBytes
+                                  : max_write_buffer_bytes)
 {
     // strip trailing slash
     while (!endpoint_.empty() && endpoint_.back() == '/')
@@ -377,13 +384,32 @@ bool S3StorageProvider::append_binary(const std::string& key,
                                        const char* data,
                                        std::size_t size,
                                        std::string& error) {
-    // 简单模式：GET 已有内容 + 拼接新数据 + PUT 全量
-    // TODO: 大文件使用 multipart upload
+    // GET 已有内容 + 拼接新数据 + PUT 全量。每次调用都是两整次对象传输，
+    // 只适合一次性写完整内容的调用方（如 IMAP APPEND）；
+    // 流式写入必须走 open_write（内存缓冲 + commit 时单次 PUT）。
     std::string existing;
     if (!s3_get(key, existing, error)) return false;
 
     existing.append(data, size);
     return s3_put(key, existing.data(), existing.size(), error);
+}
+
+std::unique_ptr<IWriteStream> S3StorageProvider::open_write(const std::string& key,
+                                                            std::string& error) {
+    if (key.empty()) {
+        error = "s3 key is empty";
+        return nullptr;
+    }
+    return std::make_unique<BufferedUploadStream>(
+        [this, key](const char* data, std::size_t size, std::string& err) {
+            // PUT 是整对象原子替换：覆盖同 key 旧对象，无需先 GET/DELETE。
+            return s3_put(key, data, size, err);
+        },
+        [this, key]() {
+            std::string ignored;
+            s3_delete(key, ignored);
+        },
+        max_write_buffer_bytes_);
 }
 
 bool S3StorageProvider::read_all(const std::string& key,

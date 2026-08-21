@@ -38,6 +38,9 @@ public:
 
     bool valid() const { return static_cast<bool>(stream_); }
     bool committed() const { return committed_; }
+    // 底层写入是否已失败。失败后 write/commit 恒返回 false，
+    // 调用方（如 SmtpsSession::append_body_data）据此对后续数据只丢弃不再重试。
+    bool failed() const { return failed_; }
 
     // 已接收的正文总字节数（含尚未刷盘的缓冲部分）。
     std::uint64_t bytes_total() const { return offset_ + buffer_used_; }
