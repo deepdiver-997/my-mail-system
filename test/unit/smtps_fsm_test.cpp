@@ -15,6 +15,8 @@
 #include "mock_connection.h"
 
 #include <iostream>
+#include <thread>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <spdlog/common.h>
@@ -157,6 +159,18 @@ struct FsmTestFixture {
         h.session->process_read();
     }
 };
+
+// ========== 测试宏 ==========
+// AUTH 已异步化（bcrypt/DB 链在 worker 线程）：回复可能晚于喂入返回，
+// 轮询等待期望的子串出现。
+template <typename Handle>
+static bool wait_for_response(Handle& h, const std::string& needle, int timeout_ms = 2000) {
+    for (int waited = 0; waited < timeout_ms; waited += 5) {
+        if (h.conn->written().find(needle) != std::string::npos) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return h.conn->written().find(needle) != std::string::npos;
+}
 
 // ========== 测试宏 ==========
 #define TEST(name) \
@@ -380,8 +394,8 @@ TEST(rcpt_auth_client_any_recipient) {
         "RCPT TO:<forward@example.com>\r\n",
         InboundAuthPolicy::ON);
     fx.start(h);
+    assert(wait_for_response(h, "235 Authentication successful"));
     auto w = h.conn->written();
-    assert(HAS(w, "235 Authentication successful"));
     assert(HAS(w, "250 Ok"));   // RCPT 接受外部域名
     std::cout << "  [PASS] rcpt_auth_client_any_recipient" << std::endl;
 }
@@ -419,10 +433,12 @@ TEST(auth_login_full_flow) {
         "dGVzdDEyMw==\r\n",                   // base64("test123")
         InboundAuthPolicy::ON);
     fx.start(h);
+    // 流水线输入下 334 提示攒在 pending_write_buf_，随 worker 回复的最终
+    // 写入一起冲出 —— 先等最终响应再断言中间提示
+    assert(wait_for_response(h, "235 Authentication successful"));
     auto w = h.conn->written();
     assert(HAS(w, "334 VXNlcm5hbWU6"));       // Username prompt
     assert(HAS(w, "334 UGFzc3dvcmQ6"));       // Password prompt
-    assert(HAS(w, "235 Authentication successful"));
     std::cout << "  [PASS] auth_login_full_flow" << std::endl;
 }
 
@@ -434,8 +450,8 @@ TEST(auth_login_wrong_password) {
         "d3JvbmdwYXNz\r\n",                   // base64("wrongpass")
         InboundAuthPolicy::ON);
     fx.start(h);
+    assert(wait_for_response(h, "535 Authentication failed"));
     auto w = h.conn->written();
-    assert(HAS(w, "535 Authentication failed"));
     std::cout << "  [PASS] auth_login_wrong_password" << std::endl;
 }
 
@@ -454,12 +470,17 @@ TEST(auth_failures_exceed_close) {
         "d3JvbmdwYXNz\r\n",                  // attempt 3 → close
         InboundAuthPolicy::ON);
     fx.start(h);
-    auto w = h.conn->written();
 
+    // 异步认证：等 worker 线程的回复（任一 535 到达，或连接被关闭）
     size_t cnt = 0;
-    size_t pos = 0;
-    while ((pos = w.find("535 Authentication failed", pos)) != std::string::npos)
-        { ++cnt; ++pos; }
+    std::string w;
+    for (int waited = 0; waited < 2000; waited += 5) {
+        w = h.conn->written();
+        cnt = 0;
+        for (size_t pos = 0; (pos = w.find("535 Authentication failed", pos)) != std::string::npos; ++pos) ++cnt;
+        if (!h.conn->is_open() || cnt >= 1) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
     // 多次认证失败后连接应关闭
     assert(!h.conn->is_open() || cnt >= 1);
 
@@ -477,8 +498,8 @@ TEST(auth_plain_single_step) {
         "AUTH PLAIN " + token + "\r\n",
         InboundAuthPolicy::ON);
     fx.start(h);
+    assert(wait_for_response(h, "235 Authentication successful"));
     auto w = h.conn->written();
-    assert(HAS(w, "235 Authentication successful"));
     std::cout << "  [PASS] auth_plain_single_step" << std::endl;
 }
 
@@ -492,9 +513,9 @@ TEST(auth_plain_two_step) {
             reinterpret_cast<const unsigned char*>(plain2.data()), plain2.size()) + "\r\n",
         InboundAuthPolicy::ON);
     fx.start(h);
+    assert(wait_for_response(h, "235 Authentication successful"));
     auto w = h.conn->written();
     assert(HAS(w, "334 "));                      // continue prompt
-    assert(HAS(w, "235 Authentication successful"));
     std::cout << "  [PASS] auth_plain_two_step" << std::endl;
 }
 

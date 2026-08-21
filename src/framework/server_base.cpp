@@ -7,6 +7,7 @@
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/distributed_mysql_pool.h"
+#include "mail_system/back/storage/async_storage_provider.h"
 #include "mail_system/back/storage/distributed_file_storage_provider.h"
 #if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
 #include "mail_system/back/storage/hdfs_web_storage_provider.h"
@@ -108,6 +109,25 @@ ServerBase::ServerBase(const ServerConfig& config,
             storage::IoError err;
             if (!main_storage->ensure_ready(err))
                 throw std::runtime_error("Storage init failed: " + err.message);
+        }
+
+        // ---- 2b. 远程后端套真异步装饰器 ----
+        // S3/WebHDFS 的 PUT/GET 是毫秒~百毫秒级阻塞网络操作：commit_async 与
+        // 三个 async 读投递到 worker 线程池执行，io 线程不再被卡（调用点已按
+        // pause 独占约定改造）。本地后端保持内联——stat/mmap/进 page cache 的
+        // 写都是 µs 级，多一次线程跳转纯属浪费。
+        // executor 惰性取 pool：装配此刻 worker 池尚未创建（见 ---- 5 ----），
+        // 首次存储操作远晚于初始化完成，届时必然已就绪；无池配置内联兜底。
+        if (sc.provider == "s3" || sc.provider == "hdfs_web") {
+            main_storage = std::make_shared<storage::AsyncStorageProvider>(
+                main_storage,
+                [this](std::function<void()> task) {
+                    if (m_workerThreadPool) {
+                        m_workerThreadPool->post(std::move(task));
+                    } else {
+                        task();
+                    }
+                });
         }
 
         // ---- 3. 创建 Shard Router ----

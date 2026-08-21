@@ -1079,53 +1079,69 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
 {
     if (!session) { LOG_AUTH_ERROR("Session is null in auth_user"); cb(false, 0); return; }
 
-    int shard = 0;
-    if (m_shardRouter) { int r = m_shardRouter->route(mail_address); if (r >= 0) shard = r; }
+    // bcrypt 是几十~几百 ms 的纯 CPU：绝不能在共享 io 线程上算 —— 那会把
+    // 同线程其他会话的读写/握手/定时器全部卡住（与 IMAP LOGIN 同一修复）。
+    // 整段认证（缓存 / DB 查询 / 验密 / last_login）作为一个任务丢给 worker
+    // 线程池；回调在 worker 触发，pause 期间独占 session —— 调用方回调里
+    // drain_buffered_commands 的契约不变。
+    auto router = m_shardRouter;
+    auto cache = m_authCache;
+    auto task =
+        [session, mail_address, password, router, cache,
+         cb = std::move(cb)]() mutable {
+            int shard = 0;
+            if (router) { int r = router->route(mail_address); if (r >= 0) shard = r; }
 
-    // 查缓存 —— 命中则同步回调，无需暂停流水线
-    AuthCacheEntry ce;
-    if (m_authCache->lookup(mail_address, ce)) {
-        if (ce.status != 1) { cb(false, 0); return; }
-        shard = ce.shard;
-        bool ok = verify_password(password, ce.password_hash);
-        cb(ok, shard);
-        return;
-    }
+            AuthCacheEntry ce;
+            if (cache->lookup(mail_address, ce)) {
+                if (ce.status != 1) { cb(false, 0); return; }
+                shard = ce.shard;
+                const bool ok = verify_password(password, ce.password_hash);
+                cb(ok, ok ? shard : 0);
+                return;
+            }
 
-    // 缓存未命中，查 DB
-    auto conn_raw = acquire_connection(shard);
-    if (!conn_raw.is_valid()) { LOG_AUTH_ERROR("Failed to get DB connection"); cb(false, 0); return; }
-    auto conn = std::make_shared<ScopedConnection>(std::move(conn_raw));
+            // DB 走 async_query 链（而非 sq 同步桥）：真实连接池的默认实现
+            // 内联执行 → 查询与下面的 bcrypt 都在本 worker 线程；延迟实现
+            // （MockDbPool 手动 fire）也保持兼容 —— 回调链不挑线程。
+            auto conn = std::make_shared<ScopedConnection>(
+                router->get_db_pool(static_cast<size_t>(shard))->acquire_connection());
+            if (!conn->is_valid()) { LOG_AUTH_ERROR("Failed to get DB connection"); cb(false, 0); return; }
 
-    // 暂停流水线：DB 查询期间不消费新命令
-    // 注意：调用者必须在回调中调用 session->drain_buffered_commands()
+            (*conn)->async_query(db::sql::build_auth_user_query(), {mail_address},
+                [mail_address, password, shard, conn, cache,
+                 cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
+                    if (!result || result->get_row_count() == 0) {
+                        LOG_AUTH_WARN("User not found: {}", mail_address);
+                        cb(false, 0);
+                        return;
+                    }
+                    int status = std::stoi(result->get_value(0, "status"));
+                    if (status != 1) {
+                        LOG_AUTH_WARN("User account disabled: {}", mail_address);
+                        cb(false, 0);
+                        return;
+                    }
+                    std::string stored = result->get_value(0, "password");
+                    cache->store(mail_address, {stored, status, 0, shard});
+                    const bool ok = verify_password(password, stored);
+                    if (ok) {
+                        (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
+                                               [cb = std::move(cb), ok, shard](bool) { cb(ok, shard); });
+                    } else {
+                        cb(false, 0);
+                    }
+                });
+        };
+
+    // 暂停流水线：worker 执行期间不消费新命令（无 worker 池时内联执行，
+    // pause/回调契约相同）
     session->set_paused(true);
-
-    std::string sql = db::sql::build_auth_user_query();
-    (*conn)->async_query(sql, {mail_address},
-        [this, session, mail_address, password, shard, conn,
-         cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
-            if (!result || result->get_row_count() == 0) {
-                LOG_AUTH_WARN("User not found: {}", mail_address);
-                cb(false, 0);
-                return;
-            }
-            int status = std::stoi(result->get_value(0, "status"));
-            if (status != 1) {
-                LOG_AUTH_WARN("User account disabled: {}", mail_address);
-                cb(false, 0);
-                return;
-            }
-            std::string stored = result->get_value(0, "password");
-            m_authCache->store(mail_address, {stored, status, 0, shard});
-            bool ok = verify_password(password, stored);
-            if (ok) {
-                (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
-                                       [cb = std::move(cb), ok, shard](bool) { cb(ok, shard); });
-            } else {
-                cb(false, 0);
-            }
-        });
+    if (auto* pool = session->get_server()->m_workerThreadPool.get()) {
+        pool->post(std::move(task));
+    } else {
+        task();
+    }
 }
 
 

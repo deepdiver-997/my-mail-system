@@ -412,6 +412,12 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(io_error_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(io_error_test)
 
+    add_executable(async_storage_provider_test
+        test/unit/async_storage_provider_test.cpp
+    )
+    target_include_directories(async_storage_provider_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(async_storage_provider_test)
+
     add_executable(fsm_bench
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/smtps/smtps_server.cpp
@@ -477,6 +483,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME mail_body_writer_test COMMAND mail_body_writer_test)
     add_test(NAME buffered_upload_stream_test COMMAND buffered_upload_stream_test)
     add_test(NAME io_error_test COMMAND io_error_test)
+    add_test(NAME async_storage_provider_test COMMAND async_storage_provider_test)
 endif()
 
 if(NOT BUILD_OBJECT_ONLY)
