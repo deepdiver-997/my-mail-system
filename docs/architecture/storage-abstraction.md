@@ -27,6 +27,26 @@ IStorageProvider
 
 `MailBodyWriter` 在其上做固定 64KB 缓冲，`offset_` 是文件位置的唯一真相，只在 `emit()` 一处推进。
 
+### 远程后端：整对象缓冲，一次上传
+
+对追加型后端，「每块 `write_at` = 一次网络往返」在流式写入下不可接受，S3 的
+`append_binary` 适配甚至是 GET 全量 + PUT 全量（O(n²) 字节）。因此 S3/WebHDFS
+覆写 `open_write` 返回 `BufferedUploadStream`：
+
+- `write_at` 只攒内存缓冲（沿用 offset 连续性校验），`commit()` 时把整个对象
+  **一次性**交给上传函数——S3 一次 PUT（整对象原子替换），WebHDFS 一次
+  CREATE(overwrite=true)。一封 N 块的邮件从 N 次（或 N×2 次）往返变成 1 次。
+- 对象完整驻留内存直到 commit，因此带硬上限（`max_write_buffer_bytes`，默认
+  64MB，可配置）。SMTP 正文上限 10MB，但超限后原始字节仍会继续流向写入流直到
+  DATA_END 才拒收——上限防的就是这种客户端把内存当磁盘用。超限 → `write_at`
+  失败 → `MailBodyWriter` 进入 failed → DATA_END 回 451。
+- `abort` 语义按「是否尝试过上传」区分：commit 前丢弃缓冲即可（远端零副作用）；
+  commit 尝试失败后（PUT 中断可能在远端留半成品）才调用 cleanup 清除远端对象。
+- `commit` 空对象也要上传一次（size=0），与本地后端「打开即创建空文件」对齐，
+  否则空邮件在远程后端读侧会读不到。
+- 超大对象（几十 MB 以上）若成为现实需求，再演进为 multipart/并行分片上传；
+  接口不变，只动 `BufferedUploadStream` 的上传函数。
+
 ## 读侧：只读视图 + 可改缓冲
 
 ```
@@ -50,8 +70,8 @@ IStorageProvider
 |---|---|---|---|
 | Local | mmap / ifstream / stat | 常开 fd + pwrite + fsync | 零拷贝，每块省 stat+open+close |
 | Distributed | 逐副本尝试 | 多副本 append | 本地文件系统多根 |
-| S3 | 签名 GET | append_binary 适配 | 复用已有 `s3_get` |
-| HDFS | WebHDFS OPEN + 307 | append_binary 适配 | 手动走重定向取正文 |
+| S3 | 签名 GET | 缓冲整对象 + 单次 PUT | 复用已有 `s3_get`；`append_binary` 仅限一次性写完整内容（IMAP APPEND） |
+| HDFS | WebHDFS OPEN + 307 | 缓冲整对象 + 单次 CREATE(overwrite) | 手动走重定向取正文 |
 | Null | 明确失败 | 假装成功 | 读回失败不冒充空内容 |
 
 ## 为什么不做异步写
