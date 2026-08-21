@@ -40,7 +40,7 @@ Current implementation status:
 | outbound/     SMTP outbound delivery client                  |
 | persist_storage/  Inbound persistence queue                   |
 | router/       Shard routing strategies                       |
-| storage/      File storage backends (local, S3, HDFS)        |
+| storage/      Storage abstraction (read/write streams, local/S3/HDFS) — see storage-abstraction.md |
 | db/           DB connection pool + SQL builders              |
 | entities/     mail, usr data structs                          |
 +-------------------------------+------------------------------+

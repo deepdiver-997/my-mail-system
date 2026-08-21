@@ -166,6 +166,49 @@ bool HdfsWebStorageProvider::append_binary(const std::string& storage_key,
     return webhdfs_create_with_payload(storage_key, data, size, error);
 }
 
+bool HdfsWebStorageProvider::read_all(const std::string& storage_key,
+                                      std::string& out,
+                                      std::string& error) {
+    if (storage_key.empty()) {
+        error = "hdfs storage key is empty";
+        return false;
+    }
+
+    std::ostringstream open_url;
+    open_url << endpoint_ << "/webhdfs/v1" << url_encode(base_path_ + "/" + storage_key)
+             << "?op=OPEN&user.name=" << url_encode(user_);
+
+    HttpResponse open_resp;
+    if (!http_request("GET", open_url.str(), timeout_ms_, nullptr, 0, open_resp, error)) {
+        return false;
+    }
+
+    // WebHDFS 的 OPEN 通常先回 307，把正文放在 datanode 上；
+    // http_request 不跟随重定向（FOLLOWLOCATION=0），这里手动走第二段。
+    if (open_resp.status_code == 307 && !open_resp.redirect_location.empty()) {
+        HttpResponse data_resp;
+        if (!http_request("GET", open_resp.redirect_location, timeout_ms_, nullptr, 0, data_resp, error)) {
+            return false;
+        }
+        if (data_resp.status_code != 200) {
+            error = "webhdfs open(data) failed, status=" + std::to_string(data_resp.status_code) +
+                    ", body=" + data_resp.body;
+            return false;
+        }
+        out = std::move(data_resp.body);
+        return true;
+    }
+
+    if (open_resp.status_code == 200) {
+        out = std::move(open_resp.body);
+        return true;
+    }
+
+    error = "webhdfs open failed, status=" + std::to_string(open_resp.status_code) +
+            ", body=" + open_resp.body;
+    return false;
+}
+
 bool HdfsWebStorageProvider::remove_object(const std::string& storage_key,
                                            std::string& error) {
     if (storage_key.empty()) {

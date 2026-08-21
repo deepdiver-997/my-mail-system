@@ -34,6 +34,11 @@ public:
     bool remove_object(const std::string& storage_key,
                        std::string& error) override;
 
+    // WebHDFS OPEN（307 重定向到 datanode 后再取正文）
+    bool read_all(const std::string& storage_key,
+                  std::string& out,
+                  std::string& error) override;
+
 private:
     static std::string normalize_endpoint(const std::string& endpoint);
     static std::string normalize_base_path(const std::string& base_path);

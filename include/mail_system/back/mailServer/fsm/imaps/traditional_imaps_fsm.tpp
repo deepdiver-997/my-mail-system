@@ -1319,11 +1319,24 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             response += "INTERNALDATE \"" + imap_timestamp(mail_info.send_time) + "\" ";
         }
         if (want_rfc822_size) {
-            // O(1) file size via filesystem metadata, not reading entire body
-            uintmax_t sz = 0;
+            // 走 provider 的 object_size：本地后端覆写成一次 stat（O(1)，不读正文），
+            // 远程后端有自己的实现。不要在这里直接 filesystem::file_size —— body_path
+            // 对 S3/HDFS 是远程 key，不是本地路径。
+            std::uint64_t sz = 0;
             if (!mail_info.body_path.empty()) {
-                std::error_code ec;
-                sz = std::filesystem::file_size(mail_info.body_path, ec);
+                auto provider = this->get_storage(0);
+                std::string size_err;
+                if (provider) {
+                    if (!provider->object_size(mail_info.body_path, sz, size_err)) {
+                        LOG_FILE_IO_ERROR("RFC822.SIZE lookup failed for {}: {}",
+                                          mail_info.body_path, size_err);
+                        sz = 0;
+                    }
+                } else {
+                    std::error_code ec;
+                    const auto fsz = std::filesystem::file_size(mail_info.body_path, ec);
+                    sz = ec ? 0 : static_cast<std::uint64_t>(fsz);
+                }
             }
             response += "RFC822.SIZE " + std::to_string(sz) + " ";
         }
@@ -1414,8 +1427,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             if (want_body_part && body_part_num > 0) {
                 // 提取第 body_part_num 个 MIME part 的正文：
                 // 跳过该 part 自己的 header，并按 Content-Transfer-Encoding 解码
+                // 无 sidecar 的旧邮件/大邮件会在此现场解析并回写，下次 FETCH 直接命中
                 MimePart mime_tree;
-                if (load_mime_tree(mail_info.body_path, mime_tree)) {
+                if (ensure_mime_tree(mail_info.body_path, body_content, mime_tree)) {
                     const MimePart* part = nullptr;
                     if (mime_tree.is_multipart() && (size_t)body_part_num <= mime_tree.subs.size())
                         part = &mime_tree.subs[body_part_num - 1];
@@ -1426,18 +1440,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
                     else
                         body_content.clear(); // 无效 section
                 } else {
-                    // 旧邮件无 sidecar：inline 解析后走同样的提取/解码逻辑
-                    MimePart fallback_tree;
-                    parse_mime_tree(body_content, fallback_tree);
-                    const MimePart* part = nullptr;
-                    if (fallback_tree.is_multipart() && (size_t)body_part_num <= fallback_tree.subs.size())
-                        part = &fallback_tree.subs[body_part_num - 1];
-                    else if (!fallback_tree.is_multipart() && body_part_num == 1)
-                        part = &fallback_tree;
-                    if (part)
-                        body_content = extract_part_content(body_content, *part);
-                    else
-                        body_content.clear();
+                    body_content.clear();
                 }
             }
             std::string body_label = want_body_part ? ("BODY[" + std::to_string(body_part_num) + "]") : "BODY[]";
@@ -1448,8 +1451,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             if (load_mime_tree(mail_info.body_path, mime_tree)) {
                 response += "BODYSTRUCTURE " + build_bodystructure_tree(mime_tree) + " ";
             } else {
+                // 无 sidecar：读回原文解析一次并回写，后续 FETCH 不再重复解析
                 std::string body_content = this->read_mail_body(mail_info.body_path);
-                response += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
+                if (ensure_mime_tree(mail_info.body_path, body_content, mime_tree)) {
+                    response += "BODYSTRUCTURE " + build_bodystructure_tree(mime_tree) + " ";
+                } else {
+                    response += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
+                }
             }
         }
         // Remove trailing space
@@ -2862,6 +2870,21 @@ std::string TraditionalImapsFsm<ConnectionType>::read_mail_body(const std::strin
         return "";
     }
 
+    // 走 provider：body_path 对 S3/HDFS 是远程 key，直接 ifstream 会失败。
+    // 这里返回的是调用方可以随意改的 std::string（FETCH 响应要在其上做切片、
+    // 拼接），所以用 read_all 而不是只读的 open_read。
+    auto provider = this->get_storage(0);
+    if (provider) {
+        std::string content;
+        std::string error;
+        if (!provider->read_all(body_path, content, error)) {
+            LOG_FILE_IO_ERROR("Failed to read mail body {}: {}", body_path, error);
+            return "";
+        }
+        return content;
+    }
+
+    // 未配置 provider 时的本地兜底
     std::ifstream in(body_path, std::ios::binary);
     if (!in.is_open()) {
         LOG_FILE_IO_ERROR("Failed to open mail body: {}", body_path);

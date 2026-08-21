@@ -4,6 +4,7 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
+#include "mail_system/back/storage/local_file_read_stream.h"
 #include "mail_system/back/common/mime_parser.h"
 #include <filesystem>
 #include <openssl/md5.h>
@@ -716,56 +717,59 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
 
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
     if (!smtp_session) { session->close(); return; }
-    smtp_session->flush_body_and_wait();
+
+    // 正文没能落盘就绝不能往下走去回 250：那等于骗发送方 MTA 把邮件从队列里删掉。
+    // 回 451 让对方稍后重投。
+    if (!smtp_session->commit_body()) {
+        cleanup_streamed_attachments(ctx);
+        smtp_session->discard_current_mail();
+        session->do_async_write("451 4.3.0 Failed to store message, try again later\r\n",
+            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable {
+                s->close();
+            });
+        return;
+    }
 
     try {
     auto cfg = std::atomic_load(&session->get_server()->m_config);
 
     // MIME 预解析：仅当消息 ≤ 阈值才 eager 解析（大消息跳过，交给 IMAP lazy 解析）
-    // 供 IMAP BODYSTRUCTURE / BODY[section] 直接使用
-    std::string full_body;
+    // 供 IMAP BODYSTRUCTURE / BODY[section] 直接使用。
+    //
+    // 走 provider 的只读句柄：这里只解析、不修改内容，因此用 open_read。
+    // 本地后端会把它实现成 mmap（零拷贝，省掉 read() 那次 page cache → 用户
+    // 缓冲区的拷贝和最多 1 MiB 的堆分配）；远程后端退化成下载进缓冲区。
+    // mmap 是后端的实现细节，这里不该知道，否则 S3/HDFS 上直接就崩了。
+    std::unique_ptr<storage::IReadStream> body_read;
     if (smtp_session->get_mail() && !smtp_session->get_mail()->body_path.empty()) {
-        std::error_code fec;
-        auto fsz = std::filesystem::file_size(smtp_session->get_mail()->body_path, fec);
-        if (!fec && fsz > 0 && static_cast<std::uintmax_t>(cfg->inbound_mime_parse_limit_bytes) >= fsz) {
-            std::ifstream body_file(smtp_session->get_mail()->body_path, std::ios::binary);
-            if (body_file.is_open()) {
-                std::ostringstream ss; ss << body_file.rdbuf();
-                full_body = ss.str();
+        const auto& body_key = smtp_session->get_mail()->body_path;
+        auto provider = session->get_server()->m_shardRouter->get_storage(
+            static_cast<size_t>(ctx->shard_index));
+        std::uint64_t fsz = 0;
+        std::string read_err;
+
+        if (provider) {
+            if (provider->object_size(body_key, fsz, read_err) && fsz > 0 &&
+                static_cast<std::uint64_t>(cfg->inbound_mime_parse_limit_bytes) >= fsz) {
+                body_read = provider->open_read(body_key, read_err);
+            }
+        } else {
+            std::error_code fec;
+            const auto local_sz = std::filesystem::file_size(body_key, fec);
+            if (!fec && local_sz > 0 &&
+                static_cast<std::uintmax_t>(cfg->inbound_mime_parse_limit_bytes) >= local_sz) {
+                body_read = storage::MappedReadStream::open(body_key, read_err);
             }
         }
+        if (!body_read && !read_err.empty()) {
+            LOG_FILE_IO_ERROR("Failed to open mail body for MIME parse: {}", read_err);
+        }
     }
-    if (!full_body.empty()) {
-        parse_mime_tree(full_body, smtp_session->get_mail()->mime_root);
-        // 写 sidecar JSON 文件，供 IMAP 直接读取
-        try {
-            std::string sidecar_path = smtp_session->get_mail()->body_path + ".mime";
-            std::ofstream sf(sidecar_path);
-            if (sf.is_open()) {
-                // hand-rolled JSON — 足够紧凑且不引入额外依赖
-                std::function<void(const MimePart&, std::ostream&)> write_part;
-                write_part = [&](const MimePart& p, std::ostream& os) {
-                    os << "{\"t\":\"" << p.type << "\",\"s\":\"" << p.subtype << "\"";
-                    if (!p.charset.empty()) os << ",\"c\":\"" << p.charset << "\"";
-                    if (!p.encoding.empty()) os << ",\"e\":\"" << p.encoding << "\"";
-                    if (!p.boundary.empty()) os << ",\"b\":\"" << p.boundary << "\"";
-                    if (!p.name.empty()) os << ",\"n\":\"" << p.name << "\"";
-                    os << ",\"o\":" << p.offset << ",\"l\":" << p.length
-                       << ",\"z\":" << p.body_size << ",\"ln\":" << p.lines;
-                    if (!p.subs.empty()) {
-                        os << ",\"p\":[";
-                        for (size_t i = 0; i < p.subs.size(); ++i) {
-                            if (i) os << ",";
-                            write_part(p.subs[i], os);
-                        }
-                        os << "]";
-                    }
-                    os << "}";
-                };
-                write_part(smtp_session->get_mail()->mime_root, sf);
-                sf.close();
-            }
-        } catch (...) { /* sidecar 写入失败不阻塞收信 */ }
+    if (body_read && !body_read->empty()) {
+        parse_mime_tree(body_read->view(), smtp_session->get_mail()->mime_root);
+        // 写 sidecar JSON 文件，供 IMAP 直接读取（失败不阻塞收信）
+        save_mime_tree(smtp_session->get_mail()->body_path,
+                       smtp_session->get_mail()->mime_root);
     }
 
     // Inbound verification (DKIM/DMARC/SPF) — 异步（worker 线程池执行 DNS/验签，不阻塞 io_context）

@@ -31,6 +31,11 @@ public:
     bool remove_object(const std::string& storage_key,
                        std::string& error) override;
 
+    // 依次尝试各副本，任一可读即成功
+    bool read_all(const std::string& storage_key,
+                  std::string& out,
+                  std::string& error) override;
+
 private:
     static std::string ensure_trailing_slash(const std::string& path);
     static std::string sanitize_filename(const std::string& name);

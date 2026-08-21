@@ -386,6 +386,17 @@ bool S3StorageProvider::append_binary(const std::string& key,
     return s3_put(key, existing.data(), existing.size(), error);
 }
 
+bool S3StorageProvider::read_all(const std::string& key,
+                                 std::string& out,
+                                 std::string& error) {
+    if (key.empty()) {
+        error = "s3 key is empty";
+        return false;
+    }
+    // 复用已有的签名 GET
+    return s3_get(key, out, error);
+}
+
 bool S3StorageProvider::remove_object(const std::string& key, std::string& error) {
     return s3_delete(key, error);
 }
