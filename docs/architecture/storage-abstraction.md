@@ -111,8 +111,17 @@ IStorageProvider
 （`build_mail_body_key` 等）留在 `mail_system/back/storage/`，经伞形头
 `i_storage_provider.h` 以 using 兼容引入——和 `db_pool.h` 的向后兼容是同一模式。
 
+## 远程后端的真异步：装配时装饰，而非 provider 内自建线程
+
+`AsyncStorageProvider`（含 `AsyncCommitStream`）在装配时套在 S3/WebHDFS 外面：
+同步方法全透传，`commit_async` 与三个 async 读把整次网络操作投递到 executor
+（server 的 worker 线程池），底层 provider 保持纯同步实现。本地后端不套——
+多一次线程跳转纯属浪费。S3/HDFS 的 PUT/GET 由此不再阻塞 io 线程，
+SMTP DATA_END 整条链路（commit → MIME 预解析读）对远程后端完全非阻塞。
+executor 惰性取 pool（装配时 worker 池尚未创建），无池配置内联兜底。
+
 ## 后续方向
 
 - 超大对象 multipart/并行分片上传（当前邮件上限 10MB 用不上）。
-- 远程后端覆写 `commit_async` / `async_open_read` 等为真异步（provider 线程 +
-  回调，pause 独占约定不变）——接口与调用点已就绪，只差后端实现。
+- IMAP FETCH 调用点改 async（响应构造循环 → 异步链），接上已就绪的
+  `async_read_all`/`async_object_size` + 装饰器。
