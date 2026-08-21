@@ -13,6 +13,8 @@
 IWriteStream
   write_at(offset, data, size, error)   // 位置由调用方在「发起时」给出
   commit(error)                          // fsync 后才算持久化，之后才可回 250
+  commit_async(cb)                       // 异步形状的 commit：默认内联执行，
+                                         // 远程后端可覆写为 provider 线程执行
   abort() noexcept                       // 丢弃并删除半成品
 
 IStorageProvider
@@ -24,6 +26,7 @@ IStorageProvider
 - **单写者，offset 连续递增**（在发起时）。本地后端据此用 `pwrite`，**完成顺序无关紧要**；只支持追加的 S3/HDFS 也能按序落盘。
 - `AppendWriteStream` 是默认适配：把 `append_binary` 包成 `IWriteStream`，并**在运行时校验 offset 连续**——乱序直接报错，不静默写坏。
 - `commit()` 是 POSIX `close()` 没有的概念：返回 true 才代表数据已落稳定存储。SMTP 侧只有 commit 成功才回 250，否则回 451 让对方重投。
+- `commit_async(cb)` 与 `IDBConnection::async_query` 同一模式：**默认实现在发起线程内联执行**（等价于同步 commit 后立刻回调），本地后端零开销、行为不变；远程后端将来覆写为真异步（provider 线程做 PUT，完成后触发回调）时，调用点代码不改。**回调线程契约**：真异步实现允许在 provider 线程触发回调，调用方必须已通过流水线 `set_paused(true)` 取得 session 独占（SPF/DNS 回调同一约定——pause 期间 io 线程不再消费该 session 也不发起新的 socket 读），或自行 post 回 executor。DATA_END 收尾已按此改造（`commit_body_async` → 回调里 250/451）。
 
 `MailBodyWriter` 在其上做固定 64KB 缓冲，`offset_` 是文件位置的唯一真相，只在 `emit()` 一处推进。
 
@@ -74,12 +77,14 @@ IStorageProvider
 | HDFS | WebHDFS OPEN + 307 | 缓冲整对象 + 单次 CREATE(overwrite) | 手动走重定向取正文 |
 | Null | 明确失败 | 假装成功 | 读回失败不冒充空内容 |
 
-## 为什么不做异步写
+## 为什么不做异步写（write_at 永远同步）
 
-本地写 64KB 进 page cache 是十几微秒，同步写在 IO 线程完全可行；为它派发线程池要付"拷贝缓冲区 + future 生命周期管理"的代价，还曾经把顺序搞丢。**异步化与否由后端决定，不该由 FSM 决定**：
+本地写 64KB 进 page cache 是十几微秒，同步写在 IO 线程完全可行；为它派发线程池要付"拷贝缓冲区 + future 生命周期管理"的代价，还曾经把顺序搞丢。远程后端走整对象缓冲后，`write_at` 也只是 memcpy 进内存缓冲。**异步化与否由后端决定，不该由 FSM 决定**，且异步的边界在 **commit（对象粒度）** 而不在 write_at（块粒度）：
 
-- 本地：同步即可。
-- 远程（S3/HDFS）：单次 PUT 是毫秒级，同步会阻塞 IO 线程。但真正优雅的做法是在**后端内部**做异步（provider 内部队列 + 后端线程，或 libcurl multi），保持 `IWriteStream` 同步签名不变——和 mmap 藏进 provider 是同一个思路。
+- 本地：`commit_async` 走默认内联实现，全程同步。
+- 远程（S3/HDFS）：唯一的网络时刻是 commit 时那一次 PUT/CREATE（毫秒级）。`commit_async` 已备好异步形状，后端将来覆写为 provider 内部线程执行即可，`IWriteStream` 的 `write_at` 签名永远不变——和 mmap 藏进 provider 是同一个思路。
+
+读侧还剩 `read_all` / `object_size` 两个一次性操作在远程后端上是同步网络调用（IMAP FETCH、SMTP DATA 后 MIME 预解析路径），同样的「默认内联 + 真异步覆写」待遇留给它们。
 
 ## 后续方向
 
