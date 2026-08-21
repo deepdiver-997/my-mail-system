@@ -74,6 +74,13 @@ public:
     // 调用方必须回 4xx 而不是 250 —— 否则就是骗发送方 MTA 把邮件从队列里删掉。
     bool commit_body();
 
+    // 异步形状的 commit_body：回调携带 (是否落盘成功, 错误信息)。
+    // 本地后端内联执行（与同步版行为一致）；远程后端真异步时回调来自
+    // provider 线程 —— 调用方必须已 set_paused(true) 取得 session 独占
+    // （SPF/DNS 回调同一约定），在回调里恢复流水线。
+    // session 通过 shared_ptr 捕获自持，回调期间对象存活。
+    void commit_body_async(std::function<void(bool ok, const std::string& error)> cb);
+
     void reset_mail_state();
     void discard_current_mail();
     bool has_pending_mail_submission() const;

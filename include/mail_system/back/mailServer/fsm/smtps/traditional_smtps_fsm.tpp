@@ -720,15 +720,40 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
 
     // 正文没能落盘就绝不能往下走去回 250：那等于骗发送方 MTA 把邮件从队列里删掉。
     // 回 451 让对方稍后重投。
-    if (!smtp_session->commit_body()) {
-        cleanup_streamed_attachments(ctx);
-        smtp_session->discard_current_mail();
-        session->do_async_write("451 4.3.0 Failed to store message, try again later\r\n",
-            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable {
-                s->close();
-            });
-        return;
-    }
+    //
+    // commit 走异步形状：本地后端回调内联执行（与原同步版行为完全一致）；
+    // 远程后端将来覆写真异步时回调来自 provider 线程 —— pause 期间 io 线程不再
+    // 消费本 session（do_async_read 的流水线循环检查 is_paused，且不再发起新的
+    // socket 读），回调独占操作 session，无需 post 回 io_context（SPF/DNS
+    // 回调同一约定）。
+    session->set_paused(true);
+    smtp_session->commit_body_async(
+        [session](bool committed, const std::string&) {
+            session->set_paused(false);
+            auto* c = static_cast<SmtpsContext*>(session->get_context());
+            auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
+            if (!committed) {
+                cleanup_streamed_attachments(c);
+                if (smtp_s) smtp_s->discard_current_mail();
+                session->do_async_write("451 4.3.0 Failed to store message, try again later\r\n",
+                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable {
+                        s->close();
+                    });
+                return;
+            }
+            finish_data_end_after_commit(session);
+        });
+}
+
+// DATA_END 在正文确认落盘之后的处理：MIME 预解析 → 入站校验（可选异步）→
+// 入队 + 250/451。commit_body 的回调（本地内联 / 远程 provider 线程）在这里续跑。
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
+    std::shared_ptr<SessionBase<ConnectionType>> session)
+{
+    auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+    auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
+    if (!smtp_session) { session->close(); return; }
 
     try {
     auto cfg = std::atomic_load(&session->get_server()->m_config);

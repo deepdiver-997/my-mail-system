@@ -4,6 +4,7 @@
 #include "mail_system/back/storage/i_write_stream.h"
 
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -94,6 +95,43 @@ public:
         }
         committed_ = true;
         return true;
+    }
+
+    // 异步形状的 commit。前置状态检查与 flush 都是本线程内存操作（内联完成），
+    // 只有底层流的持久化交给 IWriteStream::commit_async——其默认实现内联执行，
+    // 远程后端覆写真异步时回调可能来自 provider 线程（见 IWriteStream 契约）。
+    //
+    // 结果回调里同步更新 committed_/failed_：成功后析构不再走 abort，
+    // 失败则标 failed 并在析构时经 stream_->abort() 清理远端半成品。
+    // 约束：回调触发时本对象必须仍存活（调用方在回调返回之后才 reset 它）。
+    void commit_async(IWriteStream::CommitCallback cb) {
+        if (committed_) {
+            if (cb) cb(true, std::string());
+            return;
+        }
+        if (failed_) {
+            if (cb) cb(false, "mail body writer already failed");
+            return;
+        }
+        if (!stream_) {
+            failed_ = true;
+            if (cb) cb(false, "mail body writer has no write stream");
+            return;
+        }
+        std::string error;
+        if (!flush(error)) {
+            if (cb) cb(false, std::move(error));
+            return;
+        }
+        stream_->commit_async(
+            [this, cb = std::move(cb)](bool ok, const std::string& err) mutable {
+                if (ok) {
+                    committed_ = true;
+                } else {
+                    failed_ = true;
+                }
+                if (cb) cb(ok, err);
+            });
     }
 
     // 幂等：重复调用、以及 commit 之后再调用都安全。

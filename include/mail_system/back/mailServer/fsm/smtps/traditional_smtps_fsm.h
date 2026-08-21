@@ -140,6 +140,11 @@ private:
     void handle_wait_data_data(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_in_message_data(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_in_message_data_end(std::shared_ptr<SessionBase<ConnectionType>> session);
+
+    // DATA_END 在 commit_body_async 回调（本地内联 / 远程 provider 线程）之后的
+    // 收尾：MIME 预解析 → 入站校验 → 入队 + 250/451。刻意 static：
+    // 回调里无 this 可用，全部依赖经 session 参数推导。
+    static void finish_data_end_after_commit(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_wait_quit_quit(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_timeout(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_error(std::shared_ptr<SessionBase<ConnectionType>> session);

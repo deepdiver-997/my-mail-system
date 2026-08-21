@@ -13,8 +13,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "mail_system/back/storage/buffered_upload_stream.h"
@@ -192,6 +194,132 @@ static void test_empty_object_still_uploads() {
     }
 }
 
+// ========== commit_async：内联默认实现 + 真异步覆写 ==========
+
+// 8. 默认 commit_async 在发起线程内联执行 —— 本地后端零开销的关键
+static void test_commit_async_inline_default() {
+    UploadLog log;
+    BufferedUploadStream s(recording_upload(&log), recording_cleanup(&log), 4096);
+    std::string err;
+    s.write_at(0, "mail", 4, err);
+
+    bool called = false;
+    bool same_thread = false;
+    bool got_ok = false;
+    std::string got_err;
+    const auto main_id = std::this_thread::get_id();
+    s.commit_async([&](bool ok, const std::string& e) {
+        called = true;
+        same_thread = (std::this_thread::get_id() == main_id);
+        got_ok = ok;
+        got_err = e;
+    });
+    expect_true(called, "default commit_async fires synchronously (inline)");
+    expect_true(same_thread, "default impl runs callback on calling thread");
+    expect_true(got_ok, "inline commit_async reports ok");
+    expect_true(got_err.empty(), "success carries empty error");
+    expect_num(log.uploads.size(), 1, "commit performed before callback");
+}
+
+// 9. 真异步覆写：回调来自 provider 线程，MailBodyWriter::commit_async 原样透传。
+//    这是远程后端将来覆写 commit_async 后 DATA_END 回调的形状。
+class FakeAsyncProviderStream : public IWriteStream {
+public:
+    explicit FakeAsyncProviderStream(bool succeed) : succeed_(succeed) {}
+
+    bool write_at(std::uint64_t, const char* data, std::size_t size, std::string&) override {
+        buffered_.append(data, size);
+        return true;
+    }
+    bool commit(std::string& error) override {
+        if (!succeed_) { error = "injected async failure"; return false; }
+        committed_ = true;
+        return true;
+    }
+    void abort() noexcept override {}
+
+    // 模拟真异步后端：把 commit 挪到别的线程执行，回调在 provider 线程触发
+    void commit_async(CommitCallback cb) override {
+        std::thread([this, cb = std::move(cb)]() mutable {
+            std::string error;
+            const bool ok = commit(error);
+            cb(ok, ok ? std::string() : error);
+        }).detach();
+    }
+
+    std::string buffered_;
+    bool committed_ = false;
+    bool succeed_;
+};
+
+static void test_commit_async_deferred_from_provider_thread() {
+    auto stream = std::make_unique<FakeAsyncProviderStream>(true);
+    auto* raw = stream.get();
+    MailBodyWriter w(std::move(stream), 64);
+    std::string err;
+    w.write("body", 4, err);
+
+    std::promise<std::pair<bool, std::string>> done;
+    auto fut = done.get_future();
+    const auto main_id = std::this_thread::get_id();
+    w.commit_async([&done, main_id](bool ok, const std::string& e) {
+        // 回调线程契约：真异步实现允许在 provider 线程触发 —— 这里就断言它确实
+        // 不在发起线程上（发起线程此刻正阻塞在 future::get）
+        expect_true(std::this_thread::get_id() != main_id,
+                    "deferred commit_async fires on provider thread");
+        done.set_value({ok, e});
+    });
+    const auto result = fut.get();
+    expect_true(result.first, "deferred commit reports ok");
+    expect_true(result.second.empty(), "deferred success carries empty error");
+    expect_true(raw->committed_, "underlying stream committed");
+    expect_true(w.committed(), "writer marked committed");
+
+    // 失败路径同样从 provider 线程回调
+    MailBodyWriter w2(std::make_unique<FakeAsyncProviderStream>(false), 64);
+    w2.write("body", 4, err);
+    std::promise<std::pair<bool, std::string>> done2;
+    auto fut2 = done2.get_future();
+    w2.commit_async([&done2](bool ok, const std::string& e) {
+        done2.set_value({ok, e});
+    });
+    const auto result2 = fut2.get();
+    expect_true(!result2.first, "deferred failure reports !ok");
+    expect_str(result2.second, "injected async failure", "failure carries error");
+    expect_true(w2.failed(), "writer marked failed after deferred failure");
+}
+
+// 10. MailBodyWriter::commit_async 的前置状态检查内联完成：
+//     已 failed / 已 committed 的 writer 立刻回调，不触碰底层流
+static void test_commit_async_state_short_circuits() {
+    std::string err;
+    {
+        UploadLog log;
+        MailBodyWriter w(std::make_unique<BufferedUploadStream>(
+                             recording_upload(&log), recording_cleanup(&log), 4096),
+                         64);
+        w.write("x", 1, err);
+        expect_true(w.commit(err), "commit ok");
+        bool called = false; bool ok = false;
+        w.commit_async([&](bool o, const std::string&) { called = true; ok = o; });
+        expect_true(called, "committed writer callbacks inline");
+        expect_true(ok, "committed writer reports ok");
+    }
+    {
+        // 先把流写失败（超容量），commit_async 必须内联回 false
+        MailBodyWriter w(std::make_unique<BufferedUploadStream>(
+                             [](const char*, std::size_t, std::string&) { return true; },
+                             []() {}, 10),
+                         8);
+        expect_true(!w.write(make_payload(20, 3).data(), 20, err), "force failure");
+        expect_true(w.failed(), "writer failed");
+        bool called = false; bool ok = true;
+        w.commit_async([&](bool o, const std::string&) { called = true; ok = o; });
+        expect_true(called, "failed writer callbacks inline");
+        expect_true(!ok, "failed writer reports !ok");
+    }
+}
+
 int main() {
     std::printf("buffered_upload_stream_test\n");
     test_single_upload_at_commit();
@@ -201,6 +329,9 @@ int main() {
     test_failed_commit_cleans_up();
     test_commit_idempotent();
     test_empty_object_still_uploads();
+    test_commit_async_inline_default();
+    test_commit_async_deferred_from_provider_thread();
+    test_commit_async_state_short_circuits();
 
     std::printf("  pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

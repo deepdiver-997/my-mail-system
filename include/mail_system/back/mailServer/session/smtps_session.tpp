@@ -158,6 +158,42 @@ bool SmtpsSession<ConnectionType>::commit_body() {
 }
 
 template <typename ConnectionType>
+void SmtpsSession<ConnectionType>::commit_body_async(
+    std::function<void(bool ok, const std::string& error)> cb) {
+    if (!this->get_mail()) {
+        // 压根没有邮件（例如 DATA 之前就被拒），无正文可提交
+        if (cb) cb(true, std::string());
+        return;
+    }
+    if (!body_writer_) {
+        // 有邮件却没有写入器 = 打开写入流时就失败了，正文从未落盘。
+        // 这里绝不能回调 true，否则会放一封空正文的邮件过去并回 250。
+        LOG_SESSION_ERROR("Mail {} has no body write stream, cannot commit",
+                          this->get_mail()->id);
+        handle_write_failure();
+        if (cb) cb(false, "no body write stream");
+        return;
+    }
+
+    // shared_from_this 捕获：真异步（provider 线程触发回调）时 FSM handler
+    // 早已返回，session 必须靠回调链上的 shared_ptr 保活。
+    body_writer_->commit_async(
+        [self = this->shared_from_this(), cb = std::move(cb)]
+        (bool ok, const std::string& error) mutable {
+            auto* s = static_cast<SmtpsSession<ConnectionType>*>(self.get());
+            if (!ok) {
+                LOG_SESSION_ERROR("Failed to commit mail body for mail {}: {}",
+                                  s->get_mail() ? s->get_mail()->id : 0, error);
+                s->handle_write_failure();
+            } else {
+                LOG_SESSION_INFO("Committed mail body, {} bytes",
+                                 s->body_writer_->bytes_total());
+            }
+            if (cb) cb(ok, error);
+        });
+}
+
+template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::handle_write_failure() {
     if (!this->get_mail()) {
         return;
