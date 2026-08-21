@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -78,6 +79,46 @@ public:
     virtual bool object_size(const std::string& storage_key,
                              std::uint64_t& size,
                              IoError& error);
+
+    // ── 读侧异步形状 ────────────────────────────────────────────────────
+    // 与 IWriteStream::commit_async 同一模式：默认实现在发起线程内联执行
+    // （本地后端 stat/mmap 是 µs 级，零开销、行为与同步版一致），远程后端
+    // 将来覆写为真异步（provider 线程下载，完成后触发回调）时调用点不改。
+    //
+    // 回调线程契约：真异步实现允许在 provider 线程触发回调。调用方必须已
+    // 通过流水线 set_paused(true) 取得 session 独占（SPF/DNS/commit 回调
+    // 同一约定），或自行把续作 post 回 io 线程。
+    //
+    // 失败语义与同步版一致：ok=false / stream==nullptr 时 error 必有内容。
+
+    using OpenReadCallback = std::function<void(std::unique_ptr<IReadStream> stream,
+                                                const IoError& error)>;
+    using ReadAllCallback = std::function<void(bool ok,
+                                               std::string data,
+                                               const IoError& error)>;
+    using ObjectSizeCallback = std::function<void(bool ok,
+                                                  std::uint64_t size,
+                                                  const IoError& error)>;
+
+    virtual void async_open_read(const std::string& storage_key, OpenReadCallback cb) {
+        IoError error;
+        auto stream = open_read(storage_key, error);
+        if (cb) cb(std::move(stream), std::move(error));
+    }
+
+    virtual void async_read_all(const std::string& storage_key, ReadAllCallback cb) {
+        IoError error;
+        std::string data;
+        const bool ok = read_all(storage_key, data, error);
+        if (cb) cb(ok, std::move(data), std::move(error));
+    }
+
+    virtual void async_object_size(const std::string& storage_key, ObjectSizeCallback cb) {
+        IoError error;
+        std::uint64_t size = 0;
+        const bool ok = object_size(storage_key, size, error);
+        if (cb) cb(ok, size, std::move(error));
+    }
 };
 
 // 把 append_binary 适配成 IWriteStream。

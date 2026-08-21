@@ -142,9 +142,15 @@ private:
     void handle_in_message_data_end(std::shared_ptr<SessionBase<ConnectionType>> session);
 
     // DATA_END 在 commit_body_async 回调（本地内联 / 远程 provider 线程）之后的
-    // 收尾：MIME 预解析 → 入站校验 → 入队 + 250/451。刻意 static：
-    // 回调里无 this 可用，全部依赖经 session 参数推导。
+    // 收尾：MIME 预解析（异步读）→ 入站校验 → 入队 + 250/451。
     static void finish_data_end_after_commit(std::shared_ptr<SessionBase<ConnectionType>> session);
+
+    // 在只读视图上做 MIME 预解析并写 sidecar。static：回调里无 this 可用。
+    static void parse_and_save_mime_tree(std::shared_ptr<SessionBase<ConnectionType>> session,
+                                         std::unique_ptr<storage::IReadStream> body_read);
+
+    // MIME 预解析之后的收尾：入站校验（可选异步）→ 入队 + 250/451。
+    static void finish_data_end_after_read(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_wait_quit_quit(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_timeout(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_error(std::shared_ptr<SessionBase<ConnectionType>> session);

@@ -752,8 +752,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
         });
 }
 
-// DATA_END 在正文确认落盘之后的处理：MIME 预解析 → 入站校验（可选异步）→
-// 入队 + 250/451。commit_body 的回调（本地内联 / 远程 provider 线程）在这里续跑。
+// DATA_END 在正文确认落盘之后的处理：MIME 预解析（异步读）→ 入站校验
+// （可选异步）→ 入队 + 250/451。commit_body 的回调（本地内联 / 远程
+// provider 线程）在这里续跑。
 template <typename ConnectionType>
 void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
     std::shared_ptr<SessionBase<ConnectionType>> session)
@@ -762,47 +763,107 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
     auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
     if (!smtp_session) { session->close(); return; }
 
-    try {
     auto cfg = std::atomic_load(&session->get_server()->m_config);
 
     // MIME 预解析：仅当消息 ≤ 阈值才 eager 解析（大消息跳过，交给 IMAP lazy 解析）
     // 供 IMAP BODYSTRUCTURE / BODY[section] 直接使用。
     //
     // 走 provider 的只读句柄：这里只解析、不修改内容，因此用 open_read。
-    // 本地后端会把它实现成 mmap（零拷贝，省掉 read() 那次 page cache → 用户
-    // 缓冲区的拷贝和最多 1 MiB 的堆分配）；远程后端退化成下载进缓冲区。
-    // mmap 是后端的实现细节，这里不该知道，否则 S3/HDFS 上直接就崩了。
-    std::unique_ptr<storage::IReadStream> body_read;
-    if (smtp_session->get_mail() && !smtp_session->get_mail()->body_path.empty()) {
-        const auto& body_key = smtp_session->get_mail()->body_path;
-        auto provider = session->get_server()->m_shardRouter->get_storage(
-            static_cast<size_t>(ctx->shard_index));
-        std::uint64_t fsz = 0;
-        storage::IoError read_err;
+    // 本地后端会把它实现成 mmap（零拷贝）；远程后端退化成下载进缓冲区。
+    // 读走异步形状：本地内联（行为与同步版一致），远程将来覆写真异步时
+    // 回调来自 provider 线程 —— pause 期间回调独占 session，无需 post 回
+    // （与 commit 回调同一约定）。
+    const bool has_body = smtp_session->get_mail() &&
+                          !smtp_session->get_mail()->body_path.empty();
+    auto provider = has_body ? session->get_server()->m_shardRouter->get_storage(
+                                   static_cast<size_t>(ctx->shard_index))
+                             : nullptr;
+    if (!has_body || !provider) {
+        try {
+            if (has_body) {
+                // 无 provider 的兜底路径：本地文件系统直开 mmap（µs 级，无需异步）
+                std::error_code fec;
+                const auto& body_key = smtp_session->get_mail()->body_path;
+                const auto local_sz = std::filesystem::file_size(body_key, fec);
+                if (!fec && local_sz > 0 &&
+                    static_cast<std::uintmax_t>(cfg->inbound_mime_parse_limit_bytes) >= local_sz) {
+                    storage::IoError read_err;
+                    auto body_read = storage::MappedReadStream::open(body_key, read_err);
+                    if (!body_read && !read_err.message.empty()) {
+                        LOG_FILE_IO_ERROR("Failed to open mail body for MIME parse: {}",
+                                          read_err.message);
+                    }
+                    parse_and_save_mime_tree(session, std::move(body_read));
+                }
+            }
+        } catch (const std::exception& e) {
+        LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());
+        auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
+        if (smtp_s) smtp_s->discard_current_mail();
+        session->do_async_write("451 Requested action aborted: local processing error\r\n",
+            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
+        return;
+    }
+        finish_data_end_after_read(session);
+        return;
+    }
 
-        if (provider) {
-            if (provider->object_size(body_key, fsz, read_err) && fsz > 0 &&
-                static_cast<std::uint64_t>(cfg->inbound_mime_parse_limit_bytes) >= fsz) {
-                body_read = provider->open_read(body_key, read_err);
-            }
-        } else {
-            std::error_code fec;
-            const auto local_sz = std::filesystem::file_size(body_key, fec);
-            if (!fec && local_sz > 0 &&
-                static_cast<std::uintmax_t>(cfg->inbound_mime_parse_limit_bytes) >= local_sz) {
-                body_read = storage::MappedReadStream::open(body_key, read_err);
-            }
-        }
-        if (!body_read && !read_err.message.empty()) {
-            LOG_FILE_IO_ERROR("Failed to open mail body for MIME parse: {}", read_err.message);
-        }
+    session->set_paused(true);
+    provider->async_open_read(smtp_session->get_mail()->body_path,
+        [session, cfg](std::unique_ptr<storage::IReadStream> stream,
+                       const storage::IoError& read_err) {
+            session->set_paused(false);
+            try {
+                if (!stream && !read_err.message.empty()) {
+                    LOG_FILE_IO_ERROR("Failed to open mail body for MIME parse: {}",
+                                      read_err.message);
+                }
+                // 超过解析阈值的大消息跳过 eager 解析（大小只有拿到流才知道，
+                // 远程后端为此下载一次是这笔账里省不掉的部分）
+                if (stream && !stream->empty() &&
+                    static_cast<std::uint64_t>(cfg->inbound_mime_parse_limit_bytes) >= stream->size()) {
+                    parse_and_save_mime_tree(session, std::move(stream));
+                }
+            }catch (const std::exception& e) {
+        LOG_SMTP_DETAIL_ERROR("DATA_END processing exception: {}", e.what());
+        auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
+        if (smtp_s) smtp_s->discard_current_mail();
+        session->do_async_write("451 Requested action aborted: local processing error\r\n",
+            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable { s->close(); });
+        return;
     }
-    if (body_read && !body_read->empty()) {
-        parse_mime_tree(body_read->view(), smtp_session->get_mail()->mime_root);
-        // 写 sidecar JSON 文件，供 IMAP 直接读取（失败不阻塞收信）
-        save_mime_tree(smtp_session->get_mail()->body_path,
-                       smtp_session->get_mail()->mime_root);
+            finish_data_end_after_read(session);
+        });
+}
+
+// 在只读视图上做 MIME 预解析并写 sidecar JSON（失败不阻塞收信）。
+// 只允许在持有 session 独占（IO 线程 handler 内 / pause 期间的回调）时调用。
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::parse_and_save_mime_tree(
+    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::unique_ptr<storage::IReadStream> body_read)
+{
+    auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
+    if (!smtp_session || !smtp_session->get_mail() || !body_read || body_read->empty()) {
+        return;
     }
+    parse_mime_tree(body_read->view(), smtp_session->get_mail()->mime_root);
+    save_mime_tree(smtp_session->get_mail()->body_path,
+                   smtp_session->get_mail()->mime_root);
+}
+
+// MIME 预解析之后的收尾：入站校验（可选异步）→ 入队 + 250/451。
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_read(
+    std::shared_ptr<SessionBase<ConnectionType>> session)
+{
+    auto* ctx = static_cast<SmtpsContext*>(session->get_context());
+    auto* smtp_session = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
+    if (!smtp_session) { session->close(); return; }
+
+    auto cfg = std::atomic_load(&session->get_server()->m_config);
+
+    try {
 
     // Inbound verification (DKIM/DMARC/SPF) — 异步（worker 线程池执行 DNS/验签，不阻塞 io_context）
     bool needs_verify = !cfg->perf_mode && (

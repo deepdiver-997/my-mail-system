@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <thread>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -386,6 +387,75 @@ static void test_read_side_backend_agnostic() {
     std::filesystem::remove_all(dir);
 }
 
+// 异步读的默认实现：内联执行、值与同步版一致（远程后端真异步覆写后
+// 调用点不改的前提就是这份契约）
+static void test_async_read_defaults_inline() {
+    FakeRemoteProvider remote;
+    const std::string payload = make_payload(3000, 31);
+    remote.object = payload;
+    const auto main_id = std::this_thread::get_id();
+
+    // async_read_all
+    {
+        bool called = false, ok = false, same_thread = false;
+        std::string got;
+        std::string got_err;
+        remote.async_read_all("remote://42",
+            [&](bool o, std::string data, const IoError& e) {
+                called = true; ok = o;
+                same_thread = (std::this_thread::get_id() == main_id);
+                got = std::move(data);
+                got_err = e.message;
+            });
+        expect_true(called && same_thread, "async_read_all fires inline");
+        expect_true(ok, "async_read_all reports ok");
+        expect_str(got, payload, "async_read_all data matches");
+        expect_true(got_err.empty(), "async_read_all success has empty error");
+    }
+    // 失败路径：error 必有内容
+    {
+        bool ok = true;
+        std::string got_err;
+        remote.async_read_all("remote://999",
+            [&](bool o, std::string, const IoError& e) { ok = o; got_err = e.message; });
+        expect_true(!ok, "async_read_all missing key reports failure");
+        expect_true(!got_err.empty(), "async_read_all failure fills error");
+    }
+    // async_object_size
+    {
+        bool called = false, ok = false;
+        std::uint64_t got_size = 0;
+        remote.async_object_size("remote://42",
+            [&](bool o, std::uint64_t sz, const IoError&) {
+                called = true; ok = o; got_size = sz;
+            });
+        expect_true(called && ok, "async_object_size fires inline with ok");
+        expect_num(got_size, payload.size(), "async_object_size value matches");
+    }
+    // async_open_read：只读视图内容一致；缺失对象回 nullptr + error
+    {
+        bool ok = false;
+        std::unique_ptr<IReadStream> stream;
+        remote.async_open_read("remote://42",
+            [&](std::unique_ptr<IReadStream> s, const IoError&) {
+                ok = static_cast<bool>(s);
+                stream = std::move(s);
+            });
+        expect_true(ok, "async_open_read returns stream");
+        if (stream) {
+            expect_str(std::string(stream->view()), payload, "async_open_read view matches");
+        }
+        std::string miss_err;
+        remote.async_open_read("remote://999",
+            [&](std::unique_ptr<IReadStream> s, const IoError& e) {
+                ok = static_cast<bool>(s);
+                miss_err = e.message;
+            });
+        expect_true(!ok, "async_open_read missing key returns null stream");
+        expect_true(!miss_err.empty(), "async_open_read failure fills error");
+    }
+}
+
 // Null 后端读必须明确失败，而不是返回空内容冒充成功
 static void test_null_provider_read_fails_loudly() {
     NullStorageProvider np;
@@ -406,6 +476,7 @@ int main() {
     test_append_stream_rejects_out_of_order();
     test_local_file_round_trip();
     test_read_side_backend_agnostic();
+    test_async_read_defaults_inline();
     test_null_provider_read_fails_loudly();
 
     std::printf("  pass=%d fail=%d\n", g_pass, g_fail);
