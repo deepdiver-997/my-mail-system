@@ -86,7 +86,29 @@ IStorageProvider
 
 读侧还剩 `read_all` / `object_size` 两个一次性操作在远程后端上是同步网络调用（IMAP FETCH、SMTP DATA 后 MIME 预解析路径），同样的「默认内联 + 真异步覆写」待遇留给它们。
 
+## 错误值：IoError{kind, code, message}
+
+存储接口的错误一律是 `IoError`（`framework/storage/io_error.h`），不再是无结构的
+字符串——kind 的判定归属后端（只有它知道失败来自 errno 还是 HTTP 状态码），
+调用方据此决定对外行为：
+
+- **Retryable（默认，fail-safe）**：ENOSPC/EDQUOT/EIO/EMFILE、网络类、HTTP
+  5xx/408/429、curl 传输错误。SMTP 回 **451**，发送方稍后重投。
+- **Permanent**：EACCES/EPERM/EROFS/EFBIG、HTTP 4xx（403/404 拒绝类）、
+  流式写超出 `max_write_buffer_bytes`。SMTP 回 **550**——重投结果不会改变，
+  再收一次只会再失败一次。
+
+拿不准时选 retryable：451 最多让对方多投几次，550 会把邮件丢掉。
+
+## 分层：framework 原语 vs 应用层 Provider
+
+通用原语已在 `framework/storage/`（namespace `pr`，与 `framework/db` 同层）：
+`IReadStream`/`IWriteStream`（含 `commit_async`）/`BufferedUploadStream`/
+`LocalFile*Stream`/`MappedFile`/`IoError`。`IStorageProvider` 与邮件命名规则
+（`build_mail_body_key` 等）留在 `mail_system/back/storage/`，经伞形头
+`i_storage_provider.h` 以 using 兼容引入——和 `db_pool.h` 的向后兼容是同一模式。
+
 ## 后续方向
 
-- `IoError{code, retryable}`：区分可重试失败（ENOSPC→451）与永久失败（EACCES→550）。
-- 通用原语（`IReadStream`/`IWriteStream`/`LocalFile*Stream`）上移到 `framework/storage/`，与 `framework/db/` 的"通用原语"对齐；`IStorageProvider` 里的邮件命名规则（`build_mail_body_key` 等）留在 `mail_system/back/storage/`。
+- 读侧 `read_all` / `object_size` 的「默认内联 + 真异步覆写」异步形状（同 commit_async）。
+- 超大对象 multipart/并行分片上传（当前邮件上限 10MB 用不上）。

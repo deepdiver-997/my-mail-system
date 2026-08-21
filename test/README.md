@@ -13,6 +13,7 @@ test/
 │   ├── outbound_smoke.cpp       # 出站类型/FSM 烟雾测试
 │   ├── mime_parser_test.cpp     # MIME 解析器测试
 │   ├── buffered_upload_stream_test.cpp # 远程后端整对象缓冲上传流测试
+│   ├── io_error_test.cpp        # IoError 错误分类测试（errno/HTTP → retryable/permanent）
 │   ├── mock_io_context.h        # 简化 asio io_context（任务队列+线程）
 │   ├── mock_connection.h        # 零 I/O Mock 连接（任务投递模型）
 │   ├── mock_dns_resolver.h      # Mock DNS（Sync/Manual/AutoDelay 三模式）
