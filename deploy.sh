@@ -80,12 +80,12 @@ echo "  Uploaded to obj.new/ (incremental via --link-dest)"
 # （服务器上还留着历史的 build-obj/），两份对象树混链 → 重复符号。
 echo "[4/6] Linking binaries on server..."
 ssh_strict "cd '$TARGET_DIR' && \
-    bash link.sh obj.new/CMakeFiles/smtpsServer_obj.dir/test/smtps_test.cpp.o \
+    bash link.sh obj.new/CMakeFiles/smtpsServer_obj.dir/test/server/smtps_test.cpp.o \
         --obj-root obj.new \
         -o smtpsServer.new --compiler g++-13 \
         --exclude imaps_test --exclude mail_server 2>&1 | tail -1"
 ssh_strict "cd '$TARGET_DIR' && \
-    bash link.sh obj.new/CMakeFiles/imapsServer_obj.dir/test/imaps_test.cpp.o \
+    bash link.sh obj.new/CMakeFiles/imapsServer_obj.dir/test/server/imaps_test.cpp.o \
         --obj-root obj.new \
         -o imapsServer.new --compiler g++-13 \
         --exclude smtps_test --exclude mail_server 2>&1 | tail -1"
@@ -115,10 +115,13 @@ rsync -az -e "ssh ${SSH_OPTS[*]}" \
     --exclude='db_config.json' \
     --exclude='smtpsConfig.json' --exclude='imapsConfig.json' \
     "$SCRIPT_DIR/config/" "$SERVER:$TARGET_DIR/config/"
+# 路径是 test/tools/，不是 test/。原先写错且被 `|| true` 吞掉，
+# 服务器上那份 hash_tool.cpp 因此停在 2026-06-18 没再更新过。
 rsync -az -e "ssh ${SSH_OPTS[*]}" \
-    "$SCRIPT_DIR/test/hash_tool.cpp" "$SERVER:$TARGET_DIR/"
-# hash_tool 体积极小，仍在服务器上编译；如需彻底避免服务器编译可改为交叉产出后上传
-ssh_strict "cd '$TARGET_DIR' && { [ -x hash_tool ] || g++ -std=c++17 -o hash_tool hash_tool.cpp -lssl -lcrypto; }"
+    "$SCRIPT_DIR/test/tools/hash_tool.cpp" "$SERVER:$TARGET_DIR/"
+# hash_tool 体积极小，仍在服务器上编译；如需彻底避免服务器编译可改为交叉产出后上传。
+# 源码比二进制新时也要重编 —— 只判断 -x 的话，源码更新了永远不会生效。
+ssh_strict "cd '$TARGET_DIR' && if [ ! -x hash_tool ] || [ hash_tool.cpp -nt hash_tool ]; then g++ -std=c++17 -o hash_tool hash_tool.cpp -lssl -lcrypto; fi"
 echo "  Synced"
 
 # --- Step 6: 备份 + 原子替换 + 重启 + 冒烟 + 失败自动回滚 ---

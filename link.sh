@@ -104,14 +104,19 @@ resolve_entry_obj() {
     base="$(basename "$input")"
     stem="${base%.o}"
 
+    # 指定了 --obj-root 就只在它底下找。
+    # 否则从 CWD 全盘搜：部署机上同名入口 .o 可能同时存在于当前对象树和历史遗留的
+    # build-obj/ 里，模糊匹配会挑中旧的，链出一个用旧代码编译的二进制且毫无提示。
+    local search_root="${OBJ_ROOT_OVERRIDE:-.}"
+
     local matches=()
     while IFS= read -r line; do
         matches+=("$line")
-    done < <(find . -type f -name "$base" | sort)
+    done < <(find "$search_root" -type f -name "$base" | sort)
     if [[ ${#matches[@]} -eq 0 ]]; then
         while IFS= read -r line; do
             matches+=("$line")
-        done < <(find . -type f -name "*${stem}*.o" | sort)
+        done < <(find "$search_root" -type f -name "*${stem}*.o" | sort)
     fi
     if [[ ${#matches[@]} -eq 0 ]]; then
         local wildcard_stem
@@ -119,7 +124,7 @@ resolve_entry_obj() {
         wildcard_stem="${wildcard_stem//-/*}"
         while IFS= read -r line; do
             matches+=("$line")
-        done < <(find . -type f -name "*${wildcard_stem}*.o" | sort)
+        done < <(find "$search_root" -type f -name "*${wildcard_stem}*.o" | sort)
     fi
 
     if [[ ${#matches[@]} -eq 0 ]]; then
