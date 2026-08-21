@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "mail_system/back/common/mapped_file.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/mime_parser.h"
 #include "mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.h"
@@ -444,6 +445,90 @@ static void test_loads_legacy_sidecar() {
     expect_num(t.subs[1].offset, 1689, "legacy sub offset");
 }
 
+// ========== mmap 路径 ==========
+
+// 同一份内容，从 std::string 解析和从只读映射区解析必须得到完全一致的树
+static void expect_same_tree(const MimePart& a, const MimePart& b, const char* what) {
+    expect_str(a.type, b.type, what);
+    expect_str(a.subtype, b.subtype, what);
+    expect_str(a.charset, b.charset, what);
+    expect_str(a.encoding, b.encoding, what);
+    expect_str(a.boundary, b.boundary, what);
+    expect_str(a.name, b.name, what);
+    expect_num(a.offset, b.offset, what);
+    expect_num(a.length, b.length, what);
+    expect_num(a.body_size, b.body_size, what);
+    expect_num(a.lines, b.lines, what);
+    expect_num(a.subs.size(), b.subs.size(), what);
+    for (size_t i = 0; i < a.subs.size() && i < b.subs.size(); ++i) {
+        expect_same_tree(a.subs[i], b.subs[i], what);
+    }
+}
+
+static void parse_via_mmap(const std::string& name, const std::string& raw, MimePart& out) {
+    const std::string path = write_temp_body(name, raw);
+    std::string err;
+    auto m = MappedFile::open(path, err);
+    expect_true(m != nullptr, "MappedFile::open succeeds");
+    if (!m) return;
+    expect_num(m->size(), raw.size(), "mapped size matches file size");
+    parse_mime_tree(m->view(), out);
+}
+
+static void test_mmap_parse_matches_string_parse() {
+    MimePart from_string, from_mmap;
+    parse_mime_tree(kMultipartRaw, from_string);
+    parse_via_mmap("mmap_multipart.eml", kMultipartRaw, from_mmap);
+    expect_same_tree(from_string, from_mmap, "mmap parse == string parse (multipart)");
+}
+
+// 回归：畸形报文（Content-Type 出现在 body 之后）会走到「整封转小写」的兜底分支。
+// 那里若就地 tolower，就是往 PROT_READ 的映射页里写 → SIGSEGV。
+// 这条用例保证该分支在只读映射上也能安全跑完。
+static void test_mmap_malformed_fallback_does_not_write() {
+    const std::string raw =
+        "        <html>\r\n"
+        "          <body style=\"color:#fff\">\r\n"
+        "          </body>\r\n"
+        "        </html>\r\n"
+        "\r\n"
+        "DKIM-Signature: v=1; a=rsa-sha256; h=content-type:date:from:subject;\r\n"
+        "\tbh=abc;\r\n"
+        "From: noreply@tm.openai.com\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Content-Transfer-Encoding: quoted-printable\r\n"
+        "\r\n"
+        "trailing\r\n";
+
+    MimePart from_string, from_mmap;
+    parse_mime_tree(raw, from_string);
+    parse_via_mmap("mmap_malformed.eml", raw, from_mmap);
+    expect_str(from_mmap.type, "text", "mmap malformed: type via fallback");
+    expect_str(from_mmap.subtype, "html", "mmap malformed: subtype via fallback");
+    expect_same_tree(from_string, from_mmap, "mmap parse == string parse (malformed)");
+
+    // 兜底分支不得改动被映射的文件内容
+    const auto dir = std::filesystem::temp_directory_path() / "mime_parser_test";
+    std::ifstream f((dir / "mmap_malformed.eml").string(), std::ios::binary);
+    std::string after((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    expect_str(after, raw, "mapped file content unchanged after parse");
+}
+
+static void test_mmap_empty_file() {
+    const std::string path = write_temp_body("mmap_empty.eml", "");
+    std::string err;
+    auto m = MappedFile::open(path, err);
+    expect_true(m != nullptr, "empty file maps without error");
+    if (m) {
+        expect_true(m->empty(), "empty mapping reports empty");
+        expect_num(m->size(), 0, "empty mapping size is 0");
+    }
+    std::string err2;
+    expect_true(MappedFile::open("/nonexistent/path/xx.eml", err2) == nullptr,
+                "missing file fails to map");
+    expect_true(!err2.empty(), "failed map fills error string");
+}
+
 int main() {
     test_single_text_plain();
     test_single_html_qp_unquoted_charset();
@@ -460,6 +545,9 @@ int main() {
     test_ensure_writes_back_sidecar();
     test_sidecar_escapes_filename();
     test_loads_legacy_sidecar();
+    test_mmap_parse_matches_string_parse();
+    test_mmap_malformed_fallback_does_not_write();
+    test_mmap_empty_file();
 
     std::filesystem::remove_all(std::filesystem::temp_directory_path() / "mime_parser_test");
 

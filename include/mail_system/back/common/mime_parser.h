@@ -8,6 +8,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <unistd.h>
@@ -16,10 +17,14 @@ namespace mail_system {
 
 // 解析邮件 body 文件的 MIME 结构，填充 mime_root 树
 // body 内容形如 "Header: value\r\n\r\nbody..."
-inline void parse_mime_tree(const std::string& raw, MimePart& root, size_t pos = 0) {
+// raw 收 string_view：调用方可以直接传 mmap 出来的映射区，
+// 不必先把整封邮件读进 std::string。所有传 std::string 的旧调用点隐式转换，无需改动。
+// MimePart 里存的是偏移量和拷贝出来的小字符串，不持有 raw 的指针，
+// 因此解析完成后映射可以安全释放。
+inline void parse_mime_tree(std::string_view raw, MimePart& root, size_t pos = 0) {
     // 找 header/body 分隔
     size_t sep = raw.find("\r\n\r\n", pos);
-    std::string hdrs = (sep != std::string::npos) ? raw.substr(pos, sep - pos) : raw.substr(pos);
+    std::string hdrs{(sep != std::string::npos) ? raw.substr(pos, sep - pos) : raw.substr(pos)};
     size_t body_start = (sep != std::string::npos) ? sep + 4 : raw.size();
 
     // 解析 Content-Type
@@ -94,7 +99,7 @@ inline void parse_mime_tree(const std::string& raw, MimePart& root, size_t pos =
                 // 注意：不带引号时不能 find('"') 向后搜，否则会误匹配后续 header 里的引号
                 // （如 To: "test3"），把 boundary 提取成错误值。
                 {
-                    auto orig_hdrs = raw.substr(pos, sep - pos);
+                    std::string orig_hdrs{raw.substr(pos, sep - pos)};
                     auto obp = orig_hdrs.find("boundary=");
                     if (obp != std::string::npos) {
                         size_t os = obp + 9; // "boundary=" 之后
@@ -134,7 +139,11 @@ inline void parse_mime_tree(const std::string& raw, MimePart& root, size_t pos =
             // （第一个 \r\n\r\n 之前）没有 Content-Type。此时在整封消息里找
             // 行首的 content-type:（避开 DKIM h= 标签），取最后一次匹配。
             bool ct_found = false;
-            auto whole_lower = raw;
+            // 必须显式拷贝成 std::string：raw 现在是 string_view，可能指向只读的
+            // mmap 映射区，就地 tolower 会往 PROT_READ 的页里写。
+            // 这条是「Content-Type 出现在 body 之后」的畸形报文兜底路径，极少走到，
+            // 整封拷贝一次可以接受。
+            std::string whole_lower{raw};
             std::transform(whole_lower.begin(), whole_lower.end(), whole_lower.begin(), ::tolower);
             size_t ct_line_start = std::string::npos;
             for (size_t p = 0; p < whole_lower.size(); ) {

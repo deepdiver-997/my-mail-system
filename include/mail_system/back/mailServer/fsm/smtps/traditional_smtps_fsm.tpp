@@ -4,6 +4,7 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
+#include "mail_system/back/common/mapped_file.h"
 #include "mail_system/back/common/mime_parser.h"
 #include <filesystem>
 #include <openssl/md5.h>
@@ -733,21 +734,25 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     auto cfg = std::atomic_load(&session->get_server()->m_config);
 
     // MIME 预解析：仅当消息 ≤ 阈值才 eager 解析（大消息跳过，交给 IMAP lazy 解析）
-    // 供 IMAP BODYSTRUCTURE / BODY[section] 直接使用
-    std::string full_body;
+    // 供 IMAP BODYSTRUCTURE / BODY[section] 直接使用。
+    //
+    // 用 mmap 而非读进 std::string：正文刚由本会话写完并 fsync 过，这里只是
+    // 换个视角再看一遍同一份数据，没必要在堆上再复制一份（每封最多 1 MiB，
+    // 并发时叠加，而这台机器可用内存不到 1 GB）。
+    std::unique_ptr<MappedFile> body_map;
     if (smtp_session->get_mail() && !smtp_session->get_mail()->body_path.empty()) {
         std::error_code fec;
         auto fsz = std::filesystem::file_size(smtp_session->get_mail()->body_path, fec);
         if (!fec && fsz > 0 && static_cast<std::uintmax_t>(cfg->inbound_mime_parse_limit_bytes) >= fsz) {
-            std::ifstream body_file(smtp_session->get_mail()->body_path, std::ios::binary);
-            if (body_file.is_open()) {
-                std::ostringstream ss; ss << body_file.rdbuf();
-                full_body = ss.str();
+            std::string map_err;
+            body_map = MappedFile::open(smtp_session->get_mail()->body_path, map_err);
+            if (!body_map) {
+                LOG_FILE_IO_ERROR("Failed to map mail body for MIME parse: {}", map_err);
             }
         }
     }
-    if (!full_body.empty()) {
-        parse_mime_tree(full_body, smtp_session->get_mail()->mime_root);
+    if (body_map && !body_map->empty()) {
+        parse_mime_tree(body_map->view(), smtp_session->get_mail()->mime_root);
         // 写 sidecar JSON 文件，供 IMAP 直接读取（失败不阻塞收信）
         save_mime_tree(smtp_session->get_mail()->body_path,
                        smtp_session->get_mail()->mime_root);
