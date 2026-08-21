@@ -748,35 +748,9 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     }
     if (!full_body.empty()) {
         parse_mime_tree(full_body, smtp_session->get_mail()->mime_root);
-        // 写 sidecar JSON 文件，供 IMAP 直接读取
-        try {
-            std::string sidecar_path = smtp_session->get_mail()->body_path + ".mime";
-            std::ofstream sf(sidecar_path);
-            if (sf.is_open()) {
-                // hand-rolled JSON — 足够紧凑且不引入额外依赖
-                std::function<void(const MimePart&, std::ostream&)> write_part;
-                write_part = [&](const MimePart& p, std::ostream& os) {
-                    os << "{\"t\":\"" << p.type << "\",\"s\":\"" << p.subtype << "\"";
-                    if (!p.charset.empty()) os << ",\"c\":\"" << p.charset << "\"";
-                    if (!p.encoding.empty()) os << ",\"e\":\"" << p.encoding << "\"";
-                    if (!p.boundary.empty()) os << ",\"b\":\"" << p.boundary << "\"";
-                    if (!p.name.empty()) os << ",\"n\":\"" << p.name << "\"";
-                    os << ",\"o\":" << p.offset << ",\"l\":" << p.length
-                       << ",\"z\":" << p.body_size << ",\"ln\":" << p.lines;
-                    if (!p.subs.empty()) {
-                        os << ",\"p\":[";
-                        for (size_t i = 0; i < p.subs.size(); ++i) {
-                            if (i) os << ",";
-                            write_part(p.subs[i], os);
-                        }
-                        os << "]";
-                    }
-                    os << "}";
-                };
-                write_part(smtp_session->get_mail()->mime_root, sf);
-                sf.close();
-            }
-        } catch (...) { /* sidecar 写入失败不阻塞收信 */ }
+        // 写 sidecar JSON 文件，供 IMAP 直接读取（失败不阻塞收信）
+        save_mime_tree(smtp_session->get_mail()->body_path,
+                       smtp_session->get_mail()->mime_root);
     }
 
     // Inbound verification (DKIM/DMARC/SPF) — 异步（worker 线程池执行 DNS/验签，不阻塞 io_context）

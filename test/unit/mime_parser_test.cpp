@@ -8,6 +8,8 @@
 #undef NDEBUG
 #include <cassert>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -315,6 +317,133 @@ static void test_content_disposition_name() {
     expect_str(root.name, "pic.png", "filename from Content-Disposition");
 }
 
+// ========== sidecar 往返 / 回写 ==========
+
+// 临时目录下造一个正文文件，返回其路径
+static std::string write_temp_body(const std::string& name, const std::string& raw) {
+    const auto dir = std::filesystem::temp_directory_path() / "mime_parser_test";
+    std::filesystem::create_directories(dir);
+    const auto path = (dir / name).string();
+    std::filesystem::remove(path);
+    std::filesystem::remove(path + ".mime");
+    std::ofstream f(path, std::ios::binary);
+    f.write(raw.data(), static_cast<std::streamsize>(raw.size()));
+    f.close();
+    return path;
+}
+
+static const std::string kMultipartRaw =
+    "From: a@test.com\r\n"
+    "Content-Type: multipart/alternative; boundary=\"BND1\"\r\n"
+    "\r\n"
+    "--BND1\r\n"
+    "Content-Type: text/plain; charset=utf-8\r\n"
+    "Content-Transfer-Encoding: base64\r\n"
+    "\r\n"
+    "aGVsbG8=\r\n"
+    "--BND1\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
+    "Content-Transfer-Encoding: quoted-printable\r\n"
+    "\r\n"
+    "<b>hi</b>\r\n"
+    "--BND1--\r\n";
+
+// save → load 必须无损往返
+static void test_sidecar_round_trip() {
+    const std::string path = write_temp_body("roundtrip.eml", kMultipartRaw);
+
+    MimePart original;
+    parse_mime_tree(kMultipartRaw, original);
+    expect_true(save_mime_tree(path, original), "save_mime_tree succeeds");
+    expect_true(std::filesystem::exists(path + ".mime"), "sidecar file created");
+
+    MimePart loaded;
+    expect_true(load_mime_tree(path, loaded), "load_mime_tree succeeds");
+    expect_str(loaded.type, original.type, "sidecar type round-trips");
+    expect_str(loaded.subtype, original.subtype, "sidecar subtype round-trips");
+    expect_str(loaded.boundary, original.boundary, "sidecar boundary round-trips");
+    expect_num(loaded.subs.size(), original.subs.size(), "sidecar sub-part count round-trips");
+    for (size_t i = 0; i < loaded.subs.size() && i < original.subs.size(); ++i) {
+        expect_str(loaded.subs[i].subtype, original.subs[i].subtype, "sub subtype round-trips");
+        expect_str(loaded.subs[i].encoding, original.subs[i].encoding, "sub encoding round-trips");
+        expect_str(loaded.subs[i].charset, original.subs[i].charset, "sub charset round-trips");
+        expect_num(loaded.subs[i].offset, original.subs[i].offset, "sub offset round-trips");
+        expect_num(loaded.subs[i].length, original.subs[i].length, "sub length round-trips");
+    }
+}
+
+// ensure_mime_tree 首次调用要落 sidecar，第二次直接命中
+static void test_ensure_writes_back_sidecar() {
+    const std::string path = write_temp_body("writeback.eml", kMultipartRaw);
+    expect_true(!std::filesystem::exists(path + ".mime"), "no sidecar before first access");
+
+    MimePart first;
+    expect_true(ensure_mime_tree(path, kMultipartRaw, first), "ensure_mime_tree parses");
+    expect_true(std::filesystem::exists(path + ".mime"), "sidecar written back on first access");
+    expect_str(first.subtype, "alternative", "parsed subtype correct");
+
+    // 第二次必须能纯靠 sidecar 命中（传空原文，解析不出东西也应成功）
+    MimePart second;
+    expect_true(ensure_mime_tree(path, "", second), "second access hits sidecar");
+    expect_str(second.subtype, "alternative", "sidecar hit returns same tree");
+    expect_num(second.subs.size(), 2, "sidecar hit keeps sub-parts");
+
+    // 不得留下临时文件
+    int tmp_leftovers = 0;
+    for (const auto& e : std::filesystem::directory_iterator(
+             std::filesystem::path(path).parent_path())) {
+        if (e.path().string().find(".mime.tmp.") != std::string::npos) tmp_leftovers++;
+    }
+    expect_num((uint64_t)tmp_leftovers, 0, "no .tmp leftovers after atomic rename");
+}
+
+// 附件名里的引号/反斜杠必须能转义并读回
+static void test_sidecar_escapes_filename() {
+    const std::string raw =
+        "From: a@test.com\r\n"
+        "Content-Type: image/png\r\n"
+        "Content-Disposition: attachment; filename=\"we\\\"ird\\\\name.png\"\r\n"
+        "\r\n"
+        "iVBORw0KGgo=\r\n";
+    const std::string path = write_temp_body("escape.eml", raw);
+
+    MimePart original;
+    parse_mime_tree(raw, original);
+    expect_true(save_mime_tree(path, original), "save with tricky filename succeeds");
+
+    MimePart loaded;
+    expect_true(load_mime_tree(path, loaded), "load with tricky filename succeeds");
+    expect_str(loaded.name, original.name, "filename with quotes/backslashes round-trips");
+}
+
+// 向后兼容：线上已有的 sidecar 是旧代码写的（无转义），
+// 新的 read_str 必须照样读得回来，否则一部署所有旧邮件的结构就没了。
+static void test_loads_legacy_sidecar() {
+    const std::string path = write_temp_body("legacy.eml", kMultipartRaw);
+    // 取自生产环境 /opt/smtpServer/mail/2089048057244024832.mime 的真实内容
+    const std::string legacy =
+        "{\"t\":\"multipart\",\"s\":\"alternative\",\"e\":\"7bit\","
+        "\"b\":\"----=_Part_561808_1606723650.1786902842953\","
+        "\"o\":0,\"l\":1924,\"z\":425,\"ln\":12,\"p\":["
+        "{\"t\":\"text\",\"s\":\"plain\",\"c\":\"gbk\",\"e\":\"base64\","
+        "\"o\":1545,\"l\":96,\"z\":20,\"ln\":8},"
+        "{\"t\":\"text\",\"s\":\"html\",\"c\":\"gbk\",\"e\":\"base64\","
+        "\"o\":1689,\"l\":185,\"z\":110,\"ln\":3}]}";
+    std::ofstream sf(path + ".mime", std::ios::binary | std::ios::trunc);
+    sf << legacy;
+    sf.close();
+
+    MimePart t;
+    expect_true(load_mime_tree(path, t), "legacy sidecar still loads");
+    expect_str(t.type, "multipart", "legacy type");
+    expect_str(t.subtype, "alternative", "legacy subtype");
+    expect_str(t.boundary, "----=_Part_561808_1606723650.1786902842953", "legacy boundary");
+    expect_num(t.length, 1924, "legacy length");
+    expect_num(t.subs.size(), 2, "legacy sub-part count");
+    expect_str(t.subs[0].charset, "gbk", "legacy sub charset");
+    expect_num(t.subs[1].offset, 1689, "legacy sub offset");
+}
+
 int main() {
     test_single_text_plain();
     test_single_html_qp_unquoted_charset();
@@ -327,6 +456,12 @@ int main() {
     test_quoted_charset();
     test_content_disposition_name();
     test_unquoted_boundary_with_quoted_to();
+    test_sidecar_round_trip();
+    test_ensure_writes_back_sidecar();
+    test_sidecar_escapes_filename();
+    test_loads_legacy_sidecar();
+
+    std::filesystem::remove_all(std::filesystem::temp_directory_path() / "mime_parser_test");
 
     std::printf("\n================================\n  Passed: %d  Failed: %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

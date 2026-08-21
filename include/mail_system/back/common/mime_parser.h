@@ -1,10 +1,16 @@
 #pragma once
 #include "mail_system/back/entities/mail.h"
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <functional>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 namespace mail_system {
 
@@ -290,6 +296,115 @@ inline void parse_mime_tree(const std::string& raw, MimePart& root, size_t pos =
     }
 }
 
+// sidecar JSON 里的字符串字段转义。boundary/charset 基本是 token，
+// 但附件 filename（"n"）可以带引号和反斜杠，不转义会写出读不回来的 JSON。
+inline std::string mime_json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    // 控制字符直接丢弃，避免写出非法 JSON
+                    break;
+                }
+                out += c;
+        }
+    }
+    return out;
+}
+
+// 把 MIME 树写成 sidecar JSON —— load_mime_tree 的逆操作。
+//
+// 先写临时文件再 rename：rename 在 POSIX 上是原子的，因此并发的读者
+// （多个 IMAP 会话可能同时 FETCH 同一封邮件）绝不会看到写了一半的 sidecar。
+// 临时文件名带 pid，因为 smtpsServer 和 imapsServer 是两个独立进程。
+inline bool save_mime_tree(const std::string& body_path, const MimePart& root) {
+    if (body_path.empty() || root.type.empty()) {
+        return false;
+    }
+
+    static std::atomic<std::uint64_t> seq{0};
+    const std::string final_path = body_path + ".mime";
+    const std::string tmp_path = final_path + ".tmp." +
+                                 std::to_string(static_cast<long>(::getpid())) + "." +
+                                 std::to_string(seq.fetch_add(1));
+
+    try {
+        {
+            std::ofstream sf(tmp_path, std::ios::binary | std::ios::trunc);
+            if (!sf.is_open()) {
+                return false;
+            }
+
+            std::function<void(const MimePart&, std::ostream&)> write_part;
+            write_part = [&](const MimePart& p, std::ostream& os) {
+                os << "{\"t\":\"" << mime_json_escape(p.type)
+                   << "\",\"s\":\"" << mime_json_escape(p.subtype) << "\"";
+                if (!p.charset.empty())  os << ",\"c\":\"" << mime_json_escape(p.charset) << "\"";
+                if (!p.encoding.empty()) os << ",\"e\":\"" << mime_json_escape(p.encoding) << "\"";
+                if (!p.boundary.empty()) os << ",\"b\":\"" << mime_json_escape(p.boundary) << "\"";
+                if (!p.name.empty())     os << ",\"n\":\"" << mime_json_escape(p.name) << "\"";
+                os << ",\"o\":" << p.offset << ",\"l\":" << p.length
+                   << ",\"z\":" << p.body_size << ",\"ln\":" << p.lines;
+                if (!p.subs.empty()) {
+                    os << ",\"p\":[";
+                    for (size_t i = 0; i < p.subs.size(); ++i) {
+                        if (i) os << ",";
+                        write_part(p.subs[i], os);
+                    }
+                    os << "]";
+                }
+                os << "}";
+            };
+            write_part(root, sf);
+
+            sf.flush();
+            if (!sf.good()) {
+                sf.close();
+                std::remove(tmp_path.c_str());
+                return false;
+            }
+        }
+
+        if (std::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
+            std::remove(tmp_path.c_str());
+            return false;
+        }
+        return true;
+    } catch (...) {
+        std::remove(tmp_path.c_str());
+        return false;
+    }
+}
+
+inline bool load_mime_tree(const std::string& body_path, MimePart& root);
+
+// 取得 MIME 树：优先读 sidecar，没有就现场解析**并回写 sidecar**。
+//
+// 回写是关键：否则每次 FETCH 都要把整封邮件重新解析一遍。旧邮件、以及
+// 超过 inbound_mime_parse_limit_bytes 而被 SMTP 侧跳过的大邮件，都走这条路。
+// 回写失败无所谓，只是下次再解析一次，不影响本次结果。
+inline bool ensure_mime_tree(const std::string& body_path,
+                             const std::string& raw,
+                             MimePart& root) {
+    if (load_mime_tree(body_path, root)) {
+        return true;
+    }
+    root = MimePart{};
+    parse_mime_tree(raw, root);
+    if (root.type.empty()) {
+        return false;
+    }
+    save_mime_tree(body_path, root);
+    return true;
+}
+
 // 从 sidecar JSON 加载预解析的 MIME 树
 inline bool load_mime_tree(const std::string& body_path, MimePart& root) {
     std::string path = body_path + ".mime";
@@ -302,9 +417,30 @@ inline bool load_mime_tree(const std::string& body_path, MimePart& root) {
     parse = [&](const std::string& s, size_t& pos, MimePart& p) {
         auto read_str = [&]() -> std::string {
             size_t start = s.find('"', pos); if (start == std::string::npos) return "";
-            size_t end = s.find('"', start + 1); if (end == std::string::npos) return "";
+            // 找到未被转义的收尾引号（save_mime_tree 会转义 " 和 \）
+            size_t end = start + 1;
+            while (end < s.size() && s[end] != '"') {
+                if (s[end] == '\\' && end + 1 < s.size()) ++end;
+                ++end;
+            }
+            if (end >= s.size()) return "";
+            const std::string escaped = s.substr(start + 1, end - start - 1);
             pos = end + 1;
-            return s.substr(start + 1, end - start - 1);
+
+            std::string out;
+            out.reserve(escaped.size());
+            for (size_t i = 0; i < escaped.size(); ++i) {
+                if (escaped[i] != '\\' || i + 1 >= escaped.size()) { out += escaped[i]; continue; }
+                switch (escaped[++i]) {
+                    case 'n':  out += '\n'; break;
+                    case 'r':  out += '\r'; break;
+                    case 't':  out += '\t'; break;
+                    case '"':  out += '"';  break;
+                    case '\\': out += '\\'; break;
+                    default:   out += escaped[i]; break;
+                }
+            }
+            return out;
         };
         auto read_uint = [&]() -> uint64_t {
             while (pos < s.size() && !std::isdigit(s[pos])) pos++;

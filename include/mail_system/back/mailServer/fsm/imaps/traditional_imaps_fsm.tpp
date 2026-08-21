@@ -1414,8 +1414,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             if (want_body_part && body_part_num > 0) {
                 // 提取第 body_part_num 个 MIME part 的正文：
                 // 跳过该 part 自己的 header，并按 Content-Transfer-Encoding 解码
+                // 无 sidecar 的旧邮件/大邮件会在此现场解析并回写，下次 FETCH 直接命中
                 MimePart mime_tree;
-                if (load_mime_tree(mail_info.body_path, mime_tree)) {
+                if (ensure_mime_tree(mail_info.body_path, body_content, mime_tree)) {
                     const MimePart* part = nullptr;
                     if (mime_tree.is_multipart() && (size_t)body_part_num <= mime_tree.subs.size())
                         part = &mime_tree.subs[body_part_num - 1];
@@ -1426,18 +1427,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
                     else
                         body_content.clear(); // 无效 section
                 } else {
-                    // 旧邮件无 sidecar：inline 解析后走同样的提取/解码逻辑
-                    MimePart fallback_tree;
-                    parse_mime_tree(body_content, fallback_tree);
-                    const MimePart* part = nullptr;
-                    if (fallback_tree.is_multipart() && (size_t)body_part_num <= fallback_tree.subs.size())
-                        part = &fallback_tree.subs[body_part_num - 1];
-                    else if (!fallback_tree.is_multipart() && body_part_num == 1)
-                        part = &fallback_tree;
-                    if (part)
-                        body_content = extract_part_content(body_content, *part);
-                    else
-                        body_content.clear();
+                    body_content.clear();
                 }
             }
             std::string body_label = want_body_part ? ("BODY[" + std::to_string(body_part_num) + "]") : "BODY[]";
@@ -1448,8 +1438,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             if (load_mime_tree(mail_info.body_path, mime_tree)) {
                 response += "BODYSTRUCTURE " + build_bodystructure_tree(mime_tree) + " ";
             } else {
+                // 无 sidecar：读回原文解析一次并回写，后续 FETCH 不再重复解析
                 std::string body_content = this->read_mail_body(mail_info.body_path);
-                response += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
+                if (ensure_mime_tree(mail_info.body_path, body_content, mime_tree)) {
+                    response += "BODYSTRUCTURE " + build_bodystructure_tree(mime_tree) + " ";
+                } else {
+                    response += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
+                }
             }
         }
         // Remove trailing space
