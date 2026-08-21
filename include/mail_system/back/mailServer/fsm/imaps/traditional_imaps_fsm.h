@@ -141,11 +141,14 @@ public:
     // ========== 数据库操作 ==========
 
     // 用户认证（复用和 SMTP 相同的 users 表）
-    bool auth_user(SessionBase<ConnectionType>* session,
-                   const std::string& mail_address,
-                   const std::string& password,
-                   uint64_t& out_user_id,
-                   int& out_shard);
+    // 登录认证（查 DB + bcrypt），static：整体跑在 worker 线程上，
+    // 依赖显式传入。bcrypt 几十~几百 ms 纯 CPU，不许在 io 线程算。
+    static bool auth_user(const std::shared_ptr<router::IShardRouter>& shard_router,
+                          const std::shared_ptr<AuthCache>& auth_cache,
+                          const std::string& mail_address,
+                          const std::string& password,
+                          uint64_t& out_user_id,
+                          int& out_shard);
 
     bool get_mailboxes(uint64_t user_id,
                        std::vector<std::tuple<uint64_t, std::string, int>>& mailboxes);
@@ -200,10 +203,11 @@ public:
 
     // 通用 IMAP 响应写回
     void send_untagged(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& data);
-    void send_tagged(std::shared_ptr<SessionBase<ConnectionType>> session,
-                     const std::string& tag,
-                     const std::string& status,
-                     const std::string& message);
+    // static：只触碰 session，可在无 this 的回调（worker/异步续作）里调用
+    static void send_tagged(std::shared_ptr<SessionBase<ConnectionType>> session,
+                            const std::string& tag,
+                            const std::string& status,
+                            const std::string& message);
     void send_continuation(std::shared_ptr<SessionBase<ConnectionType>> session,
                            const std::string& message);
 

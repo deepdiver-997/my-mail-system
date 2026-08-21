@@ -129,12 +129,24 @@ TEST(noop_reply) {
     std::cout << "  [PASS] noop_reply" << std::endl;
 }
 
+// LOGIN 已异步化（bcrypt 在 worker 线程）：回复可能晚于 process_event 返回，
+// 轮询等待而不是立刻断言。
+template <typename Handle>
+static std::string wait_for_reply(Handle& h, int timeout_ms = 2000) {
+    for (int waited = 0; waited < timeout_ms; waited += 5) {
+        auto w = h.conn->written();
+        if (!w.empty()) return w;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return h.conn->written();
+}
+
 TEST(login_response) {
     // 直接调用 process_event 测试 FSM handler（不依赖 command parser）
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A001");
-    auto w = h.conn->written();
+    auto w = wait_for_reply(h);
     // handler 会尝试从 last_command_args 解析凭据，可能 OK 或 NO
     assert(!w.empty());
     std::cout << "  [PASS] login_response" << std::endl;
@@ -144,7 +156,7 @@ TEST(login_wrong_password) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
     fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A002");
-    auto w = h.conn->written();
+    auto w = wait_for_reply(h);
     assert(!w.empty());
     std::cout << "  [PASS] login_wrong_password" << std::endl;
 }
@@ -158,9 +170,16 @@ TEST(login_many_failures_close) {
     fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A002");
     fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A003");
 
-    auto w = h.conn->written();
-    size_t cnt = 0, pos = 0;
-    while ((pos = w.find("NO LOGIN failed", pos)) != std::string::npos) { ++cnt; ++pos; }
+    // 异步认证：等 worker 线程的回复（至少一个 NO，或连接被关）
+    std::string w;
+    size_t cnt = 0;
+    for (int waited = 0; waited < 2000; waited += 5) {
+        w = h.conn->written();
+        cnt = 0;
+        for (size_t pos = 0; (pos = w.find("NO LOGIN failed", pos)) != std::string::npos; ++pos) ++cnt;
+        if (cnt >= 1 || !h.conn->is_open()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
     assert(cnt >= 1 || !h.conn->is_open());
     std::cout << "  [PASS] login_many_failures_close (NO count=" << cnt << ")" << std::endl;
 }

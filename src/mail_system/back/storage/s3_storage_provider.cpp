@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <cstdlib>
 #include <cstring>
 
 namespace mail_system {
@@ -30,6 +31,20 @@ size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     auto* out = static_cast<std::string*>(userdata);
     out->append(ptr, size * nmemb);
     return size * nmemb;
+}
+
+// HEAD 响应没有 body，对象大小只能从响应头拿
+size_t content_length_header_callback(char* buffer, size_t size, size_t nitems, void* userdata) {
+    auto* out = static_cast<std::uint64_t*>(userdata);
+    const std::size_t total = size * nitems;
+    const std::string line(buffer, total);
+    constexpr const char kHeader[] = "Content-Length:";
+    if (line.size() > sizeof(kHeader) - 1 &&
+        std::equal(kHeader, kHeader + sizeof(kHeader) - 1, line.begin(),
+                   [](char a, char b) { return a == b || a + 32 == b; })) {
+        *out = std::strtoull(line.c_str() + sizeof(kHeader) - 1, nullptr, 10);
+    }
+    return total;
 }
 
 size_t read_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -240,6 +255,54 @@ bool S3StorageProvider::s3_get(const std::string& key, std::string& body,
     return false;
 }
 
+bool S3StorageProvider::s3_head_size(const std::string& key,
+                                     std::uint64_t& size,
+                                     IoError& error) {
+    CURL* curl = curl_easy_init();
+    if (!curl) { error = IoError::retryable("curl init failed"); return false; }
+
+    const std::string url = use_path_style_
+        ? endpoint_ + "/" + bucket_ + "/" + key
+        : endpoint_ + "/" + key;
+
+    const std::string payload_hash = sha256_hex("");
+    const std::string amz_date = iso8601_basic();
+
+    std::map<std::string, std::string> extra_headers;
+    extra_headers["x-amz-content-sha256"] = payload_hash;
+    extra_headers["x-amz-date"] = amz_date;
+    if (!access_key_.empty()) {
+        extra_headers["host"] = bucket_ + "." + endpoint_;
+    }
+
+    const std::string auth = sign_request("HEAD", key, payload_hash, extra_headers);
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, ("Authorization: " + auth).c_str());
+    headers = curl_slist_append(headers, ("x-amz-content-sha256: " + payload_hash).c_str());
+    headers = curl_slist_append(headers, ("x-amz-date: " + amz_date).c_str());
+
+    std::uint64_t content_length = 0;
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, content_length_header_callback);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &content_length);
+
+    HttpResponse resp;
+    bool ok = curl_perform(curl, url, "HEAD", timeout_ms_, nullptr, 0, headers, resp, error);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (!ok) return false;
+    if (resp.status_code == 404) {
+        error = IoError::permanent("no such object: " + key, 404);
+        return false;
+    }
+    if (resp.status_code >= 200 && resp.status_code < 300) {
+        size = content_length;
+        return true;
+    }
+    error = IoError::from_http(resp.status_code, "HEAD " + key + ": " + resp.body);
+    return false;
+}
+
 bool S3StorageProvider::s3_put(const std::string& key, const char* data,
                                 std::size_t size, IoError& error) {
     CURL* curl = curl_easy_init();
@@ -411,6 +474,16 @@ std::unique_ptr<IWriteStream> S3StorageProvider::open_write(const std::string& k
             s3_delete(key, ignored);
         },
         max_write_buffer_bytes_);
+}
+
+bool S3StorageProvider::object_size(const std::string& key,
+                                    std::uint64_t& size,
+                                    IoError& error) {
+    if (key.empty()) {
+        error = IoError::permanent("s3 key is empty");
+        return false;
+    }
+    return s3_head_size(key, size, error);
 }
 
 bool S3StorageProvider::read_all(const std::string& key,

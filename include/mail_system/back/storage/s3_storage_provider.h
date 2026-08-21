@@ -49,6 +49,12 @@ public:
                   std::string& out,
                   IoError& error) override;
 
+    // 一次 HEAD 取 Content-Length。默认实现会为拿大小把整个对象下载
+    // 一遍，IMAP FETCH RFC822.SIZE 逐封调用时在远程后端上不可接受。
+    bool object_size(const std::string& storage_key,
+                     std::uint64_t& size,
+                     IoError& error) override;
+
     // 整对象缓冲 + commit 时单次 s3_put，替代逐块 GET+PUT 的 O(n²) 老路径。
     std::unique_ptr<IWriteStream> open_write(const std::string& storage_key,
                                              IoError& error) override;
@@ -56,6 +62,7 @@ public:
 private:
     // --- HTTP 底层 ---
     bool s3_get(const std::string& key, std::string& body, IoError& error);
+    bool s3_head_size(const std::string& key, std::uint64_t& size, IoError& error);
     bool s3_put(const std::string& key, const char* data, std::size_t size, IoError& error);
     bool s3_delete(const std::string& key, IoError& error);
 

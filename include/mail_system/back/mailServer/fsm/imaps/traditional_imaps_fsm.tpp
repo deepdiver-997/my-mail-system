@@ -807,27 +807,42 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
         LOG_IMAP_DEBUG("Auto-domain applied: {}@{}", username, config->system_domain);
     }
 
-    uint64_t user_id = 0;
-    int shard = 0;
-    if (this->auth_user(session.get(), username, password, user_id, shard)) {
-        if (ctx) {
-            ctx->is_authenticated = true;
-            ctx->username = username;
-            ctx->user_id = user_id;
-            ctx->shard_index = shard;
-        }
-        session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
-        send_tagged(session, tag, "OK", "LOGIN completed");
-
-        LOG_IMAP_INFO("IMAP login successful: {} (user_id={})", username, user_id);
-    } else {
-        LOG_IMAP_WARN("IMAP login failed: {}", username);
-        if (session->record_auth_failure_and_check()) {
-            session->close();
-            return;
-        }
-        send_tagged(session, tag, "NO", "LOGIN failed");
-    }
+    // bcrypt 是几十到几百毫秒的纯 CPU：绝不能在共享 io 线程上算 ——
+    // 那会把同线程上所有其他会话的读写/握手/定时器全部卡住。
+    // pause 后把「查 DB + 验密码」整体丢给 worker 线程池；回调在 worker
+    // 线程触发，pause 期间独占 session（SPF/DNS/commit 回调同一约定）。
+    // 登录者自己的延迟不变（bcrypt 该算多久还是多久），变的是别人不再陪等。
+    auto router = this->m_shardRouter;
+    auto auth_cache = this->m_authCache;
+    session->set_paused(true);
+    session->get_server()->m_workerThreadPool->post(
+        [session, tag = std::move(tag), username = std::move(username),
+         password = std::move(password), router, auth_cache]() mutable {
+            uint64_t user_id = 0;
+            int shard = 0;
+            const bool ok = TraditionalImapsFsm<ConnectionType>::auth_user(
+                router, auth_cache, username, password, user_id, shard);
+            if (ok) {
+                auto* c = static_cast<ImapContext*>(session->get_context());
+                if (c) {
+                    c->is_authenticated = true;
+                    c->username = username;
+                    c->user_id = user_id;
+                    c->shard_index = shard;
+                }
+                session->set_current_state(static_cast<int>(ImapState::AUTHENTICATED));
+                send_tagged(session, tag, "OK", "LOGIN completed");
+                LOG_IMAP_INFO("IMAP login successful: {} (user_id={})", username, user_id);
+            } else {
+                LOG_IMAP_WARN("IMAP login failed: {}", username);
+                if (session->record_auth_failure_and_check()) {
+                    session->close();
+                    return;
+                }
+                send_tagged(session, tag, "NO", "LOGIN failed");
+            }
+            session->drain_buffered_commands();
+        });
 }
 
 // ---------- AUTHENTICATE ----------
@@ -2417,9 +2432,12 @@ void TraditionalImapsFsm<ConnectionType>::handle_timeout(
 // ImapsFsm 迁移方法（原 inline，现 out-of-line template）
 // ====================================================================
 
+// 刻意 static：整个函数（DB 查询 + bcrypt）在 worker 线程上执行，
+// 依赖经参数显式传入（router/cache 由 shared_ptr 持有，生命周期独立于 FSM）。
 template <typename ConnectionType>
 bool TraditionalImapsFsm<ConnectionType>::auth_user(
-    SessionBase<ConnectionType>* session,
+    const std::shared_ptr<router::IShardRouter>& shard_router,
+    const std::shared_ptr<AuthCache>& auth_cache,
     const std::string& mail_address,
     const std::string& password,
     uint64_t& out_user_id,
@@ -2427,20 +2445,15 @@ bool TraditionalImapsFsm<ConnectionType>::auth_user(
 {
     LOG_AUTH_INFO("IMAP AUTH attempt: mail_address=[{}]", mail_address);
 
-    if (!session) {
-        LOG_AUTH_ERROR("Session is null in auth_user");
-        return false;
-    }
-
     int shard = 0;
-    if (m_shardRouter) {
-        int r = m_shardRouter->route(mail_address);
+    if (shard_router) {
+        int r = shard_router->route(mail_address);
         if (r >= 0) shard = r;
     }
     out_shard = shard;
 
     AuthCacheEntry ce;
-    if (m_authCache->lookup(mail_address, ce)) {
+    if (auth_cache->lookup(mail_address, ce)) {
         if (ce.status != 1) return false;
         out_shard = ce.shard;
         out_user_id = ce.user_id;
@@ -2449,7 +2462,7 @@ bool TraditionalImapsFsm<ConnectionType>::auth_user(
         return ce.password_hash == password;
     }
 
-    auto conn = acquire_connection(shard);
+    auto conn = shard_router->get_db_pool(static_cast<size_t>(shard))->acquire_connection();
     if (!conn.is_valid()) {
         LOG_AUTH_ERROR("Failed to get database connection for shard {}", shard);
         return false;
@@ -2470,7 +2483,7 @@ bool TraditionalImapsFsm<ConnectionType>::auth_user(
 
     std::string stored = result->get_value(0, "password");
     uint64_t user_id = safe_stoull(result->get_value(0, "id"));
-    m_authCache->store(mail_address, {stored, status, user_id, shard});
+    auth_cache->store(mail_address, {stored, status, user_id, shard});
 
     bool ok = false;
     if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2') {
