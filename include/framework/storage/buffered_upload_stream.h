@@ -30,9 +30,9 @@ namespace pr {
 class BufferedUploadStream : public IWriteStream {
 public:
     // 把 (data, size) 作为完整对象上传。size 可能为 0（空对象也要在远端存在，
-    // 与 LocalFileWriteStream 打开即创建空文件对齐）。
+    // 与 LocalFileWriteStream 打开即创建空文件对齐）。失败的 kind 由后端判定。
     using UploadFn = std::function<bool(const char* data, std::size_t size,
-                                        std::string& error)>;
+                                        IoError& error)>;
     // 清除远端半成品对象（commit 失败后的 abort 路径）。不得抛异常。
     using CleanupFn = std::function<void()>;
 
@@ -42,41 +42,44 @@ public:
     bool write_at(std::uint64_t offset,
                   const char* data,
                   std::size_t size,
-                  std::string& error) override {
+                  IoError& error) override {
         if (committed_ || failed_) {
-            error = committed_ ? "buffered upload already committed"
-                               : "buffered upload already failed";
+            error = IoError::permanent(committed_ ? "buffered upload already committed"
+                                                  : "buffered upload already failed");
             return false;
         }
         if (!upload_) {
-            error = "buffered upload has no upload function";
+            error = IoError::permanent("buffered upload has no upload function");
             return false;
         }
         if (offset != buffer_.size()) {
-            error = "out-of-order write: expected offset " + std::to_string(buffer_.size()) +
-                    ", got " + std::to_string(offset);
+            error = IoError::permanent(
+                "out-of-order write: expected offset " + std::to_string(buffer_.size()) +
+                ", got " + std::to_string(offset));
             return false;
         }
         if (buffer_.size() + size > max_bytes_) {
             failed_ = true;
-            error = "object exceeds buffered upload limit " + std::to_string(max_bytes_) +
-                    " bytes (already buffered " + std::to_string(buffer_.size()) + ")";
+            // 超的是本后端的缓冲上限，重投同一封邮件结果不变 → permanent。
+            error = IoError::permanent(
+                "object exceeds buffered upload limit " + std::to_string(max_bytes_) +
+                " bytes (already buffered " + std::to_string(buffer_.size()) + ")");
             return false;
         }
         buffer_.append(data, size);
         return true;
     }
 
-    bool commit(std::string& error) override {
+    bool commit(IoError& error) override {
         if (committed_) {
             return true;
         }
         if (failed_) {
-            error = "buffered upload already failed";
+            error = IoError::permanent("buffered upload already failed");
             return false;
         }
         if (!upload_) {
-            error = "buffered upload has no upload function";
+            error = IoError::permanent("buffered upload has no upload function");
             return false;
         }
         upload_attempted_ = true;

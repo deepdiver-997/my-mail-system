@@ -16,7 +16,7 @@ public:
     DistributedFileStorageProvider(std::vector<std::string> storage_roots,
                                    std::size_t replica_count = 1);
 
-    bool ensure_ready(std::string& error) override;
+    bool ensure_ready(IoError& error) override;
 
     std::string build_mail_body_key(std::uint64_t mail_id) override;
 
@@ -26,15 +26,15 @@ public:
     bool append_binary(const std::string& storage_key,
                        const char* data,
                        std::size_t size,
-                       std::string& error) override;
+                       IoError& error) override;
 
     bool remove_object(const std::string& storage_key,
-                       std::string& error) override;
+                       IoError& error) override;
 
     // 依次尝试各副本，任一可读即成功
     bool read_all(const std::string& storage_key,
                   std::string& out,
-                  std::string& error) override;
+                  IoError& error) override;
 
 private:
     static std::string ensure_trailing_slash(const std::string& path);

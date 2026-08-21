@@ -15,7 +15,7 @@ LocalFileStorageProvider::LocalFileStorageProvider(std::string mail_root, std::s
     : mail_root_(ensure_trailing_slash(mail_root)),
       attachment_root_(ensure_trailing_slash(attachment_root)) {}
 
-bool LocalFileStorageProvider::ensure_ready(std::string& error) {
+bool LocalFileStorageProvider::ensure_ready(IoError& error) {
     try {
         if (!mail_root_.empty() && !std::filesystem::exists(mail_root_)) {
             std::filesystem::create_directories(mail_root_);
@@ -25,7 +25,7 @@ bool LocalFileStorageProvider::ensure_ready(std::string& error) {
         }
         return true;
     } catch (const std::exception& e) {
-        error = e.what();
+        error = IoError::retryable(e.what());
         return false;
     }
 }
@@ -47,9 +47,9 @@ std::string LocalFileStorageProvider::build_attachment_key(std::uint64_t mail_id
 bool LocalFileStorageProvider::append_binary(const std::string& storage_key,
                                              const char* data,
                                              std::size_t size,
-                                             std::string& error) {
+                                             IoError& error) {
     if (storage_key.empty()) {
-        error = "storage key is empty";
+        error = IoError::permanent("storage key is empty");
         return false;
     }
     if (!data || size == 0) {
@@ -64,36 +64,37 @@ bool LocalFileStorageProvider::append_binary(const std::string& storage_key,
 
         std::ofstream out(storage_key, std::ios::binary | std::ios::app);
         if (!out.is_open()) {
-            error = "failed to open file for append: " + storage_key;
+            error = IoError::retryable("failed to open file for append: " + storage_key);
             return false;
         }
         out.write(data, static_cast<std::streamsize>(size));
         if (!out.good()) {
-            error = "failed to append data: " + storage_key;
+            error = IoError::retryable("failed to append data: " + storage_key);
             return false;
         }
         return true;
     } catch (const std::exception& e) {
-        error = e.what();
+        error = IoError::retryable(e.what());
         return false;
     }
 }
 
 std::unique_ptr<IWriteStream> LocalFileStorageProvider::open_write(const std::string& storage_key,
-                                                                   std::string& error) {
+                                                                   IoError& error) {
     return LocalFileWriteStream::open(storage_key, error);
 }
 
 bool LocalFileStorageProvider::read_all(const std::string& storage_key,
                                         std::string& out,
-                                        std::string& error) {
+                                        IoError& error) {
     if (storage_key.empty()) {
-        error = "storage key is empty";
+        error = IoError::permanent("storage key is empty");
         return false;
     }
     std::ifstream in(storage_key, std::ios::binary);
     if (!in.is_open()) {
-        error = "failed to open for read: " + storage_key;
+        // 打不开以文件不存在居多：重试不会让它出现
+        error = IoError::permanent("failed to open for read: " + storage_key);
         return false;
     }
     out.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -101,21 +102,22 @@ bool LocalFileStorageProvider::read_all(const std::string& storage_key,
 }
 
 std::unique_ptr<IReadStream> LocalFileStorageProvider::open_read(const std::string& storage_key,
-                                                                  std::string& error) {
+                                                                  IoError& error) {
     return MappedReadStream::open(storage_key, error);
 }
 
 bool LocalFileStorageProvider::object_size(const std::string& storage_key,
                                            std::uint64_t& size,
-                                           std::string& error) {
+                                           IoError& error) {
     if (storage_key.empty()) {
-        error = "storage key is empty";
+        error = IoError::permanent("storage key is empty");
         return false;
     }
     std::error_code ec;
     const auto sz = std::filesystem::file_size(storage_key, ec);
     if (ec) {
-        error = "file_size failed for " + storage_key + ": " + ec.message();
+        // file_size 失败基本就是文件不存在（ENOENT）
+        error = IoError::permanent("file_size failed for " + storage_key + ": " + ec.message());
         return false;
     }
     size = static_cast<std::uint64_t>(sz);
@@ -123,7 +125,7 @@ bool LocalFileStorageProvider::object_size(const std::string& storage_key,
 }
 
 bool LocalFileStorageProvider::remove_object(const std::string& storage_key,
-                                             std::string& error) {
+                                             IoError& error) {
     if (storage_key.empty()) {
         return true;
     }
@@ -133,7 +135,7 @@ bool LocalFileStorageProvider::remove_object(const std::string& storage_key,
     }
 
     if (std::filesystem::exists(storage_key)) {
-        error = "failed to remove object: " + storage_key;
+        error = IoError::retryable("failed to remove object: " + storage_key);
         return false;
     }
     return true;

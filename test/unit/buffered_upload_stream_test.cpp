@@ -50,18 +50,18 @@ struct UploadLog {
 };
 
 static BufferedUploadStream::UploadFn recording_upload(UploadLog* log) {
-    return [log](const char* data, std::size_t size, std::string& error) {
-        if (log->fail_next_upload) {
-            error = "injected upload failure";
+    return [log](const char* data, std::size_t size, IoError& error) {
+        if (log && log->fail_next_upload) {
+            error = IoError::retryable("injected upload failure");
             return false;
         }
-        log->uploads.emplace_back(data, size);
+        if (log) log->uploads.emplace_back(data, size);
         return true;
     };
 }
 
 static BufferedUploadStream::CleanupFn recording_cleanup(UploadLog* log) {
-    return [log]() { log->cleanups++; };
+    return [log]() { if (log) log->cleanups++; };
 }
 
 static std::string make_payload(std::size_t n, unsigned seed) {
@@ -82,7 +82,7 @@ static void test_single_upload_at_commit() {
     UploadLog log;
     const std::string payload = make_payload(70000, 5);   // 故意超过 MailBodyWriter 默认 64KB
     {
-        std::string err;
+        IoError err;
         MailBodyWriter w(std::make_unique<BufferedUploadStream>(
                              recording_upload(&log), recording_cleanup(&log), 1 << 20),
                          4096);   // 驱动 MailBodyWriter 多次 write_at
@@ -108,18 +108,18 @@ static void test_single_upload_at_commit() {
 // 2. 乱序 offset 必须被拒绝（与 AppendWriteStream 同一防错位契约）
 static void test_out_of_order_rejected() {
     UploadLog log;
-    std::string err;
+    IoError err;
     BufferedUploadStream s(recording_upload(&log), recording_cleanup(&log), 1024);
     expect_true(s.write_at(0, "abc", 3, err), "in-order write ok");
     expect_true(!s.write_at(8192, "tail", 4, err), "out-of-order write rejected");
-    expect_true(err.find("out-of-order") != std::string::npos, "error names the cause");
+    expect_true(err.message.find("out-of-order") != std::string::npos, "error names the cause");
     expect_num(log.uploads.size(), 0, "nothing uploaded");
 }
 
 // 3. 容量上限：超限失败且 upload 从未被调用；MailBodyWriter::failed() 随之置位
 static void test_capacity_limit() {
     UploadLog log;
-    std::string err;
+    IoError err;
     {
         MailBodyWriter w(std::make_unique<BufferedUploadStream>(
                              recording_upload(&log), recording_cleanup(&log), 100),
@@ -128,7 +128,7 @@ static void test_capacity_limit() {
         expect_true(!w.failed(), "writer not failed yet");
         // 第二块必须大于 MailBodyWriter 自己的 32 字节缓冲，才会直穿到流上触发上限
         expect_true(!w.write(make_payload(40, 2).data(), 40, err), "write over limit fails");
-        expect_true(!err.empty(), "over-limit fills error");
+        expect_true(!err.message.empty(), "over-limit fills error");
         expect_true(w.failed(), "writer marked failed");
         expect_true(!w.commit(err), "commit fails after capacity exceeded");
     }
@@ -139,7 +139,7 @@ static void test_capacity_limit() {
 static void test_abort_without_upload_attempt() {
     UploadLog log;
     {
-        std::string err;
+        IoError err;
         MailBodyWriter w(std::make_unique<BufferedUploadStream>(
                              recording_upload(&log), recording_cleanup(&log), 4096),
                          64);
@@ -153,15 +153,15 @@ static void test_abort_without_upload_attempt() {
 static void test_failed_commit_cleans_up() {
     UploadLog log;
     log.fail_next_upload = true;
-    std::string err;
+    IoError err;
     BufferedUploadStream s(recording_upload(&log), recording_cleanup(&log), 4096);
     expect_true(s.write_at(0, "body", 4, err), "write ok");
     expect_true(!s.commit(err), "commit fails");
-    expect_true(!err.empty(), "commit failure fills error");
+    expect_true(!err.message.empty(), "commit failure fills error");
     s.abort();
     expect_num(log.cleanups, 1, "cleanup after failed commit attempt");
 
-    std::string err2;
+    IoError err2;
     expect_true(!s.commit(err2), "commit stays failed");
     expect_true(!s.write_at(4, "x", 1, err2), "write after failed commit rejected");
 }
@@ -170,7 +170,7 @@ static void test_failed_commit_cleans_up() {
 static void test_commit_idempotent() {
     UploadLog log;
     {
-        std::string err;
+        IoError err;
         BufferedUploadStream s(recording_upload(&log), recording_cleanup(&log), 4096);
         s.write_at(0, "mail", 4, err);
         expect_true(s.commit(err), "first commit ok");
@@ -185,7 +185,7 @@ static void test_commit_idempotent() {
 //    （本地后端 open 即创建空文件，远程必须对齐，否则读侧读不到空邮件）
 static void test_empty_object_still_uploads() {
     UploadLog log;
-    std::string err;
+    IoError err;
     BufferedUploadStream s(recording_upload(&log), recording_cleanup(&log), 4096);
     expect_true(s.commit(err), "empty commit ok");
     expect_num(log.uploads.size(), 1, "empty object uploaded once");
@@ -200,7 +200,7 @@ static void test_empty_object_still_uploads() {
 static void test_commit_async_inline_default() {
     UploadLog log;
     BufferedUploadStream s(recording_upload(&log), recording_cleanup(&log), 4096);
-    std::string err;
+    IoError err;
     s.write_at(0, "mail", 4, err);
 
     bool called = false;
@@ -208,11 +208,11 @@ static void test_commit_async_inline_default() {
     bool got_ok = false;
     std::string got_err;
     const auto main_id = std::this_thread::get_id();
-    s.commit_async([&](bool ok, const std::string& e) {
+    s.commit_async([&](bool ok, const IoError& e) {
         called = true;
         same_thread = (std::this_thread::get_id() == main_id);
         got_ok = ok;
-        got_err = e;
+        got_err = e.message;
     });
     expect_true(called, "default commit_async fires synchronously (inline)");
     expect_true(same_thread, "default impl runs callback on calling thread");
@@ -227,12 +227,12 @@ class FakeAsyncProviderStream : public IWriteStream {
 public:
     explicit FakeAsyncProviderStream(bool succeed) : succeed_(succeed) {}
 
-    bool write_at(std::uint64_t, const char* data, std::size_t size, std::string&) override {
+    bool write_at(std::uint64_t, const char* data, std::size_t size, IoError&) override {
         buffered_.append(data, size);
         return true;
     }
-    bool commit(std::string& error) override {
-        if (!succeed_) { error = "injected async failure"; return false; }
+    bool commit(IoError& error) override {
+        if (!succeed_) { error = IoError::retryable("injected async failure"); return false; }
         committed_ = true;
         return true;
     }
@@ -241,9 +241,9 @@ public:
     // 模拟真异步后端：把 commit 挪到别的线程执行，回调在 provider 线程触发
     void commit_async(CommitCallback cb) override {
         std::thread([this, cb = std::move(cb)]() mutable {
-            std::string error;
+            IoError error;
             const bool ok = commit(error);
-            cb(ok, ok ? std::string() : error);
+            cb(ok, ok ? IoError{} : std::move(error));
         }).detach();
     }
 
@@ -256,18 +256,18 @@ static void test_commit_async_deferred_from_provider_thread() {
     auto stream = std::make_unique<FakeAsyncProviderStream>(true);
     auto* raw = stream.get();
     MailBodyWriter w(std::move(stream), 64);
-    std::string err;
+    IoError err;
     w.write("body", 4, err);
 
     std::promise<std::pair<bool, std::string>> done;
     auto fut = done.get_future();
     const auto main_id = std::this_thread::get_id();
-    w.commit_async([&done, main_id](bool ok, const std::string& e) {
+    w.commit_async([&done, main_id](bool ok, const IoError& e) {
         // 回调线程契约：真异步实现允许在 provider 线程触发 —— 这里就断言它确实
         // 不在发起线程上（发起线程此刻正阻塞在 future::get）
         expect_true(std::this_thread::get_id() != main_id,
                     "deferred commit_async fires on provider thread");
-        done.set_value({ok, e});
+        done.set_value({ok, e.message});
     });
     const auto result = fut.get();
     expect_true(result.first, "deferred commit reports ok");
@@ -280,8 +280,8 @@ static void test_commit_async_deferred_from_provider_thread() {
     w2.write("body", 4, err);
     std::promise<std::pair<bool, std::string>> done2;
     auto fut2 = done2.get_future();
-    w2.commit_async([&done2](bool ok, const std::string& e) {
-        done2.set_value({ok, e});
+    w2.commit_async([&done2](bool ok, const IoError& e) {
+        done2.set_value({ok, e.message});
     });
     const auto result2 = fut2.get();
     expect_true(!result2.first, "deferred failure reports !ok");
@@ -292,7 +292,7 @@ static void test_commit_async_deferred_from_provider_thread() {
 // 10. MailBodyWriter::commit_async 的前置状态检查内联完成：
 //     已 failed / 已 committed 的 writer 立刻回调，不触碰底层流
 static void test_commit_async_state_short_circuits() {
-    std::string err;
+    IoError err;
     {
         UploadLog log;
         MailBodyWriter w(std::make_unique<BufferedUploadStream>(
@@ -301,20 +301,20 @@ static void test_commit_async_state_short_circuits() {
         w.write("x", 1, err);
         expect_true(w.commit(err), "commit ok");
         bool called = false; bool ok = false;
-        w.commit_async([&](bool o, const std::string&) { called = true; ok = o; });
+        w.commit_async([&](bool o, const IoError&) { called = true; ok = o; });
         expect_true(called, "committed writer callbacks inline");
         expect_true(ok, "committed writer reports ok");
     }
     {
         // 先把流写失败（超容量），commit_async 必须内联回 false
         MailBodyWriter w(std::make_unique<BufferedUploadStream>(
-                             [](const char*, std::size_t, std::string&) { return true; },
+                             [](const char*, std::size_t, IoError&) { return true; },
                              []() {}, 10),
                          8);
         expect_true(!w.write(make_payload(20, 3).data(), 20, err), "force failure");
         expect_true(w.failed(), "writer failed");
         bool called = false; bool ok = true;
-        w.commit_async([&](bool o, const std::string&) { called = true; ok = o; });
+        w.commit_async([&](bool o, const IoError&) { called = true; ok = o; });
         expect_true(called, "failed writer callbacks inline");
         expect_true(!ok, "failed writer reports !ok");
     }

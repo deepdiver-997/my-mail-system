@@ -20,9 +20,9 @@ DistributedFileStorageProvider::DistributedFileStorageProvider(std::vector<std::
     }
 }
 
-bool DistributedFileStorageProvider::ensure_ready(std::string& error) {
+bool DistributedFileStorageProvider::ensure_ready(IoError& error) {
     if (roots_.empty()) {
-        error = "distributed storage roots are empty";
+        error = IoError::permanent("distributed storage roots are empty");
         return false;
     }
 
@@ -34,7 +34,7 @@ bool DistributedFileStorageProvider::ensure_ready(std::string& error) {
         }
         return true;
     } catch (const std::exception& e) {
-        error = e.what();
+        error = IoError::retryable(e.what());
         return false;
     }
 }
@@ -60,9 +60,9 @@ std::string DistributedFileStorageProvider::build_attachment_key(std::uint64_t m
 bool DistributedFileStorageProvider::append_binary(const std::string& storage_key,
                                                    const char* data,
                                                    std::size_t size,
-                                                   std::string& error) {
+                                                   IoError& error) {
     if (storage_key.empty()) {
-        error = "storage key is empty";
+        error = IoError::permanent("storage key is empty");
         return false;
     }
     if (!data || size == 0) {
@@ -82,16 +82,16 @@ bool DistributedFileStorageProvider::append_binary(const std::string& storage_ke
 
             std::ofstream out(target, std::ios::binary | std::ios::app);
             if (!out.is_open()) {
-                error = "failed to open replica file for append: " + target;
+                error = IoError::retryable("failed to open replica file for append: " + target);
                 return false;
             }
             out.write(data, static_cast<std::streamsize>(size));
             if (!out.good()) {
-                error = "failed to append data to replica: " + target;
+                error = IoError::retryable("failed to append data to replica: " + target);
                 return false;
             }
         } catch (const std::exception& e) {
-            error = e.what();
+            error = IoError::retryable(e.what());
             return false;
         }
     }
@@ -101,9 +101,9 @@ bool DistributedFileStorageProvider::append_binary(const std::string& storage_ke
 
 bool DistributedFileStorageProvider::read_all(const std::string& storage_key,
                                               std::string& out,
-                                              std::string& error) {
+                                              IoError& error) {
     if (storage_key.empty()) {
-        error = "storage key is empty";
+        error = IoError::permanent("storage key is empty");
         return false;
     }
 
@@ -121,12 +121,13 @@ bool DistributedFileStorageProvider::read_all(const std::string& storage_key,
         return true;
     }
 
-    error = "no readable replica for " + storage_key;
+    // 全部副本都打不开以对象不存在居多
+    error = IoError::permanent("no readable replica for " + storage_key);
     return false;
 }
 
 bool DistributedFileStorageProvider::remove_object(const std::string& storage_key,
-                                                   std::string& error) {
+                                                   IoError& error) {
     if (storage_key.empty()) {
         return true;
     }
@@ -140,7 +141,7 @@ bool DistributedFileStorageProvider::remove_object(const std::string& storage_ke
             continue;
         }
         if (std::filesystem::exists(target)) {
-            error = "failed to remove distributed object: " + target;
+            error = IoError::retryable("failed to remove distributed object: " + target);
             return false;
         }
     }

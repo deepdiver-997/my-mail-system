@@ -1325,11 +1325,11 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             std::uint64_t sz = 0;
             if (!mail_info.body_path.empty()) {
                 auto provider = this->get_storage(0);
-                std::string size_err;
+                storage::IoError size_err;
                 if (provider) {
                     if (!provider->object_size(mail_info.body_path, sz, size_err)) {
                         LOG_FILE_IO_ERROR("RFC822.SIZE lookup failed for {}: {}",
-                                          mail_info.body_path, size_err);
+                                          mail_info.body_path, size_err.message);
                         sz = 0;
                     }
                 } else {
@@ -2729,10 +2729,10 @@ uint64_t TraditionalImapsFsm<ConnectionType>::create_mail(
         ? get_storage(0)->build_mail_body_key(static_cast<uint64_t>(mail_id))
         : "";
     if (!storage_key.empty()) {
-        std::string err;
+        storage::IoError err;
         if (!get_storage(0)->append_binary(storage_key, body_content.data(),
                                               body_content.size(), err)) {
-            error = "Storage error: " + err;
+            error = "Storage error: " + err.message;
             return 0;
         }
         out_body_path = storage_key;
@@ -2876,9 +2876,9 @@ std::string TraditionalImapsFsm<ConnectionType>::read_mail_body(const std::strin
     auto provider = this->get_storage(0);
     if (provider) {
         std::string content;
-        std::string error;
+        storage::IoError error;
         if (!provider->read_all(body_path, content, error)) {
-            LOG_FILE_IO_ERROR("Failed to read mail body {}: {}", body_path, error);
+            LOG_FILE_IO_ERROR("Failed to read mail body {}: {}", body_path, error.message);
             return "";
         }
         return content;

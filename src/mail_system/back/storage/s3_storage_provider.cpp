@@ -46,7 +46,7 @@ size_t read_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
 
 bool curl_perform(CURL* curl, const std::string& url, const std::string& method,
                   long timeout_ms, const char* body, std::size_t body_size,
-                  struct curl_slist* headers, HttpResponse& resp, std::string& error) {
+                  struct curl_slist* headers, HttpResponse& resp, IoError& error) {
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
@@ -73,7 +73,8 @@ bool curl_perform(CURL* curl, const std::string& url, const std::string& method,
 
     const CURLcode rc = curl_easy_perform(curl);
     if (rc != CURLE_OK) {
-        error = std::string("curl: ") + curl_easy_strerror(rc);
+        // 传输层失败（连接/超时/TLS）：重试可能成功
+        error = IoError::retryable(std::string("curl: ") + curl_easy_strerror(rc));
         return false;
     }
 
@@ -197,9 +198,9 @@ std::string S3StorageProvider::sign_request(
 // ========== S3 HTTP operations =============================================
 
 bool S3StorageProvider::s3_get(const std::string& key, std::string& body,
-                                std::string& error) {
+                                IoError& error) {
     CURL* curl = curl_easy_init();
-    if (!curl) { error = "curl init failed"; return false; }
+    if (!curl) { error = IoError::retryable("curl init failed"); return false; }
 
     const std::string url = use_path_style_
         ? endpoint_ + "/" + bucket_ + "/" + key
@@ -235,14 +236,14 @@ bool S3StorageProvider::s3_get(const std::string& key, std::string& body,
         body = std::move(resp.body);
         return true;
     }
-    error = "S3 GET " + key + " HTTP " + std::to_string(resp.status_code) + ": " + resp.body;
+    error = IoError::from_http(resp.status_code, "GET " + key + ": " + resp.body);
     return false;
 }
 
 bool S3StorageProvider::s3_put(const std::string& key, const char* data,
-                                std::size_t size, std::string& error) {
+                                std::size_t size, IoError& error) {
     CURL* curl = curl_easy_init();
-    if (!curl) { error = "curl init failed"; return false; }
+    if (!curl) { error = IoError::retryable("curl init failed"); return false; }
 
     const std::string url = use_path_style_
         ? endpoint_ + "/" + bucket_ + "/" + key
@@ -269,13 +270,13 @@ bool S3StorageProvider::s3_put(const std::string& key, const char* data,
 
     if (!ok) return false;
     if (resp.status_code >= 200 && resp.status_code < 300) return true;
-    error = "S3 PUT " + key + " HTTP " + std::to_string(resp.status_code) + ": " + resp.body;
+    error = IoError::from_http(resp.status_code, "PUT " + key + ": " + resp.body);
     return false;
 }
 
-bool S3StorageProvider::s3_delete(const std::string& key, std::string& error) {
+bool S3StorageProvider::s3_delete(const std::string& key, IoError& error) {
     CURL* curl = curl_easy_init();
-    if (!curl) { error = "curl init failed"; return false; }
+    if (!curl) { error = IoError::retryable("curl init failed"); return false; }
 
     const std::string url = use_path_style_
         ? endpoint_ + "/" + bucket_ + "/" + key
@@ -301,7 +302,7 @@ bool S3StorageProvider::s3_delete(const std::string& key, std::string& error) {
 
     if (!ok) return false;
     if ((resp.status_code >= 200 && resp.status_code < 300) || resp.status_code == 404) return true;
-    error = "S3 DELETE " + key + " HTTP " + std::to_string(resp.status_code) + ": " + resp.body;
+    error = IoError::from_http(resp.status_code, "DELETE " + key + ": " + resp.body);
     return false;
 }
 
@@ -331,10 +332,10 @@ S3StorageProvider::S3StorageProvider(std::string endpoint,
         endpoint_.pop_back();
 }
 
-bool S3StorageProvider::ensure_ready(std::string& error) {
+bool S3StorageProvider::ensure_ready(IoError& error) {
     // HEAD bucket — 验证连通性和权限
     CURL* curl = curl_easy_init();
-    if (!curl) { error = "curl init failed"; return false; }
+    if (!curl) { error = IoError::retryable("curl init failed"); return false; }
 
     const std::string url = endpoint_ + "/" + bucket_;
     const std::string payload_hash = sha256_hex("");
@@ -358,14 +359,14 @@ bool S3StorageProvider::ensure_ready(std::string& error) {
     if (!ok) return false;
     if (resp.status_code >= 200 && resp.status_code < 300) return true;
     if (resp.status_code == 404) {
-        error = "S3 bucket '" + bucket_ + "' not found on " + endpoint_;
+        error = IoError::permanent("S3 bucket '" + bucket_ + "' not found on " + endpoint_);
         return false;
     }
     if (resp.status_code == 403) {
-        error = "S3 access denied for bucket '" + bucket_ + "' — check credentials";
+        error = IoError::permanent("S3 access denied for bucket '" + bucket_ + "' — check credentials");
         return false;
     }
-    error = "S3 HEAD bucket HTTP " + std::to_string(resp.status_code);
+    error = IoError::from_http(resp.status_code, "HEAD bucket " + bucket_);
     return false;
 }
 
@@ -383,7 +384,7 @@ std::string S3StorageProvider::build_attachment_key(std::uint64_t mail_id,
 bool S3StorageProvider::append_binary(const std::string& key,
                                        const char* data,
                                        std::size_t size,
-                                       std::string& error) {
+                                       IoError& error) {
     // GET 已有内容 + 拼接新数据 + PUT 全量。每次调用都是两整次对象传输，
     // 只适合一次性写完整内容的调用方（如 IMAP APPEND）；
     // 流式写入必须走 open_write（内存缓冲 + commit 时单次 PUT）。
@@ -395,18 +396,18 @@ bool S3StorageProvider::append_binary(const std::string& key,
 }
 
 std::unique_ptr<IWriteStream> S3StorageProvider::open_write(const std::string& key,
-                                                            std::string& error) {
+                                                            IoError& error) {
     if (key.empty()) {
-        error = "s3 key is empty";
+        error = IoError::permanent("s3 key is empty");
         return nullptr;
     }
     return std::make_unique<BufferedUploadStream>(
-        [this, key](const char* data, std::size_t size, std::string& err) {
+        [this, key](const char* data, std::size_t size, IoError& err) {
             // PUT 是整对象原子替换：覆盖同 key 旧对象，无需先 GET/DELETE。
             return s3_put(key, data, size, err);
         },
         [this, key]() {
-            std::string ignored;
+            IoError ignored;
             s3_delete(key, ignored);
         },
         max_write_buffer_bytes_);
@@ -414,16 +415,16 @@ std::unique_ptr<IWriteStream> S3StorageProvider::open_write(const std::string& k
 
 bool S3StorageProvider::read_all(const std::string& key,
                                  std::string& out,
-                                 std::string& error) {
+                                 IoError& error) {
     if (key.empty()) {
-        error = "s3 key is empty";
+        error = IoError::permanent("s3 key is empty");
         return false;
     }
     // 复用已有的签名 GET
     return s3_get(key, out, error);
 }
 
-bool S3StorageProvider::remove_object(const std::string& key, std::string& error) {
+bool S3StorageProvider::remove_object(const std::string& key, IoError& error) {
     return s3_delete(key, error);
 }
 

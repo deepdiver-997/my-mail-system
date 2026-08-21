@@ -55,10 +55,10 @@ bool http_request(const std::string& method,
                   const char* payload,
                   std::size_t payload_size,
                   HttpResponse& response,
-                  std::string& error) {
+                  IoError& error) {
     CURL* curl = curl_easy_init();
     if (!curl) {
-        error = "curl_easy_init failed";
+        error = IoError::retryable("curl_easy_init failed");
         return false;
     }
 
@@ -79,7 +79,8 @@ bool http_request(const std::string& method,
 
     const CURLcode rc = curl_easy_perform(curl);
     if (rc != CURLE_OK) {
-        error = curl_easy_strerror(rc);
+        // 传输层失败（连接/超久）：重试可能成功
+        error = IoError::retryable(curl_easy_strerror(rc));
         curl_easy_cleanup(curl);
         return false;
     }
@@ -114,19 +115,19 @@ HdfsWebStorageProvider::HdfsWebStorageProvider(std::string endpoint,
                                   ? kDefaultWriteBufferBytes
                                   : max_write_buffer_bytes) {}
 
-bool HdfsWebStorageProvider::ensure_ready(std::string& error) {
+bool HdfsWebStorageProvider::ensure_ready(IoError& error) {
     static std::once_flag curl_init_once;
     std::call_once(curl_init_once, []() {
         curl_global_init(CURL_GLOBAL_DEFAULT);
     });
 
     if (endpoint_.empty()) {
-        error = "hdfs endpoint is empty";
+        error = IoError::permanent("hdfs endpoint is empty");
         return false;
     }
 
     if (base_path_.empty()) {
-        error = "hdfs base_path is empty";
+        error = IoError::permanent("hdfs base_path is empty");
         return false;
     }
 
@@ -150,9 +151,9 @@ std::string HdfsWebStorageProvider::build_attachment_key(std::uint64_t mail_id,
 bool HdfsWebStorageProvider::append_binary(const std::string& storage_key,
                                            const char* data,
                                            std::size_t size,
-                                           std::string& error) {
+                                           IoError& error) {
     if (storage_key.empty()) {
-        error = "hdfs storage key is empty";
+        error = IoError::permanent("hdfs storage key is empty");
         return false;
     }
     if (!data || size == 0) {
@@ -174,9 +175,9 @@ bool HdfsWebStorageProvider::append_binary(const std::string& storage_key,
 
 bool HdfsWebStorageProvider::read_all(const std::string& storage_key,
                                       std::string& out,
-                                      std::string& error) {
+                                      IoError& error) {
     if (storage_key.empty()) {
-        error = "hdfs storage key is empty";
+        error = IoError::permanent("hdfs storage key is empty");
         return false;
     }
 
@@ -197,8 +198,8 @@ bool HdfsWebStorageProvider::read_all(const std::string& storage_key,
             return false;
         }
         if (data_resp.status_code != 200) {
-            error = "webhdfs open(data) failed, status=" + std::to_string(data_resp.status_code) +
-                    ", body=" + data_resp.body;
+            error = IoError::from_http(data_resp.status_code,
+                                       "webhdfs open(data), body=" + data_resp.body);
             return false;
         }
         out = std::move(data_resp.body);
@@ -210,13 +211,12 @@ bool HdfsWebStorageProvider::read_all(const std::string& storage_key,
         return true;
     }
 
-    error = "webhdfs open failed, status=" + std::to_string(open_resp.status_code) +
-            ", body=" + open_resp.body;
+    error = IoError::from_http(open_resp.status_code, "webhdfs open, body=" + open_resp.body);
     return false;
 }
 
 bool HdfsWebStorageProvider::remove_object(const std::string& storage_key,
-                                           std::string& error) {
+                                           IoError& error) {
     if (storage_key.empty()) {
         return true;
     }
@@ -224,13 +224,13 @@ bool HdfsWebStorageProvider::remove_object(const std::string& storage_key,
 }
 
 std::unique_ptr<IWriteStream> HdfsWebStorageProvider::open_write(
-    const std::string& storage_key, std::string& error) {
+    const std::string& storage_key, IoError& error) {
     if (storage_key.empty()) {
-        error = "hdfs storage key is empty";
+        error = IoError::permanent("hdfs storage key is empty");
         return nullptr;
     }
     return std::make_unique<BufferedUploadStream>(
-        [this, storage_key](const char* data, std::size_t size, std::string& err) {
+        [this, storage_key](const char* data, std::size_t size, IoError& err) {
             // 流式写入的 key 总是新邮件，直接 CREATE(overwrite=true) 覆盖写，
             // 不走 append_binary 的「先试 APPEND 失败再 CREATE」多两次往返。
             // size==0 也要创建空文件，与本地后端打开即建空文件对齐。
@@ -240,7 +240,7 @@ std::unique_ptr<IWriteStream> HdfsWebStorageProvider::open_write(
             return webhdfs_create_with_payload(storage_key, data, size, err);
         },
         [this, storage_key]() {
-            std::string ignored;
+            IoError ignored;
             webhdfs_delete(storage_key, ignored);
         },
         max_write_buffer_bytes_);
@@ -307,14 +307,14 @@ std::string HdfsWebStorageProvider::url_encode(const std::string& value) {
     return escaped.str();
 }
 
-bool HdfsWebStorageProvider::ensure_remote_directory(const std::string& relative_dir, std::string& error) {
+bool HdfsWebStorageProvider::ensure_remote_directory(const std::string& relative_dir, IoError& error) {
     if (relative_dir.empty()) {
         return true;
     }
     return webhdfs_mkdirs(relative_dir, error);
 }
 
-bool HdfsWebStorageProvider::webhdfs_mkdirs(const std::string& relative_dir, std::string& error) {
+bool HdfsWebStorageProvider::webhdfs_mkdirs(const std::string& relative_dir, IoError& error) {
     std::string path = base_path_;
     if (!relative_dir.empty()) {
         path += "/" + relative_dir;
@@ -333,14 +333,14 @@ bool HdfsWebStorageProvider::webhdfs_mkdirs(const std::string& relative_dir, std
         return true;
     }
 
-    error = "webhdfs mkdirs failed, status=" + std::to_string(response.status_code) + ", body=" + response.body;
+    error = IoError::from_http(response.status_code, "webhdfs mkdirs, body=" + response.body);
     return false;
 }
 
 bool HdfsWebStorageProvider::webhdfs_append(const std::string& relative_path,
                                             const char* data,
                                             std::size_t size,
-                                            std::string& error) {
+                                            IoError& error) {
     std::ostringstream open_url;
     open_url << endpoint_ << "/webhdfs/v1" << url_encode(base_path_ + "/" + relative_path)
              << "?op=APPEND&user.name=" << url_encode(user_);
@@ -351,7 +351,7 @@ bool HdfsWebStorageProvider::webhdfs_append(const std::string& relative_path,
     }
 
     if ((open_resp.status_code != 307 && open_resp.status_code != 200) || open_resp.redirect_location.empty()) {
-        error = "webhdfs append open failed, status=" + std::to_string(open_resp.status_code) + ", body=" + open_resp.body;
+        error = IoError::from_http(open_resp.status_code, "webhdfs append open, body=" + open_resp.body);
         return false;
     }
 
@@ -364,14 +364,14 @@ bool HdfsWebStorageProvider::webhdfs_append(const std::string& relative_path,
         return true;
     }
 
-    error = "webhdfs append failed, status=" + std::to_string(append_resp.status_code) + ", body=" + append_resp.body;
+    error = IoError::from_http(append_resp.status_code, "webhdfs append, body=" + append_resp.body);
     return false;
 }
 
 bool HdfsWebStorageProvider::webhdfs_create_with_payload(const std::string& relative_path,
                                                          const char* data,
                                                          std::size_t size,
-                                                         std::string& error) {
+                                                         IoError& error) {
     std::ostringstream open_url;
     open_url << endpoint_ << "/webhdfs/v1" << url_encode(base_path_ + "/" + relative_path)
              << "?op=CREATE&overwrite=true&replication=" << replica_count_
@@ -383,7 +383,7 @@ bool HdfsWebStorageProvider::webhdfs_create_with_payload(const std::string& rela
     }
 
     if ((open_resp.status_code != 307 && open_resp.status_code != 201) || open_resp.redirect_location.empty()) {
-        error = "webhdfs create open failed, status=" + std::to_string(open_resp.status_code) + ", body=" + open_resp.body;
+        error = IoError::from_http(open_resp.status_code, "webhdfs create open, body=" + open_resp.body);
         return false;
     }
 
@@ -396,11 +396,11 @@ bool HdfsWebStorageProvider::webhdfs_create_with_payload(const std::string& rela
         return true;
     }
 
-    error = "webhdfs create failed, status=" + std::to_string(create_resp.status_code) + ", body=" + create_resp.body;
+    error = IoError::from_http(create_resp.status_code, "webhdfs create, body=" + create_resp.body);
     return false;
 }
 
-bool HdfsWebStorageProvider::webhdfs_delete(const std::string& relative_path, std::string& error) {
+bool HdfsWebStorageProvider::webhdfs_delete(const std::string& relative_path, IoError& error) {
     std::ostringstream url;
     url << endpoint_ << "/webhdfs/v1" << url_encode(base_path_ + "/" + relative_path)
         << "?op=DELETE&recursive=false&user.name=" << url_encode(user_);
@@ -414,7 +414,7 @@ bool HdfsWebStorageProvider::webhdfs_delete(const std::string& relative_path, st
         return true;
     }
 
-    error = "webhdfs delete failed, status=" + std::to_string(response.status_code) + ", body=" + response.body;
+    error = IoError::from_http(response.status_code, "webhdfs delete, body=" + response.body);
     return false;
 }
 

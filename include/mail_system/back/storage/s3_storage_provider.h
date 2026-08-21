@@ -29,7 +29,7 @@ public:
     // SMTP 正文上限 10MB，64MB 给整对象缓冲留足余量（附件随正文一起落盘）。
     static constexpr std::size_t kDefaultWriteBufferBytes = 64ull * 1024 * 1024;
 
-    bool ensure_ready(std::string& error) override;
+    bool ensure_ready(IoError& error) override;
 
     std::string build_mail_body_key(std::uint64_t mail_id) override;
 
@@ -39,25 +39,25 @@ public:
     bool append_binary(const std::string& storage_key,
                        const char* data,
                        std::size_t size,
-                       std::string& error) override;
+                       IoError& error) override;
 
     bool remove_object(const std::string& storage_key,
-                       std::string& error) override;
+                       IoError& error) override;
 
     // 复用已有的签名 GET（s3_get）
     bool read_all(const std::string& storage_key,
                   std::string& out,
-                  std::string& error) override;
+                  IoError& error) override;
 
     // 整对象缓冲 + commit 时单次 s3_put，替代逐块 GET+PUT 的 O(n²) 老路径。
     std::unique_ptr<IWriteStream> open_write(const std::string& storage_key,
-                                             std::string& error) override;
+                                             IoError& error) override;
 
 private:
     // --- HTTP 底层 ---
-    bool s3_get(const std::string& key, std::string& body, std::string& error);
-    bool s3_put(const std::string& key, const char* data, std::size_t size, std::string& error);
-    bool s3_delete(const std::string& key, std::string& error);
+    bool s3_get(const std::string& key, std::string& body, IoError& error);
+    bool s3_put(const std::string& key, const char* data, std::size_t size, IoError& error);
+    bool s3_delete(const std::string& key, IoError& error);
 
     // --- AWS Signature V4 ---
     std::string sign_request(const std::string& method,

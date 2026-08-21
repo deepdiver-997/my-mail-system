@@ -23,7 +23,7 @@ public:
     // 与 S3StorageProvider 同一常数：SMTP 正文上限 10MB，64MB 留足余量。
     static constexpr std::size_t kDefaultWriteBufferBytes = 64ull * 1024 * 1024;
 
-    bool ensure_ready(std::string& error) override;
+    bool ensure_ready(IoError& error) override;
 
     std::string build_mail_body_key(std::uint64_t mail_id) override;
 
@@ -33,20 +33,20 @@ public:
     bool append_binary(const std::string& storage_key,
                        const char* data,
                        std::size_t size,
-                       std::string& error) override;
+                       IoError& error) override;
 
     bool remove_object(const std::string& storage_key,
-                       std::string& error) override;
+                       IoError& error) override;
 
     // WebHDFS OPEN（307 重定向到 datanode 后再取正文）
     bool read_all(const std::string& storage_key,
                   std::string& out,
-                  std::string& error) override;
+                  IoError& error) override;
 
     // 整对象缓冲 + commit 时单次 CREATE(overwrite)，替代逐块 APPEND 的
     // 每块 MKDIRS + 307 + POST 多次往返。
     std::unique_ptr<IWriteStream> open_write(const std::string& storage_key,
-                                             std::string& error) override;
+                                             IoError& error) override;
 
 private:
     static std::string normalize_endpoint(const std::string& endpoint);
@@ -54,17 +54,17 @@ private:
     static std::string sanitize_filename(const std::string& name);
     static std::string url_encode(const std::string& value);
 
-    bool ensure_remote_directory(const std::string& relative_dir, std::string& error);
-    bool webhdfs_mkdirs(const std::string& relative_dir, std::string& error);
+    bool ensure_remote_directory(const std::string& relative_dir, IoError& error);
+    bool webhdfs_mkdirs(const std::string& relative_dir, IoError& error);
     bool webhdfs_append(const std::string& relative_path,
                         const char* data,
                         std::size_t size,
-                        std::string& error);
+                        IoError& error);
     bool webhdfs_create_with_payload(const std::string& relative_path,
                                      const char* data,
                                      std::size_t size,
-                                     std::string& error);
-    bool webhdfs_delete(const std::string& relative_path, std::string& error);
+                                     IoError& error);
+    bool webhdfs_delete(const std::string& relative_path, IoError& error);
 
     std::string endpoint_;
     std::string base_path_;

@@ -46,13 +46,13 @@ public:
     // 已接收的正文总字节数（含尚未刷盘的缓冲部分）。
     std::uint64_t bytes_total() const { return offset_ + buffer_used_; }
 
-    bool write(const char* data, std::size_t size, std::string& error) {
+    bool write(const char* data, std::size_t size, IoError& error) {
         if (failed_) {
-            error = "mail body writer already failed";
+            error = IoError::permanent("mail body writer already failed");
             return false;
         }
         if (!stream_) {
-            error = "mail body writer has no write stream";
+            error = IoError::permanent("mail body writer has no write stream");
             return false;
         }
         if (!data || size == 0) {
@@ -74,16 +74,16 @@ public:
     }
 
     // 冲刷剩余缓冲并持久化。返回 true 后才可以回 250。
-    bool commit(std::string& error) {
+    bool commit(IoError& error) {
         if (committed_) {
             return true;
         }
         if (failed_) {
-            error = "mail body writer already failed";
+            error = IoError::permanent("mail body writer already failed");
             return false;
         }
         if (!stream_) {
-            error = "mail body writer has no write stream";
+            error = IoError::permanent("mail body writer has no write stream");
             return false;
         }
         if (!flush(error)) {
@@ -106,25 +106,25 @@ public:
     // 约束：回调触发时本对象必须仍存活（调用方在回调返回之后才 reset 它）。
     void commit_async(IWriteStream::CommitCallback cb) {
         if (committed_) {
-            if (cb) cb(true, std::string());
+            if (cb) cb(true, IoError{});
             return;
         }
         if (failed_) {
-            if (cb) cb(false, "mail body writer already failed");
+            if (cb) cb(false, IoError::permanent("mail body writer already failed"));
             return;
         }
         if (!stream_) {
             failed_ = true;
-            if (cb) cb(false, "mail body writer has no write stream");
+            if (cb) cb(false, IoError::permanent("mail body writer has no write stream"));
             return;
         }
-        std::string error;
+        IoError error;
         if (!flush(error)) {
             if (cb) cb(false, std::move(error));
             return;
         }
         stream_->commit_async(
-            [this, cb = std::move(cb)](bool ok, const std::string& err) mutable {
+            [this, cb = std::move(cb)](bool ok, const IoError& err) mutable {
                 if (ok) {
                     committed_ = true;
                 } else {
@@ -147,7 +147,7 @@ public:
     }
 
 private:
-    bool flush(std::string& error) {
+    bool flush(IoError& error) {
         if (buffer_used_ == 0) {
             return true;
         }
@@ -158,7 +158,7 @@ private:
         return true;
     }
 
-    bool emit(const char* data, std::size_t size, std::string& error) {
+    bool emit(const char* data, std::size_t size, IoError& error) {
         if (!stream_->write_at(offset_, data, size, error)) {
             failed_ = true;
             return false;

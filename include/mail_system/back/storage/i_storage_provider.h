@@ -25,12 +25,13 @@ using pr::BufferedUploadStream;
 using pr::LocalFileWriteStream;
 using pr::MappedReadStream;
 using CommitCallback = pr::IWriteStream::CommitCallback;
+using pr::IoError;
 
 class IStorageProvider {
 public:
     virtual ~IStorageProvider() = default;
 
-    virtual bool ensure_ready(std::string& error) = 0;
+    virtual bool ensure_ready(IoError& error) = 0;
 
     virtual std::string build_mail_body_key(std::uint64_t mail_id) = 0;
 
@@ -43,17 +44,17 @@ public:
     virtual bool append_binary(const std::string& storage_key,
                                const char* data,
                                std::size_t size,
-                               std::string& error) = 0;
+                               IoError& error) = 0;
 
     virtual bool remove_object(const std::string& storage_key,
-                               std::string& error) = 0;
+                               IoError& error) = 0;
 
     // 打开一个写入句柄，用于流式写入单个对象（如 SMTP DATA 阶段的邮件正文）。
     // 默认实现基于 append_binary 适配，对仅支持追加的后端已经够用；
     // 本地文件后端覆写为常开 fd + pwrite，省掉每块 stat/open/close 的开销。
     // 失败返回 nullptr 并填充 error。
     virtual std::unique_ptr<IWriteStream> open_write(const std::string& storage_key,
-                                                     std::string& error);
+                                                     IoError& error);
 
     // ── 读侧 ────────────────────────────────────────────────────────────
     // 读侧此前完全没有抽象：FSM 直接对 body_path 做 std::ifstream。
@@ -64,19 +65,19 @@ public:
     // 纯虚：每个后端都必须明确表态，不留静默走本地文件系统的缺口。
     virtual bool read_all(const std::string& storage_key,
                           std::string& out,
-                          std::string& error) = 0;
+                          IoError& error) = 0;
 
     // 只读打开。调用方承诺不修改 view() 的内容，后端据此可以零拷贝优化
     // （本地后端覆写为 mmap）。默认实现退化成 read_all + 堆缓冲，
     // 对远程后端而言那次下载和拷贝本来就无法避免。
     virtual std::unique_ptr<IReadStream> open_read(const std::string& storage_key,
-                                                   std::string& error);
+                                                   IoError& error);
 
     // 对象字节数。默认实现会真的把对象读下来（正确但对远程后端偏贵），
     // 本地后端覆写为一次 stat。
     virtual bool object_size(const std::string& storage_key,
                              std::uint64_t& size,
-                             std::string& error);
+                             IoError& error);
 };
 
 // 把 append_binary 适配成 IWriteStream。
@@ -90,14 +91,15 @@ public:
     bool write_at(std::uint64_t offset,
                   const char* data,
                   std::size_t size,
-                  std::string& error) override {
+                  IoError& error) override {
         if (!provider_) {
-            error = "no storage provider";
+            error = IoError::permanent("no storage provider");
             return false;
         }
         if (offset != written_) {
-            error = "out-of-order write: expected offset " + std::to_string(written_) +
-                    ", got " + std::to_string(offset);
+            error = IoError::permanent(
+                "out-of-order write: expected offset " + std::to_string(written_) +
+                ", got " + std::to_string(offset));
             return false;
         }
         if (!provider_->append_binary(storage_key_, data, size, error)) {
@@ -108,14 +110,14 @@ public:
     }
 
     // 追加型后端在 append_binary 返回时即已落盘，无需额外动作。
-    bool commit(std::string&) override { return true; }
+    bool commit(IoError&) override { return true; }
 
     void abort() noexcept override {
         if (!provider_) {
             return;
         }
         try {
-            std::string ignored;
+            IoError ignored;
             provider_->remove_object(storage_key_, ignored);
         } catch (...) {
             // 析构路径，吞掉
@@ -129,16 +131,16 @@ private:
 };
 
 inline std::unique_ptr<IWriteStream> IStorageProvider::open_write(
-    const std::string& storage_key, std::string& error) {
+    const std::string& storage_key, IoError& error) {
     if (storage_key.empty()) {
-        error = "storage key is empty";
+        error = IoError::permanent("storage key is empty");
         return nullptr;
     }
     return std::make_unique<AppendWriteStream>(this, storage_key);
 }
 
 inline std::unique_ptr<IReadStream> IStorageProvider::open_read(
-    const std::string& storage_key, std::string& error) {
+    const std::string& storage_key, IoError& error) {
     std::string data;
     if (!read_all(storage_key, data, error)) {
         return nullptr;
@@ -148,7 +150,7 @@ inline std::unique_ptr<IReadStream> IStorageProvider::open_read(
 
 inline bool IStorageProvider::object_size(const std::string& storage_key,
                                           std::uint64_t& size,
-                                          std::string& error) {
+                                          IoError& error) {
     std::string data;
     if (!read_all(storage_key, data, error)) {
         return false;

@@ -3,6 +3,7 @@
 
 #include "framework/storage/mapped_file.h"
 #include "framework/storage/i_read_stream.h"
+#include "framework/storage/io_error.h"
 
 #include <memory>
 #include <utility>
@@ -16,9 +17,13 @@ namespace pr {
 // 换成 S3/HDFS 时自动退化成 BufferedReadStream，不需要改调用点。
 class MappedReadStream : public IReadStream {
 public:
-    static std::unique_ptr<MappedReadStream> open(const std::string& path, std::string& error) {
-        auto m = MappedFile::open(path, error);
+    static std::unique_ptr<MappedReadStream> open(const std::string& path, IoError& error) {
+        // MappedFile::open 只产出诊断字符串（errno 信息已折进文本），
+        // 这里不再分类：mmap 失败以 ENOMEM 居多，按 retryable 处理。
+        std::string msg;
+        auto m = MappedFile::open(path, msg);
         if (!m) {
+            error = IoError::retryable(std::move(msg));
             return nullptr;
         }
         return std::unique_ptr<MappedReadStream>(new MappedReadStream(std::move(m)));

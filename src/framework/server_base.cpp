@@ -105,9 +105,9 @@ ServerBase::ServerBase(const ServerConfig& config,
             break;
         }
         {
-            std::string err;
+            storage::IoError err;
             if (!main_storage->ensure_ready(err))
-                throw std::runtime_error("Storage init failed: " + err);
+                throw std::runtime_error("Storage init failed: " + err.message);
         }
 
         // ---- 3. 创建 Shard Router ----

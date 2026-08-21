@@ -64,17 +64,17 @@ public:
     explicit RecordingWriteStream(State* st) : st_(st) {}
 
     bool write_at(std::uint64_t offset, const char* data, std::size_t size,
-                  std::string& error) override {
+                  IoError& error) override {
         if (st_->fail_at_write >= 0 && st_->write_count == st_->fail_at_write) {
             st_->write_count++;
-            error = "injected write failure";
+            error = IoError::permanent("injected write failure");
             return false;
         }
         st_->write_count++;
         st_->writes.push_back(RecordedWrite{offset, std::string(data, size)});
         return true;
     }
-    bool commit(std::string&) override { st_->committed = true; return true; }
+    bool commit(IoError&) override { st_->committed = true; return true; }
     void abort() noexcept override { st_->aborted = true; }
 
 private:
@@ -123,7 +123,7 @@ static void test_small_writes_single_flush() {
     const std::string payload = "Subject: hi\r\n\r\nbody";
     {
         MailBodyWriter w(std::make_unique<RecordingWriteStream>(&st), 1024);
-        std::string err;
+        IoError err;
         for (char c : payload) {
             expect_true(w.write(&c, 1, err), "small write ok");
         }
@@ -143,7 +143,7 @@ static void test_multi_flush_stays_ordered() {
     const std::string payload = make_payload(50000, 7);
     {
         MailBodyWriter w(std::make_unique<RecordingWriteStream>(&st), 4096);
-        std::string err;
+        IoError err;
         // 按不规则块喂入，模拟 TCP 到达的 chunk
         std::size_t pos = 0;
         const std::size_t chunks[] = {1500, 3000, 700, 8192, 1, 4095, 4096, 9000};
@@ -167,7 +167,7 @@ static void test_oversized_chunk_passthrough() {
     const std::string huge = make_payload(70000, 2);   // > 64KB 默认缓冲
     {
         MailBodyWriter w(std::make_unique<RecordingWriteStream>(&st), 8192);
-        std::string err;
+        IoError err;
         expect_true(w.write(head.data(), head.size(), err), "head write ok");
         expect_true(w.write(huge.data(), huge.size(), err), "huge write ok");
         expect_true(w.commit(err), "commit ok");
@@ -181,7 +181,7 @@ static void test_destructor_aborts_uncommitted() {
     RecordingWriteStream::State st;
     {
         MailBodyWriter w(std::make_unique<RecordingWriteStream>(&st), 1024);
-        std::string err;
+        IoError err;
         w.write("partial", 7, err);
     }
     expect_true(st.aborted, "uncommitted writer aborts on destruction");
@@ -193,7 +193,7 @@ static void test_abort_idempotent() {
     RecordingWriteStream::State st;
     {
         MailBodyWriter w(std::make_unique<RecordingWriteStream>(&st), 1024);
-        std::string err;
+        IoError err;
         w.write("x", 1, err);
         expect_true(w.commit(err), "commit ok");
         w.abort();
@@ -207,13 +207,13 @@ static void test_failure_propagates() {
     RecordingWriteStream::State st;
     st.fail_at_write = 0;                    // 第一次落盘就失败
     MailBodyWriter w(std::make_unique<RecordingWriteStream>(&st), 64);
-    std::string err;
+    IoError err;
     const std::string big = make_payload(200, 3);
     const bool wrote = w.write(big.data(), big.size(), err);
     expect_true(!wrote, "write reports failure");
-    expect_true(!err.empty(), "failure fills error string");
+    expect_true(!err.message.empty(), "failure fills error string");
 
-    std::string err2;
+    IoError err2;
     expect_true(!w.commit(err2), "commit fails after a failed write");
     expect_true(!st.committed, "stream never committed after failure");
 }
@@ -221,17 +221,17 @@ static void test_failure_propagates() {
 // 7. AppendWriteStream 必须拒绝乱序 offset（而不是静默写坏）
 class CountingProvider : public IStorageProvider {
 public:
-    bool ensure_ready(std::string&) override { return true; }
+    bool ensure_ready(IoError&) override { return true; }
     std::string build_mail_body_key(std::uint64_t id) override { return std::to_string(id); }
     std::string build_attachment_key(std::uint64_t id, const std::string& n) override {
         return std::to_string(id) + n;
     }
-    bool append_binary(const std::string&, const char* d, std::size_t n, std::string&) override {
+    bool append_binary(const std::string&, const char* d, std::size_t n, IoError&) override {
         appended += std::string(d, n);
         return true;
     }
-    bool remove_object(const std::string&, std::string&) override { removed = true; return true; }
-    bool read_all(const std::string&, std::string& out, std::string&) override {
+    bool remove_object(const std::string&, IoError&) override { removed = true; return true; }
+    bool read_all(const std::string&, std::string& out, IoError&) override {
         out = appended;
         return true;
     }
@@ -242,14 +242,14 @@ public:
 
 static void test_append_stream_rejects_out_of_order() {
     CountingProvider p;
-    std::string err;
+    IoError err;
     auto stream = p.open_write("key", err);
     expect_true(stream != nullptr, "default open_write returns a stream");
 
     expect_true(stream->write_at(0, "abc", 3, err), "in-order write ok");
     // 跳过一段：正是错位 bug 的形状，必须被拒绝
     expect_true(!stream->write_at(8192, "tail", 4, err), "out-of-order write rejected");
-    expect_true(err.find("out-of-order") != std::string::npos, "error names the cause");
+    expect_true(err.message.find("out-of-order") != std::string::npos, "error names the cause");
     expect_str(p.appended, "abc", "rejected write did not reach the backend");
 }
 
@@ -262,7 +262,7 @@ static void test_local_file_round_trip() {
 
     const std::string payload = make_payload(30000, 11);
     {
-        std::string err;
+        IoError err;
         auto stream = LocalFileWriteStream::open(path, err);
         expect_true(stream != nullptr, "local stream opens");
         MailBodyWriter w(std::move(stream), 4096);
@@ -284,7 +284,7 @@ static void test_local_file_round_trip() {
     const auto abort_path = (dir / "aborted.eml").string();
     std::filesystem::remove(abort_path);
     {
-        std::string err;
+        IoError err;
         auto stream = LocalFileWriteStream::open(abort_path, err);
         expect_true(stream != nullptr, "abort-case stream opens");
         MailBodyWriter w(std::move(stream), 1024);
@@ -302,18 +302,18 @@ static void test_local_file_round_trip() {
 // open_read / object_size 全部走 IStorageProvider 的默认实现。
 class FakeRemoteProvider : public IStorageProvider {
 public:
-    bool ensure_ready(std::string&) override { return true; }
+    bool ensure_ready(IoError&) override { return true; }
     std::string build_mail_body_key(std::uint64_t id) override { return "remote://" + std::to_string(id); }
     std::string build_attachment_key(std::uint64_t id, const std::string& n) override {
         return "remote://" + std::to_string(id) + "/" + n;
     }
-    bool append_binary(const std::string&, const char* d, std::size_t n, std::string&) override {
+    bool append_binary(const std::string&, const char* d, std::size_t n, IoError&) override {
         object += std::string(d, n);
         return true;
     }
-    bool remove_object(const std::string&, std::string&) override { object.clear(); return true; }
-    bool read_all(const std::string& key, std::string& out, std::string& error) override {
-        if (key != "remote://42") { error = "no such object: " + key; return false; }
+    bool remove_object(const std::string&, IoError&) override { object.clear(); return true; }
+    bool read_all(const std::string& key, std::string& out, IoError& error) override {
+        if (key != "remote://42") { error = IoError::permanent("no such object: " + key); return false; }
         out = object;
         return true;
     }
@@ -330,7 +330,7 @@ static void test_read_side_backend_agnostic() {
 
     // 本地后端：open_read 应走 mmap
     {
-        std::string err;
+        IoError err;
         auto stream = LocalFileWriteStream::open(path, err);
         MailBodyWriter w(std::move(stream), 1024);
         expect_true(w.write(payload.data(), payload.size(), err), "local write ok");
@@ -338,7 +338,7 @@ static void test_read_side_backend_agnostic() {
     }
     LocalFileStorageProvider local(dir.string() + "/", dir.string() + "/");
 
-    std::string err;
+    IoError err;
     auto local_stream = local.open_read(path, err);
     expect_true(local_stream != nullptr, "local open_read ok");
     if (local_stream) {
@@ -373,15 +373,15 @@ static void test_read_side_backend_agnostic() {
     }
 
     // 失败路径要有明确 error，不能静默返回空内容
-    std::string missing_err;
+    IoError missing_err;
     expect_true(remote.open_read("remote://999", missing_err) == nullptr,
                 "remote open_read fails for missing object");
-    expect_true(!missing_err.empty(), "missing object fills error");
+    expect_true(!missing_err.message.empty(), "missing object fills error");
 
-    std::string local_miss_err;
+    IoError local_miss_err;
     expect_true(local.open_read(dir.string() + "/nope.eml", local_miss_err) == nullptr,
                 "local open_read fails for missing file");
-    expect_true(!local_miss_err.empty(), "missing file fills error");
+    expect_true(!local_miss_err.message.empty(), "missing file fills error");
 
     std::filesystem::remove_all(dir);
 }
@@ -389,9 +389,9 @@ static void test_read_side_backend_agnostic() {
 // Null 后端读必须明确失败，而不是返回空内容冒充成功
 static void test_null_provider_read_fails_loudly() {
     NullStorageProvider np;
-    std::string out = "sentinel", err;
+    std::string out = "sentinel"; IoError err;
     expect_true(!np.read_all("/dev/null/1", out, err), "null read_all fails");
-    expect_true(!err.empty(), "null read_all fills error");
+    expect_true(!err.message.empty(), "null read_all fills error");
     expect_true(np.open_read("/dev/null/1", err) == nullptr, "null open_read returns nullptr");
 }
 

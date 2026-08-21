@@ -728,14 +728,21 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     // 回调同一约定）。
     session->set_paused(true);
     smtp_session->commit_body_async(
-        [session](bool committed, const std::string&) {
+        [session](bool committed, const storage::IoError& commit_err) {
             session->set_paused(false);
             auto* c = static_cast<SmtpsContext*>(session->get_context());
             auto* smtp_s = dynamic_cast<SmtpsSession<ConnectionType>*>(session.get());
             if (!committed) {
                 cleanup_streamed_attachments(c);
                 if (smtp_s) smtp_s->discard_current_mail();
-                session->do_async_write("451 4.3.0 Failed to store message, try again later\r\n",
+                // retryable（ENOSPC/网络/5xx）→ 451 让发送方稍后重投；
+                // permanent（EACCES/4xx/超上限）→ 550，重投结果不会改变。
+                const bool retry = commit_err.retryable();
+                LOG_SMTP_DETAIL_ERROR("DATA_END commit failed (retryable={}): {} {}",
+                                      retry, commit_err.code, commit_err.message);
+                session->do_async_write(retry
+                        ? "451 4.3.0 Failed to store message, try again later\r\n"
+                        : "550 5.3.0 Failed to store message\r\n",
                     [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code&) mutable {
                         s->close();
                     });
@@ -771,7 +778,7 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
         auto provider = session->get_server()->m_shardRouter->get_storage(
             static_cast<size_t>(ctx->shard_index));
         std::uint64_t fsz = 0;
-        std::string read_err;
+        storage::IoError read_err;
 
         if (provider) {
             if (provider->object_size(body_key, fsz, read_err) && fsz > 0 &&
@@ -786,8 +793,8 @@ void TraditionalSmtpsFsm<ConnectionType>::finish_data_end_after_commit(
                 body_read = storage::MappedReadStream::open(body_key, read_err);
             }
         }
-        if (!body_read && !read_err.empty()) {
-            LOG_FILE_IO_ERROR("Failed to open mail body for MIME parse: {}", read_err);
+        if (!body_read && !read_err.message.empty()) {
+            LOG_FILE_IO_ERROR("Failed to open mail body for MIME parse: {}", read_err.message);
         }
     }
     if (body_read && !body_read->empty()) {

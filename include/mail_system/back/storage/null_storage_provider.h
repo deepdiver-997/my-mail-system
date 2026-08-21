@@ -13,7 +13,7 @@ class NullStorageProvider : public IStorageProvider {
 public:
     NullStorageProvider() = default;
 
-    bool ensure_ready(std::string& error) override {
+    bool ensure_ready(IoError& error) override {
         return true;
     }
 
@@ -27,19 +27,19 @@ public:
     }
 
     bool append_binary(const std::string&, const char*, std::size_t size,
-                       std::string& error) override {
+                       IoError& error) override {
         // 假装写入成功
         return true;
     }
 
-    bool remove_object(const std::string&, std::string& error) override {
+    bool remove_object(const std::string&, IoError& error) override {
         return true;
     }
 
     // 写入是假装成功的，所以什么都读不回来。明确失败，不返回空内容冒充成功 ——
     // 否则上层会把「读到空邮件」当成正常结果。
-    bool read_all(const std::string&, std::string&, std::string& error) override {
-        error = "null storage provider discards writes; nothing can be read back";
+    bool read_all(const std::string&, std::string&, IoError& error) override {
+        error = IoError::permanent("null storage provider discards writes; nothing can be read back");
         return false;
     }
 };

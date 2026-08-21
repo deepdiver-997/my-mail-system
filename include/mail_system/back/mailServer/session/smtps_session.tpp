@@ -144,11 +144,11 @@ bool SmtpsSession<ConnectionType>::commit_body() {
         return false;
     }
 
-    std::string error;
+    storage::IoError error;
     if (!body_writer_->commit(error)) {
-        LOG_SESSION_ERROR("Failed to commit mail body for mail {}: {}",
+        LOG_SESSION_ERROR("Failed to commit mail body for mail {}: {} (retryable={})",
                           this->get_mail() ? this->get_mail()->id : 0,
-                          error);
+                          error.message, error.retryable());
         handle_write_failure();
         return false;
     }
@@ -159,10 +159,10 @@ bool SmtpsSession<ConnectionType>::commit_body() {
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::commit_body_async(
-    std::function<void(bool ok, const std::string& error)> cb) {
+    std::function<void(bool ok, const storage::IoError& error)> cb) {
     if (!this->get_mail()) {
         // 压根没有邮件（例如 DATA 之前就被拒），无正文可提交
-        if (cb) cb(true, std::string());
+        if (cb) cb(true, storage::IoError{});
         return;
     }
     if (!body_writer_) {
@@ -171,7 +171,7 @@ void SmtpsSession<ConnectionType>::commit_body_async(
         LOG_SESSION_ERROR("Mail {} has no body write stream, cannot commit",
                           this->get_mail()->id);
         handle_write_failure();
-        if (cb) cb(false, "no body write stream");
+        if (cb) cb(false, storage::IoError::permanent("no body write stream"));
         return;
     }
 
@@ -179,11 +179,12 @@ void SmtpsSession<ConnectionType>::commit_body_async(
     // 早已返回，session 必须靠回调链上的 shared_ptr 保活。
     body_writer_->commit_async(
         [self = this->shared_from_this(), cb = std::move(cb)]
-        (bool ok, const std::string& error) mutable {
+        (bool ok, const storage::IoError& error) mutable {
             auto* s = static_cast<SmtpsSession<ConnectionType>*>(self.get());
             if (!ok) {
-                LOG_SESSION_ERROR("Failed to commit mail body for mail {}: {}",
-                                  s->get_mail() ? s->get_mail()->id : 0, error);
+                LOG_SESSION_ERROR("Failed to commit mail body for mail {}: {} (retryable={})",
+                                  s->get_mail() ? s->get_mail()->id : 0,
+                                  error.message, error.retryable());
                 s->handle_write_failure();
             } else {
                 LOG_SESSION_INFO("Committed mail body, {} bytes",
@@ -226,11 +227,11 @@ void SmtpsSession<ConnectionType>::append_body_data(const char* data, size_t siz
         return;
     }
 
-    std::string error;
+    storage::IoError error;
     if (!body_writer_->write(data, size, error)) {
         LOG_SESSION_ERROR("Failed to write mail body for mail {}: {}",
                           this->get_mail() ? this->get_mail()->id : 0,
-                          error);
+                          error.message);
         handle_write_failure();
     }
 }
@@ -273,7 +274,7 @@ void SmtpsSession<ConnectionType>::create_mail_on_data_command() {
 
     // 整个 DATA 阶段只打开一次写入句柄，写入位置由 MailBodyWriter 用显式 offset 管理。
     // 没有 storage provider 时直接用本地文件流，不再各处重复手写 ofstream。
-    std::string open_error;
+    storage::IoError open_error;
     std::unique_ptr<storage::IWriteStream> stream;
     if (storage_provider) {
         stream = storage_provider->open_write(this->get_mail()->body_path, open_error);
@@ -282,7 +283,7 @@ void SmtpsSession<ConnectionType>::create_mail_on_data_command() {
     }
     if (!stream) {
         LOG_SESSION_ERROR("Failed to open mail body write stream for {}: {}",
-                          this->get_mail()->body_path, open_error);
+                          this->get_mail()->body_path, open_error.message);
         handle_write_failure();
         return;
     }
@@ -406,11 +407,11 @@ void SmtpsSession<ConnectionType>::cleanup_mail_files(mail* mail_ptr) {
 
     if (!mail_ptr->body_path.empty()) {
         if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
-            std::string error;
+            storage::IoError error;
             if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->remove_object(mail_ptr->body_path, error)) {
                 LOG_SESSION_INFO("Deleted mail body file: {}", mail_ptr->body_path);
             } else {
-                LOG_SESSION_WARN("Failed to delete mail body file: {}, error={}", mail_ptr->body_path, error);
+                LOG_SESSION_WARN("Failed to delete mail body file: {}, error={}", mail_ptr->body_path, error.message);
             }
         } else if (std::remove(mail_ptr->body_path.c_str()) == 0) {
             LOG_SESSION_INFO("Deleted mail body file: {}", mail_ptr->body_path);
@@ -422,11 +423,11 @@ void SmtpsSession<ConnectionType>::cleanup_mail_files(mail* mail_ptr) {
     for (const auto& att : mail_ptr->attachments) {
         if (!att.filepath.empty()) {
             if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))) {
-                std::string error;
+                storage::IoError error;
                 if (this->m_server->m_shardRouter->get_storage(static_cast<size_t>(this->context_.shard_index))->remove_object(att.filepath, error)) {
                     LOG_SESSION_INFO("Deleted attachment file: {}", att.filepath);
                 } else {
-                    LOG_SESSION_WARN("Failed to delete attachment file: {}, error={}", att.filepath, error);
+                    LOG_SESSION_WARN("Failed to delete attachment file: {}, error={}", att.filepath, error.message);
                 }
             } else if (std::remove(att.filepath.c_str()) == 0) {
                 LOG_SESSION_INFO("Deleted attachment file: {}", att.filepath);

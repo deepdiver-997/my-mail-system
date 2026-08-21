@@ -17,7 +17,7 @@ class LocalFileWriteStream : public IWriteStream {
 public:
     // 打开（必要时创建父目录并截断已有文件）。失败返回 nullptr 并填充 error。
     static std::unique_ptr<LocalFileWriteStream> open(const std::string& path,
-                                                      std::string& error);
+                                                      IoError& error);
 
     ~LocalFileWriteStream() override;
 
@@ -27,10 +27,10 @@ public:
     bool write_at(std::uint64_t offset,
                   const char* data,
                   std::size_t size,
-                  std::string& error) override;
+                  IoError& error) override;
 
     // flush + fsync，返回 true 表示数据已真正落到稳定存储。
-    bool commit(std::string& error) override;
+    bool commit(IoError& error) override;
 
     // 关闭 fd 并删除半成品文件。
     void abort() noexcept override;

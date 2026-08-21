@@ -846,11 +846,11 @@ void PersistentQueue::cleanup_mail_files(mail* mail_data) {
 
     if (!mail_data->body_path.empty()) {
         if (m_shardRouter->get_storage(0)) {
-            std::string error;
+            storage::IoError error;
             if (!m_shardRouter->get_storage(0)->remove_object(mail_data->body_path, error)) {
                 LOG_PERSISTENT_QUEUE_WARN("Failed to delete mail body object: {}, error={}",
                                           mail_data->body_path,
-                                          error);
+                                          error.message);
             }
         } else if (std::remove(mail_data->body_path.c_str()) != 0) {
             LOG_PERSISTENT_QUEUE_WARN("Failed to delete mail body file: {}", mail_data->body_path);
@@ -862,11 +862,11 @@ void PersistentQueue::cleanup_mail_files(mail* mail_data) {
             continue;
         }
         if (m_shardRouter->get_storage(0)) {
-            std::string error;
+            storage::IoError error;
             if (!m_shardRouter->get_storage(0)->remove_object(attachment.filepath, error)) {
                 LOG_PERSISTENT_QUEUE_WARN("Failed to delete attachment object: {}, error={}",
                                           attachment.filepath,
-                                          error);
+                                          error.message);
             }
         } else if (std::remove(attachment.filepath.c_str()) != 0) {
             LOG_PERSISTENT_QUEUE_WARN("Failed to delete attachment file: {}", attachment.filepath);

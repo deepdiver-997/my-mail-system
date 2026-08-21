@@ -9,19 +9,10 @@
 
 namespace pr {
 
-
-namespace {
-
-std::string errno_message(const char* what, const std::string& path) {
-    return std::string(what) + " failed for " + path + ": " + std::strerror(errno);
-}
-
-} // namespace
-
 std::unique_ptr<LocalFileWriteStream> LocalFileWriteStream::open(const std::string& path,
-                                                                 std::string& error) {
+                                                                 IoError& error) {
     if (path.empty()) {
-        error = "storage key is empty";
+        error = IoError::permanent("storage key is empty");
         return nullptr;
     }
 
@@ -31,14 +22,15 @@ std::unique_ptr<LocalFileWriteStream> LocalFileWriteStream::open(const std::stri
             std::filesystem::create_directories(parent);
         }
     } catch (const std::exception& e) {
-        error = std::string("failed to create parent directory for ") + path + ": " + e.what();
+        error = IoError::retryable(
+            std::string("failed to create parent directory for ") + path + ": " + e.what());
         return nullptr;
     }
 
     // O_TRUNC：open_write 的语义是「从头写这个对象」，不是追加到既有内容后面。
     const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
-        error = errno_message("open", path);
+        error = IoError::from_errno("open failed", path);
         return nullptr;
     }
 
@@ -58,9 +50,9 @@ LocalFileWriteStream::~LocalFileWriteStream() {
 bool LocalFileWriteStream::write_at(std::uint64_t offset,
                                     const char* data,
                                     std::size_t size,
-                                    std::string& error) {
+                                    IoError& error) {
     if (fd_ < 0) {
-        error = "write stream is closed: " + path_;
+        error = IoError::permanent("write stream is closed: " + path_);
         return false;
     }
     if (!data || size == 0) {
@@ -77,11 +69,11 @@ bool LocalFileWriteStream::write_at(std::uint64_t offset,
             if (errno == EINTR) {
                 continue; // 被信号打断，重试
             }
-            error = errno_message("pwrite", path_);
+            error = IoError::from_errno("pwrite failed", path_);
             return false;
         }
         if (n == 0) {
-            error = "pwrite wrote 0 bytes for " + path_;
+            error = IoError::retryable("pwrite wrote 0 bytes for " + path_);
             return false;
         }
         done += static_cast<std::size_t>(n);
@@ -89,12 +81,12 @@ bool LocalFileWriteStream::write_at(std::uint64_t offset,
     return true;
 }
 
-bool LocalFileWriteStream::commit(std::string& error) {
+bool LocalFileWriteStream::commit(IoError& error) {
     if (committed_) {
         return true;
     }
     if (fd_ < 0) {
-        error = "write stream is closed: " + path_;
+        error = IoError::permanent("write stream is closed: " + path_);
         return false;
     }
 
@@ -104,7 +96,7 @@ bool LocalFileWriteStream::commit(std::string& error) {
         if (errno == EINTR) {
             continue;
         }
-        error = errno_message("fsync", path_);
+        error = IoError::from_errno("fsync failed", path_);
         return false;
     }
 
@@ -127,6 +119,5 @@ void LocalFileWriteStream::close_fd() noexcept {
         fd_ = -1;
     }
 }
-
 
 } // namespace pr
