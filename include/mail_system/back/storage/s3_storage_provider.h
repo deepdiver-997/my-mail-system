@@ -39,6 +39,11 @@ public:
     bool remove_object(const std::string& storage_key,
                        std::string& error) override;
 
+    // 复用已有的签名 GET（s3_get）
+    bool read_all(const std::string& storage_key,
+                  std::string& out,
+                  std::string& error) override;
+
 private:
     // --- HTTP 底层 ---
     bool s3_get(const std::string& key, std::string& body, std::string& error);

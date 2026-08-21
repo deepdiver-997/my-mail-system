@@ -395,6 +395,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(mail_body_writer_test
         test/unit/mail_body_writer_test.cpp
         src/mail_system/back/storage/local_file_write_stream.cpp
+        src/mail_system/back/storage/local_file_storage_provider.cpp
     )
     target_include_directories(mail_body_writer_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(mail_body_writer_test)

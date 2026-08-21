@@ -1,5 +1,6 @@
 #include "mail_system/back/storage/local_file_storage_provider.h"
 
+#include "mail_system/back/storage/local_file_read_stream.h"
 #include "mail_system/back/storage/local_file_write_stream.h"
 
 #include <cstdio>
@@ -81,6 +82,44 @@ bool LocalFileStorageProvider::append_binary(const std::string& storage_key,
 std::unique_ptr<IWriteStream> LocalFileStorageProvider::open_write(const std::string& storage_key,
                                                                    std::string& error) {
     return LocalFileWriteStream::open(storage_key, error);
+}
+
+bool LocalFileStorageProvider::read_all(const std::string& storage_key,
+                                        std::string& out,
+                                        std::string& error) {
+    if (storage_key.empty()) {
+        error = "storage key is empty";
+        return false;
+    }
+    std::ifstream in(storage_key, std::ios::binary);
+    if (!in.is_open()) {
+        error = "failed to open for read: " + storage_key;
+        return false;
+    }
+    out.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    return true;
+}
+
+std::unique_ptr<IReadStream> LocalFileStorageProvider::open_read(const std::string& storage_key,
+                                                                  std::string& error) {
+    return MappedReadStream::open(storage_key, error);
+}
+
+bool LocalFileStorageProvider::object_size(const std::string& storage_key,
+                                           std::uint64_t& size,
+                                           std::string& error) {
+    if (storage_key.empty()) {
+        error = "storage key is empty";
+        return false;
+    }
+    std::error_code ec;
+    const auto sz = std::filesystem::file_size(storage_key, ec);
+    if (ec) {
+        error = "file_size failed for " + storage_key + ": " + ec.message();
+        return false;
+    }
+    size = static_cast<std::uint64_t>(sz);
+    return true;
 }
 
 bool LocalFileStorageProvider::remove_object(const std::string& storage_key,

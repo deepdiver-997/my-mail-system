@@ -1,6 +1,7 @@
 #ifndef MAIL_SYSTEM_STORAGE_I_STORAGE_PROVIDER_H
 #define MAIL_SYSTEM_STORAGE_I_STORAGE_PROVIDER_H
 
+#include "mail_system/back/storage/i_read_stream.h"
 #include "mail_system/back/storage/i_write_stream.h"
 
 #include <cstddef>
@@ -39,6 +40,29 @@ public:
     // 失败返回 nullptr 并填充 error。
     virtual std::unique_ptr<IWriteStream> open_write(const std::string& storage_key,
                                                      std::string& error);
+
+    // ── 读侧 ────────────────────────────────────────────────────────────
+    // 读侧此前完全没有抽象：FSM 直接对 body_path 做 std::ifstream。
+    // 而 body_path 对 S3/HDFS 来说是 build_mail_body_key() 返回的远程 key，
+    // 不是本地路径 —— 远程后端的读路径因此一直是坏的。这三个方法补上这个缺口。
+
+    // 读进调用方自己的缓冲区，内容可随意修改。
+    // 纯虚：每个后端都必须明确表态，不留静默走本地文件系统的缺口。
+    virtual bool read_all(const std::string& storage_key,
+                          std::string& out,
+                          std::string& error) = 0;
+
+    // 只读打开。调用方承诺不修改 view() 的内容，后端据此可以零拷贝优化
+    // （本地后端覆写为 mmap）。默认实现退化成 read_all + 堆缓冲，
+    // 对远程后端而言那次下载和拷贝本来就无法避免。
+    virtual std::unique_ptr<IReadStream> open_read(const std::string& storage_key,
+                                                   std::string& error);
+
+    // 对象字节数。默认实现会真的把对象读下来（正确但对远程后端偏贵），
+    // 本地后端覆写为一次 stat。
+    virtual bool object_size(const std::string& storage_key,
+                             std::uint64_t& size,
+                             std::string& error);
 };
 
 // 把 append_binary 适配成 IWriteStream。
@@ -97,6 +121,26 @@ inline std::unique_ptr<IWriteStream> IStorageProvider::open_write(
         return nullptr;
     }
     return std::make_unique<AppendWriteStream>(this, storage_key);
+}
+
+inline std::unique_ptr<IReadStream> IStorageProvider::open_read(
+    const std::string& storage_key, std::string& error) {
+    std::string data;
+    if (!read_all(storage_key, data, error)) {
+        return nullptr;
+    }
+    return std::make_unique<BufferedReadStream>(std::move(data));
+}
+
+inline bool IStorageProvider::object_size(const std::string& storage_key,
+                                          std::uint64_t& size,
+                                          std::string& error) {
+    std::string data;
+    if (!read_all(storage_key, data, error)) {
+        return false;
+    }
+    size = data.size();
+    return true;
 }
 
 } // namespace storage

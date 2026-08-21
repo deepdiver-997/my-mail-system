@@ -18,7 +18,10 @@
 #include <vector>
 
 #include "mail_system/back/storage/i_storage_provider.h"
+#include "mail_system/back/storage/local_file_read_stream.h"
+#include "mail_system/back/storage/local_file_storage_provider.h"
 #include "mail_system/back/storage/local_file_write_stream.h"
+#include "mail_system/back/storage/null_storage_provider.h"
 #include "mail_system/back/storage/mail_body_writer.h"
 
 using namespace mail_system::storage;
@@ -228,6 +231,10 @@ public:
         return true;
     }
     bool remove_object(const std::string&, std::string&) override { removed = true; return true; }
+    bool read_all(const std::string&, std::string& out, std::string&) override {
+        out = appended;
+        return true;
+    }
 
     std::string appended;
     bool removed = false;
@@ -289,6 +296,105 @@ static void test_local_file_round_trip() {
     std::filesystem::remove_all(dir);
 }
 
+// ========== 读侧中间层 ==========
+
+// 模拟远程后端：只实现 read_all（没有本地文件可映射），
+// open_read / object_size 全部走 IStorageProvider 的默认实现。
+class FakeRemoteProvider : public IStorageProvider {
+public:
+    bool ensure_ready(std::string&) override { return true; }
+    std::string build_mail_body_key(std::uint64_t id) override { return "remote://" + std::to_string(id); }
+    std::string build_attachment_key(std::uint64_t id, const std::string& n) override {
+        return "remote://" + std::to_string(id) + "/" + n;
+    }
+    bool append_binary(const std::string&, const char* d, std::size_t n, std::string&) override {
+        object += std::string(d, n);
+        return true;
+    }
+    bool remove_object(const std::string&, std::string&) override { object.clear(); return true; }
+    bool read_all(const std::string& key, std::string& out, std::string& error) override {
+        if (key != "remote://42") { error = "no such object: " + key; return false; }
+        out = object;
+        return true;
+    }
+    std::string object;
+};
+
+// 同一段调用代码，在本地后端和远程后端上必须得到相同结果。
+// 这是「抽象是否真的封住了 mmap」的判据：调用方不该知道后端用了什么。
+static void test_read_side_backend_agnostic() {
+    const auto dir = std::filesystem::temp_directory_path() / "mail_body_writer_test";
+    std::filesystem::create_directories(dir);
+    const auto path = (dir / "readside.eml").string();
+    const std::string payload = make_payload(5000, 21);
+
+    // 本地后端：open_read 应走 mmap
+    {
+        std::string err;
+        auto stream = LocalFileWriteStream::open(path, err);
+        MailBodyWriter w(std::move(stream), 1024);
+        expect_true(w.write(payload.data(), payload.size(), err), "local write ok");
+        expect_true(w.commit(err), "local commit ok");
+    }
+    LocalFileStorageProvider local(dir.string() + "/", dir.string() + "/");
+
+    std::string err;
+    auto local_stream = local.open_read(path, err);
+    expect_true(local_stream != nullptr, "local open_read ok");
+    if (local_stream) {
+        expect_str(std::string(local_stream->view()), payload, "local view == payload");
+        expect_num(local_stream->size(), payload.size(), "local size matches");
+    }
+    std::uint64_t lsz = 0;
+    expect_true(local.object_size(path, lsz, err), "local object_size ok");
+    expect_num(lsz, payload.size(), "local object_size value");
+
+    std::string lbuf;
+    expect_true(local.read_all(path, lbuf, err), "local read_all ok");
+    expect_str(lbuf, payload, "local read_all == payload");
+
+    // 远程后端：同样的调用，走默认实现（下载进堆缓冲）
+    FakeRemoteProvider remote;
+    remote.object = payload;
+    auto remote_stream = remote.open_read("remote://42", err);
+    expect_true(remote_stream != nullptr, "remote open_read ok (default impl)");
+    if (remote_stream) {
+        expect_str(std::string(remote_stream->view()), payload, "remote view == payload");
+        expect_num(remote_stream->size(), payload.size(), "remote size matches");
+    }
+    std::uint64_t rsz = 0;
+    expect_true(remote.object_size("remote://42", rsz, err), "remote object_size ok (default impl)");
+    expect_num(rsz, payload.size(), "remote object_size value");
+
+    // 两个后端的只读视图内容必须一致
+    if (local_stream && remote_stream) {
+        expect_str(std::string(local_stream->view()), std::string(remote_stream->view()),
+                   "local view == remote view (后端无关)");
+    }
+
+    // 失败路径要有明确 error，不能静默返回空内容
+    std::string missing_err;
+    expect_true(remote.open_read("remote://999", missing_err) == nullptr,
+                "remote open_read fails for missing object");
+    expect_true(!missing_err.empty(), "missing object fills error");
+
+    std::string local_miss_err;
+    expect_true(local.open_read(dir.string() + "/nope.eml", local_miss_err) == nullptr,
+                "local open_read fails for missing file");
+    expect_true(!local_miss_err.empty(), "missing file fills error");
+
+    std::filesystem::remove_all(dir);
+}
+
+// Null 后端读必须明确失败，而不是返回空内容冒充成功
+static void test_null_provider_read_fails_loudly() {
+    NullStorageProvider np;
+    std::string out = "sentinel", err;
+    expect_true(!np.read_all("/dev/null/1", out, err), "null read_all fails");
+    expect_true(!err.empty(), "null read_all fills error");
+    expect_true(np.open_read("/dev/null/1", err) == nullptr, "null open_read returns nullptr");
+}
+
 int main() {
     std::printf("mail_body_writer_test\n");
     test_small_writes_single_flush();
@@ -299,6 +405,8 @@ int main() {
     test_failure_propagates();
     test_append_stream_rejects_out_of_order();
     test_local_file_round_trip();
+    test_read_side_backend_agnostic();
+    test_null_provider_read_fails_loudly();
 
     std::printf("  pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

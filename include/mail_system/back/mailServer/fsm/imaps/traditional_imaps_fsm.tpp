@@ -1319,11 +1319,24 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             response += "INTERNALDATE \"" + imap_timestamp(mail_info.send_time) + "\" ";
         }
         if (want_rfc822_size) {
-            // O(1) file size via filesystem metadata, not reading entire body
-            uintmax_t sz = 0;
+            // 走 provider 的 object_size：本地后端覆写成一次 stat（O(1)，不读正文），
+            // 远程后端有自己的实现。不要在这里直接 filesystem::file_size —— body_path
+            // 对 S3/HDFS 是远程 key，不是本地路径。
+            std::uint64_t sz = 0;
             if (!mail_info.body_path.empty()) {
-                std::error_code ec;
-                sz = std::filesystem::file_size(mail_info.body_path, ec);
+                auto provider = this->get_storage(0);
+                std::string size_err;
+                if (provider) {
+                    if (!provider->object_size(mail_info.body_path, sz, size_err)) {
+                        LOG_FILE_IO_ERROR("RFC822.SIZE lookup failed for {}: {}",
+                                          mail_info.body_path, size_err);
+                        sz = 0;
+                    }
+                } else {
+                    std::error_code ec;
+                    const auto fsz = std::filesystem::file_size(mail_info.body_path, ec);
+                    sz = ec ? 0 : static_cast<std::uint64_t>(fsz);
+                }
             }
             response += "RFC822.SIZE " + std::to_string(sz) + " ";
         }
@@ -2857,6 +2870,21 @@ std::string TraditionalImapsFsm<ConnectionType>::read_mail_body(const std::strin
         return "";
     }
 
+    // 走 provider：body_path 对 S3/HDFS 是远程 key，直接 ifstream 会失败。
+    // 这里返回的是调用方可以随意改的 std::string（FETCH 响应要在其上做切片、
+    // 拼接），所以用 read_all 而不是只读的 open_read。
+    auto provider = this->get_storage(0);
+    if (provider) {
+        std::string content;
+        std::string error;
+        if (!provider->read_all(body_path, content, error)) {
+            LOG_FILE_IO_ERROR("Failed to read mail body {}: {}", body_path, error);
+            return "";
+        }
+        return content;
+    }
+
+    // 未配置 provider 时的本地兜底
     std::ifstream in(body_path, std::ios::binary);
     if (!in.is_open()) {
         LOG_FILE_IO_ERROR("Failed to open mail body: {}", body_path);

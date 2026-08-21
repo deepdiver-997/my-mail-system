@@ -34,6 +34,19 @@ public:
     std::unique_ptr<IWriteStream> open_write(const std::string& storage_key,
                                             std::string& error) override;
 
+    bool read_all(const std::string& storage_key,
+                  std::string& out,
+                  std::string& error) override;
+
+    // 覆写为 mmap：零拷贝，省掉 read() 那次 page cache → 用户缓冲区的拷贝
+    std::unique_ptr<IReadStream> open_read(const std::string& storage_key,
+                                           std::string& error) override;
+
+    // 覆写为一次 stat，不必把对象读下来
+    bool object_size(const std::string& storage_key,
+                     std::uint64_t& size,
+                     std::string& error) override;
+
 private:
     static std::string ensure_trailing_slash(const std::string& path);
     static std::string sanitize_filename(const std::string& name);

@@ -35,6 +35,13 @@ public:
     bool remove_object(const std::string&, std::string& error) override {
         return true;
     }
+
+    // 写入是假装成功的，所以什么都读不回来。明确失败，不返回空内容冒充成功 ——
+    // 否则上层会把「读到空邮件」当成正常结果。
+    bool read_all(const std::string&, std::string&, std::string& error) override {
+        error = "null storage provider discards writes; nothing can be read back";
+        return false;
+    }
 };
 
 } // namespace storage

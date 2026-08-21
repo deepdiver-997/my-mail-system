@@ -99,6 +99,32 @@ bool DistributedFileStorageProvider::append_binary(const std::string& storage_ke
     return true;
 }
 
+bool DistributedFileStorageProvider::read_all(const std::string& storage_key,
+                                              std::string& out,
+                                              std::string& error) {
+    if (storage_key.empty()) {
+        error = "storage key is empty";
+        return false;
+    }
+
+    const auto relative_key = strip_root_prefix(storage_key);
+    const auto indices = pick_replica_indices(relative_key);
+
+    // 任一副本可读即可；全部失败才报错
+    for (const auto idx : indices) {
+        const auto target = roots_[idx] + relative_key;
+        std::ifstream in(target, std::ios::binary);
+        if (!in.is_open()) {
+            continue;
+        }
+        out.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        return true;
+    }
+
+    error = "no readable replica for " + storage_key;
+    return false;
+}
+
 bool DistributedFileStorageProvider::remove_object(const std::string& storage_key,
                                                    std::string& error) {
     if (storage_key.empty()) {

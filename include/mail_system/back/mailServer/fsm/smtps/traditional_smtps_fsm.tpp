@@ -4,7 +4,7 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/common/mail_crypto.h"
 #include "mail_system/back/inbound/inbound_verifier.h"
-#include "mail_system/back/common/mapped_file.h"
+#include "mail_system/back/storage/local_file_read_stream.h"
 #include "mail_system/back/common/mime_parser.h"
 #include <filesystem>
 #include <openssl/md5.h>
@@ -736,23 +736,37 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_in_message_data_end(
     // MIME 预解析：仅当消息 ≤ 阈值才 eager 解析（大消息跳过，交给 IMAP lazy 解析）
     // 供 IMAP BODYSTRUCTURE / BODY[section] 直接使用。
     //
-    // 用 mmap 而非读进 std::string：正文刚由本会话写完并 fsync 过，这里只是
-    // 换个视角再看一遍同一份数据，没必要在堆上再复制一份（每封最多 1 MiB，
-    // 并发时叠加，而这台机器可用内存不到 1 GB）。
-    std::unique_ptr<MappedFile> body_map;
+    // 走 provider 的只读句柄：这里只解析、不修改内容，因此用 open_read。
+    // 本地后端会把它实现成 mmap（零拷贝，省掉 read() 那次 page cache → 用户
+    // 缓冲区的拷贝和最多 1 MiB 的堆分配）；远程后端退化成下载进缓冲区。
+    // mmap 是后端的实现细节，这里不该知道，否则 S3/HDFS 上直接就崩了。
+    std::unique_ptr<storage::IReadStream> body_read;
     if (smtp_session->get_mail() && !smtp_session->get_mail()->body_path.empty()) {
-        std::error_code fec;
-        auto fsz = std::filesystem::file_size(smtp_session->get_mail()->body_path, fec);
-        if (!fec && fsz > 0 && static_cast<std::uintmax_t>(cfg->inbound_mime_parse_limit_bytes) >= fsz) {
-            std::string map_err;
-            body_map = MappedFile::open(smtp_session->get_mail()->body_path, map_err);
-            if (!body_map) {
-                LOG_FILE_IO_ERROR("Failed to map mail body for MIME parse: {}", map_err);
+        const auto& body_key = smtp_session->get_mail()->body_path;
+        auto provider = session->get_server()->m_shardRouter->get_storage(
+            static_cast<size_t>(ctx->shard_index));
+        std::uint64_t fsz = 0;
+        std::string read_err;
+
+        if (provider) {
+            if (provider->object_size(body_key, fsz, read_err) && fsz > 0 &&
+                static_cast<std::uint64_t>(cfg->inbound_mime_parse_limit_bytes) >= fsz) {
+                body_read = provider->open_read(body_key, read_err);
+            }
+        } else {
+            std::error_code fec;
+            const auto local_sz = std::filesystem::file_size(body_key, fec);
+            if (!fec && local_sz > 0 &&
+                static_cast<std::uintmax_t>(cfg->inbound_mime_parse_limit_bytes) >= local_sz) {
+                body_read = storage::MappedReadStream::open(body_key, read_err);
             }
         }
+        if (!body_read && !read_err.empty()) {
+            LOG_FILE_IO_ERROR("Failed to open mail body for MIME parse: {}", read_err);
+        }
     }
-    if (body_map && !body_map->empty()) {
-        parse_mime_tree(body_map->view(), smtp_session->get_mail()->mime_root);
+    if (body_read && !body_read->empty()) {
+        parse_mime_tree(body_read->view(), smtp_session->get_mail()->mime_root);
         // 写 sidecar JSON 文件，供 IMAP 直接读取（失败不阻塞收信）
         save_mime_tree(smtp_session->get_mail()->body_path,
                        smtp_session->get_mail()->mime_root);
