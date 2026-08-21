@@ -76,7 +76,7 @@ IStorageProvider
 |---|---|---|---|
 | Local | mmap / ifstream / stat | 常开 fd + pwrite + fsync | 零拷贝，每块省 stat+open+close |
 | Distributed | 逐副本尝试 | 多副本 append | 本地文件系统多根 |
-| S3 | 签名 GET | 缓冲整对象 + 单次 PUT | 复用已有 `s3_get`；`append_binary` 仅限一次性写完整内容（IMAP APPEND） |
+| S3 | 签名 GET / HEAD(Content-Length) | 缓冲整对象 + 单次 PUT | `object_size` 覆写为一次 HEAD——默认实现会整对象下载只为拿大小，FETCH RFC822.SIZE 逐封调用不可接受 |
 | HDFS | WebHDFS OPEN + 307 | 缓冲整对象 + 单次 CREATE(overwrite) | 手动走重定向取正文 |
 | Null | 明确失败 | 假装成功 | 读回失败不冒充空内容 |
 
@@ -114,7 +114,5 @@ IStorageProvider
 ## 后续方向
 
 - 超大对象 multipart/并行分片上传（当前邮件上限 10MB 用不上）。
-- S3 覆写 `object_size` 为一次 HEAD（Content-Length）：默认实现为了拿大小会把
-  整个对象下载一遍，IMAP FETCH RFC822.SIZE 逐封调用时对远程后端偏贵。
 - 远程后端覆写 `commit_async` / `async_open_read` 等为真异步（provider 线程 +
   回调，pause 独占约定不变）——接口与调用点已就绪，只差后端实现。

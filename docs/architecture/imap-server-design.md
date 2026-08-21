@@ -62,7 +62,7 @@ INIT ──(CONNECT)──▶ NOT_AUTHENTICATED
 | Command | Status | RFC Reference |
 |---------|--------|--------------|
 | CAPABILITY | ✅ Complete | RFC 3501 §6.1.1 |
-| LOGIN | ✅ Complete | RFC 3501 §6.2.3 |
+| LOGIN | ✅ Complete（bcrypt 已挪 worker 线程，见下） | RFC 3501 §6.2.3 |
 | LOGOUT | ✅ Complete | RFC 3501 §6.1.5 |
 | SELECT | ✅ Complete | RFC 3501 §6.3.1 |
 | EXAMINE | ✅ Complete | RFC 3501 §6.3.2 |
