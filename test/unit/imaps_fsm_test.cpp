@@ -166,26 +166,30 @@ TEST(login_wrong_password) {
 }
 
 TEST(login_many_failures_close) {
-    // 连续3次LOGIN → 前2次返回NO，第3次关闭连接
+    // 多次失败 LOGIN → 达到 max_auth_attempts（测试配置=2）后连接被关闭
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
 
-    fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A001");
-    fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A002");
-    fx.fsm->process_event(h.session, ImapEvent::LOGIN, "A003");
-
-    // 异步认证：等 worker 线程的回复（至少一个 NO，或连接被关）
-    std::string w;
-    size_t cnt = 0;
-    for (int waited = 0; waited < 2000; waited += 5) {
-        w = h.conn->written();
-        cnt = 0;
-        for (size_t pos = 0; (pos = w.find("NO LOGIN failed", pos)) != std::string::npos; ++pos) ++cnt;
-        if (cnt >= 1 || !h.conn->is_open()) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    // LOGIN 已异步化（bcrypt 在 worker 线程池）。直接连发多个 process_event 会让
+    // 多个 worker 线程并发处理同一 session → 并发改写 session 的 std::string
+    // （command_read_buffer_/last_command_args_/m_trace_buf），Linux libstdc++ 下
+    // 表现为 heap-use-after-free（macOS libc++ 不崩，CI 才暴露）。
+    // 生产流水线靠 drain+暂停串行化，但测试直接调 process_event 绕过了它，
+    // 必须逐个等待该次认证完成（回复 NO / 连接关闭）再发下一个。
+    size_t total_no = 0;
+    for (const char* tag : {"A001", "A002", "A003"}) {
+        h.conn->clear_written();   // 只统计本次回复，避免匹配到上次的过期 NO
+        fx.fsm->process_event(h.session, ImapEvent::LOGIN, tag);
+        for (int waited = 0; waited < 2000; waited += 5) {
+            auto w = h.conn->written();
+            if (HAS(w, "NO LOGIN failed")) { ++total_no; break; }   // 该次失败已回复
+            if (!h.conn->is_open()) break;                          // 失败数达上限 → 关闭
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (!h.conn->is_open()) break;   // 连接已关闭，无需再发
     }
-    assert(cnt >= 1 || !h.conn->is_open());
-    std::cout << "  [PASS] login_many_failures_close (NO count=" << cnt << ")" << std::endl;
+    assert(total_no >= 1 || !h.conn->is_open());
+    std::cout << "  [PASS] login_many_failures_close (NO count=" << total_no << ")" << std::endl;
 }
 
 TEST(logout_bye) {
