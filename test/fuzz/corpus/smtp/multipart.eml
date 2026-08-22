@@ -1,0 +1,15 @@
+From: a@t
+To: b@t
+Subject: hi
+Content-Type: multipart/mixed; boundary="BB"
+
+--BB
+Content-Type: text/plain
+
+body
+--BB
+Content-Disposition: attachment; filename="a.bin"
+Content-Transfer-Encoding: base64
+
+aGVsbG8=
+--BB--

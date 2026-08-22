@@ -27,7 +27,8 @@ test/
 │   └── bench-report.md
 ├── fuzz/                        # libFuzzer harness（默认关闭，见 CMakeLists ENABLE_FUZZING）
 │   ├── mime_fuzz.cpp            # MIME 解析 fuzz（纯函数、零 I/O，首推目标）
-│   └── corpus/mime/             # 种子语料（真实/构造邮件，含深嵌套）
+│   ├── smtp_data_fuzz.cpp       # SMTP DATA 解析核心 fuzz（分块/流式双模式）
+│   └── corpus/                  # 种子+回归语料（regress-*.eml 是真实崩溃样本）
 ├── e2e/                         # Python 端到端测试
 │   ├── test_smtp_flow.py        # SMTP 全流程测试 (端口 25/465/587)
 │   ├── test_dual_server.py      # 双服务器互通测试 (带 static route)

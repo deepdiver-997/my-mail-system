@@ -24,6 +24,7 @@ option(ENABLE_S3_STORAGE "Enable S3/MinIO storage (requires libcurl, OpenSSL)" O
 option(BUILD_TESTS "Build test and benchmark targets" ON)
 option(ENABLE_FUZZING "Build libFuzzer harnesses, e.g. mime_fuzz (clang only)" OFF)
 option(ENABLE_TSAN "Build FSM test targets with ThreadSanitizer (-fsanitize=thread -g -O1)" OFF)
+option(ENABLE_ASAN "Build unit test targets with AddressSanitizer+UBSan (-fsanitize=address,undefined -g -O1)" OFF)
 
 # ===== Feature flags — 必须始终定义为 0/1（help_text.cpp 等 #if 使用）=====
 if(USE_SSL)
@@ -450,6 +451,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         target_link_options(smtps_fsm_concurrency_test PRIVATE -fsanitize=thread)
     endif()
 
+
     add_executable(imaps_fsm_test
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/imaps/imaps_server.cpp
@@ -502,6 +504,20 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         io_error_test
         async_storage_provider_test
     )
+    # ASan 对全部单测生效：string_view 越界索引不一定 segfault，
+    # 没有地址消毒的模糊测试发现不了这类堆/栈越界
+    if(ENABLE_ASAN)
+        set(_asan_tests smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test
+            test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
+            mail_body_writer_test buffered_upload_stream_test io_error_test
+            async_storage_provider_test)
+        foreach(_t IN LISTS _asan_tests)
+            # vptr 排除：它给多态向下转型插 typeinfo 引用，跨翻译单元链接不了
+            target_compile_options(${_t} PRIVATE -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)
+            target_link_options(${_t} PRIVATE -fsanitize=address,undefined)
+        endforeach()
+    endif()
+
 endif()
 
 if(NOT BUILD_OBJECT_ONLY)
@@ -515,10 +531,33 @@ endif()
 #     cmake -B build-fuzz -DENABLE_FUZZING=ON -DBUILD_TESTS=OFF
 # Linux CI 的 clang 直接可用。
 if(ENABLE_FUZZING)
+    # fuzzer + ASan/UBSan 是标准组合：光靠 segfault 抓不住 string_view 的
+    # 越界读（很多落在分配器余量里）
+    set(FUZZ_SANITIZERS fuzzer-no-link,address,undefined)
+    set(FUZZ_NOSAN vptr)
+
     add_executable(mime_fuzz test/fuzz/mime_fuzz.cpp)
     target_include_directories(mime_fuzz PRIVATE "${CMAKE_SOURCE_DIR}/include")
-    target_compile_options(mime_fuzz PRIVATE -fsanitize=fuzzer-no-link -g -O1)
-    target_link_options(mime_fuzz PRIVATE -fsanitize=fuzzer)
+    target_compile_options(mime_fuzz PRIVATE -fsanitize=${FUZZ_SANITIZERS} -fno-sanitize=${FUZZ_NOSAN} -g -O1)
+    target_link_options(mime_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+
+    # SMTP DATA 解析核心。刻意不走 setup_mail_target：它会带进 SDK 的
+    # -isystem（CURL/MySQL 的 macOS 路径），破坏 Homebrew clang 下 libc++
+    # 头的搜索链。手动只挂实际需要的 include + spdlog 链接。
+    add_executable(smtp_fuzz
+        test/fuzz/smtp_data_fuzz.cpp
+        src/mail_system/back/algorithm/smtp_utils.cpp)
+    target_include_directories(smtp_fuzz PRIVATE
+        "${CMAKE_SOURCE_DIR}/include"
+        SYSTEM ${nlohmann_json_INCLUDE_DIRS}
+        SYSTEM ${Boost_INCLUDE_DIRS})
+    if(spdlog_FOUND AND spdlog_INCLUDE_DIRS)
+        target_include_directories(smtp_fuzz PRIVATE SYSTEM ${spdlog_INCLUDE_DIRS})
+    endif()
+    target_link_libraries(smtp_fuzz PRIVATE spdlog::spdlog)
+    target_compile_options(smtp_fuzz PRIVATE -fsanitize=${FUZZ_SANITIZERS} -fno-sanitize=${FUZZ_NOSAN} -g -O1)
+    target_link_options(smtp_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+    foreach(_ft mime_fuzz smtp_fuzz)
     if(APPLE)
         # Homebrew LLVM 的 fuzzer 运行时依赖它自带的（更新的）libc++；
         # 不显式指过去的话 ld 会用 Xcode SDK 的旧 libc++，符号对不上。
@@ -530,7 +569,8 @@ if(ENABLE_FUZZING)
         target_link_options(mime_fuzz PRIVATE
             -nostdlib++
             -Wl,-rpath,${HOMEBREW_LLVM_PREFIX}/lib/c++)
-        target_link_libraries(mime_fuzz PRIVATE ${HOMEBREW_LLVM_PREFIX}/lib/c++/libc++.1.dylib)
+        target_link_libraries(${_ft} PRIVATE ${HOMEBREW_LLVM_PREFIX}/lib/c++/libc++.1.dylib)
     endif()
-    message(STATUS "Fuzz harnesses enabled: mime_fuzz")
+    endforeach()
+    message(STATUS "Fuzz harnesses enabled: mime_fuzz, smtp_fuzz")
 endif()

@@ -60,11 +60,36 @@ jobs:
           CC=clang CXX=clang++ cmake -B build-fuzz \
             -DENABLE_FUZZING=ON -DBUILD_TESTS=OFF
 
-      - name: Build fuzz harness
-        run: cmake --build build-fuzz --target mime_fuzz -j$(nproc)
+      - name: Build fuzz harnesses
+        run: cmake --build build-fuzz --target mime_fuzz smtp_fuzz -j$(nproc)
 
-      - name: Fuzz smoke (30s)
+      - name: Fuzz smoke (30s each)
         run: |
           ./build-fuzz/mime_fuzz test/fuzz/corpus/mime \
             -max_total_time=30 -rss_limit_mb=2560 -malloc_limit_mb=512 \
-            -artifact_prefix=./crash-
+            -artifact_prefix=./crash-mime-
+          ./build-fuzz/smtp_fuzz test/fuzz/corpus/smtp \
+            -max_total_time=30 -rss_limit_mb=2560 -malloc_limit_mb=512 \
+            -artifact_prefix=./crash-smtp-
+
+  # ---- ASan+UBSan 单测（string_view 越界、空指针 UB 在这层暴露） ----
+  asan-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libspdlog-dev libc-ares-dev \
+                                  libmysqlclient-dev libboost-system-dev libboost-thread-dev \
+                                  nlohmann-json3-dev libcurl4-openssl-dev
+
+      - name: Configure
+        run: cmake -B build-asan -DENABLE_ASAN=ON
+
+      - name: Build unit tests
+        run: cmake --build build-asan --target unit_tests -j$(nproc)
+
+      - name: Run unit tests (ASan+UBSan)
+        run: ctest --test-dir build-asan --output-on-failure
