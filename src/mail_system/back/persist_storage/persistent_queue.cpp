@@ -468,17 +468,22 @@ void PersistentQueue::is_probable_duplicate_mail_async(mail* mail_data, IDBConne
     }
 
     // 异步遍历收件人的辅助函数
+    // check_next 自引用：function 只持 weak，递归时异步回调持 lock 出的强引用，
+    // 避免引用环泄漏（同 enqueue_outbox_tasks_async 的修复）。
     auto make_recipient_checker = [mail_data, conn](auto cb_copy) {
         auto idx = std::make_shared<size_t>(0);
         auto check_next = std::make_shared<std::function<void()>>();
-        *check_next = [mail_data, conn, idx, cb_copy = std::move(cb_copy), check_next]() mutable {
+        std::weak_ptr<std::function<void()>> weak_next = check_next;
+        *check_next = [mail_data, conn, idx, cb_copy = std::move(cb_copy), weak_next]() mutable {
             if (*idx >= mail_data->to.size()) { cb_copy(true); return; }
             const auto& r = mail_data->to[(*idx)++];
+            std::shared_ptr<std::function<void()>> self = weak_next.lock();
+            if (!self) { cb_copy(false); return; }
             conn->async_query(db::sql::build_dedup_by_subject_sender_recipient(
                 mail_data->subject, mail_data->from, r, kInboundDedupWindowSeconds, conn),
-                [cb_copy, check_next](auto rc) mutable {
+                [cb_copy, self](auto rc) mutable {
                     if (!(rc && rc->get_row_count() > 0)) { cb_copy(false); return; }
-                    (*check_next)();
+                    (*self)();
                 });
         };
         return check_next;
@@ -512,14 +517,17 @@ void PersistentQueue::is_probable_duplicate_mail_async(mail* mail_data, IDBConne
     if (mail_data->subject.empty()) { cb(false); return; }
     auto idx = std::make_shared<size_t>(0);
     auto check_next = std::make_shared<std::function<void()>>();
-    *check_next = [mail_data, conn, idx, cb = std::move(cb), check_next]() mutable {
+    std::weak_ptr<std::function<void()>> weak_next = check_next;
+    *check_next = [mail_data, conn, idx, cb = std::move(cb), weak_next]() mutable {
         if (*idx >= mail_data->to.size()) { cb(true); return; }
         const auto& r = mail_data->to[(*idx)++];
+        std::shared_ptr<std::function<void()>> self = weak_next.lock();
+        if (!self) { cb(false); return; }
         conn->async_query(db::sql::build_dedup_by_subject_sender_recipient(
             mail_data->subject, mail_data->from, r, kInboundDedupWindowSeconds, conn),
-            [cb, check_next](auto rc) mutable {
+            [cb, self](auto rc) mutable {
                 if (!(rc && rc->get_row_count() > 0)) { cb(false); return; }
-                (*check_next)();
+                (*self)();
             });
     };
     (*check_next)();
@@ -536,15 +544,18 @@ void PersistentQueue::is_duplicate_by_source_message_id_async(mail* mail_data, I
 
     auto idx = std::make_shared<size_t>(0);
     auto check_next = std::make_shared<std::function<void()>>();
-    *check_next = [mail_data, conn, idx, cb = std::move(cb), check_next]() mutable {
+    std::weak_ptr<std::function<void()>> weak_next = check_next;
+    *check_next = [mail_data, conn, idx, cb = std::move(cb), weak_next]() mutable {
         if (*idx >= mail_data->to.size()) { cb(true); return; }
 
         const auto& recipient_raw = mail_data->to[(*idx)++];
         const std::string sql = db::sql::build_dedup_by_message_id(
             mail_data->from, recipient_raw, mail_data->source_message_id, conn);
-        conn->async_query(sql, [cb, check_next](std::shared_ptr<IDBResult> result) mutable {
+        std::shared_ptr<std::function<void()>> self = weak_next.lock();
+        if (!self) { cb(false); return; }
+        conn->async_query(sql, [cb, self](std::shared_ptr<IDBResult> result) mutable {
             if (!(result && result->get_row_count() > 0)) { cb(false); return; }
-            (*check_next)();
+            (*self)();
         });
     };
 
@@ -591,11 +602,15 @@ void PersistentQueue::enqueue_outbox_tasks_async(mail* mail_data,
     const bool reserve_for_local = !reserve_owner.empty() && reserve_lease_seconds > 0;
     auto idx = std::make_shared<size_t>(0);
 
-    // 异步迭代收件人列表
+    // process_next 是自引用 std::function。function 若强引用自身会形成引用环，
+    // 链结束后环不被打破 → LSan 泄漏（每封含收件人的邮件都泄漏，含本域收件人路径）。
+    // 方案：function 自身只持 weak 自引用；递归时由异步回调持有 lock() 出的强引用，
+    // 跨 async 间隔保持 function 存活；链结束回调释放强引用 → 无环、无需置空。
     auto process_next = std::make_shared<std::function<void()>>();
+    std::weak_ptr<std::function<void()>> weak_next = process_next;
     *process_next = [this, mail_data, conn, reserve_for_local, reserve_owner,
                      reserve_lease_seconds, reserved_records, idx,
-                     cb = std::move(cb), process_next]() mutable {
+                     cb = std::move(cb), weak_next]() mutable {
         // 跳过本域收件人
         while (*idx < mail_data->to.size()) {
             const auto& recipient = mail_data->to[*idx];
@@ -615,8 +630,13 @@ void PersistentQueue::enqueue_outbox_tasks_async(mail* mail_data,
                                                      reserve_owner, reserve_lease_seconds, conn)
             : db::sql::build_insert_outbox_pending(mail_data->id, mail_data->from, recipient, 8, conn);
 
+        // 递归前 lock 出强引用 self：跨 async 间隔保持 process_next 存活
+        // （enqueue_outbox_tasks_async 返回后局部 process_next 即释放，仅 self 持有）。
+        std::shared_ptr<std::function<void()>> self = weak_next.lock();
+        if (!self) { cb(false, "outbox iteration lost"); return; }
+
         conn->async_execute(sql, [this, mail_data, conn, recipient, reserved_records,
-                                  reserve_for_local, cb, process_next](bool ok) mutable {
+                                  reserve_for_local, cb, self](bool ok) mutable {
             if (!ok) {
                 LOG_PERSISTENT_QUEUE_ERROR("Failed to insert outbox row for mail ID {} recipient {}",
                                           mail_data->id, recipient);
@@ -627,7 +647,7 @@ void PersistentQueue::enqueue_outbox_tasks_async(mail* mail_data,
             if (reserved_records) {
                 conn->async_query(db::sql::build_select_last_insert_id(),
                     [this, mail_data, recipient, reserved_records, reserve_for_local,
-                     cb, process_next](std::shared_ptr<IDBResult> result) mutable {
+                     cb, self](std::shared_ptr<IDBResult> result) mutable {
                         if (!(result && result->get_row_count() > 0)) {
                             cb(false, "Failed to fetch LAST_INSERT_ID");
                             return;
@@ -645,10 +665,10 @@ void PersistentQueue::enqueue_outbox_tasks_async(mail* mail_data,
                         record.attempt_count = reserve_for_local ? 1 : 0;
                         record.max_attempts = 8;
                         reserved_records->push_back(std::move(record));
-                        (*process_next)();
+                        (*self)();
                     });
             } else {
-                (*process_next)();
+                (*self)();
             }
         });
     };

@@ -186,6 +186,11 @@ public:
     void close() override {
         std::lock_guard<std::mutex> lk(mu_);
         closed_ = true;
+        // 还原 asio 语义：关闭连接释放挂起的读/写 handler。
+        // 否则 pending_read_ 里捕获 shared_from_this 的 handler 与 session 形成
+        // 引用环，session 永不析构 → LSan 泄漏（如 IMAP IDLE 的 deferred read）。
+        pending_read_ = PendingRead{};
+        pending_write_handler_ = nullptr;
     }
     bool is_open() const override {
         std::lock_guard<std::mutex> lk(mu_);

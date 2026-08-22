@@ -770,14 +770,18 @@ void InboundVerifier::eval_spf_mechanisms_async(
                 auto cont = std::make_shared<std::function<void(std::string)>>(std::move(continue_after));
                 auto addrs = std::make_shared<std::vector<std::string>>();
                 auto mxs_s = std::make_shared<std::vector<outbound::MxRecord>>(std::move(mxs));
+                // check_one 自引用成环会泄漏：function 只持 weak，异步回调查 lock 出的强引用
                 auto check_one = std::make_shared<std::function<void(size_t)>>();
-                *check_one = [this, client_ip, addrs, mxs_s, cont, check_one](size_t i) mutable {
+                std::weak_ptr<std::function<void(size_t)>> weak_one = check_one;
+                *check_one = [this, client_ip, addrs, mxs_s, cont, weak_one](size_t i) mutable {
                     if (i >= mxs_s->size()) { (*cont)("no_match"); return; }
+                    std::shared_ptr<std::function<void(size_t)>> self = weak_one.lock();
+                    if (!self) { (*cont)("no_match"); return; }
                     dns_.async_resolve_host((*mxs_s)[i].host,
-                        [client_ip, addrs, mxs_s, i, cont, check_one](std::vector<std::string> h) mutable {
+                        [client_ip, addrs, mxs_s, i, cont, self](std::vector<std::string> h) mutable {
                             addrs->insert(addrs->end(), h.begin(), h.end());
                             for (const auto& a : *addrs) if (a == client_ip) { (*cont)("match"); return; }
-                            (*check_one)(i + 1);   // 继续下一个 MX
+                            (*self)(i + 1);   // 继续下一个 MX
                         });
                 };
                 (*check_one)(0);

@@ -666,6 +666,9 @@ TEST(idle_with_done) {
     fx.fsm->process_event(h.session, ImapEvent::DONE, "I001");
     // handle_done 写入 "I001 OK IDLE terminated"
     assert(!w.empty());
+    // 测试结束：关闭连接，释放 deferred read handler（否则其捕获 shared_from_this
+    // 的 handler 与 session 形成引用环，session 永不析构 → LSan 泄漏）
+    h.session->close();
     std::cout << "  [PASS] idle_with_done (response: " << w.substr(0, 60) << ")" << std::endl;
 }
 
