@@ -2571,7 +2571,14 @@ bool TraditionalImapsFsm<ConnectionType>::auth_user(
         return ce.password_hash == password;
     }
 
-    auto conn = shard_router->get_db_pool(static_cast<size_t>(shard))->acquire_connection();
+    // 空池显式判空：经空指针调成员函数即使函数体不解引用也是 UB
+    //（UBSan 实锤；此前靠 ScopedConnection 内的 if(pool_) 兜底才没崩）
+    auto db_pool = shard_router->get_db_pool(static_cast<size_t>(shard));
+    if (!db_pool) {
+        LOG_AUTH_ERROR("No database pool for shard {}", shard);
+        return false;
+    }
+    auto conn = db_pool->acquire_connection();
     if (!conn.is_valid()) {
         LOG_AUTH_ERROR("Failed to get database connection for shard {}", shard);
         return false;

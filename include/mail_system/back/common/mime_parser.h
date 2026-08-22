@@ -239,9 +239,12 @@ inline void parse_mime_tree(std::string_view raw, MimePart& root, size_t pos = 0
         else if (cte != std::string::npos) cte++;
         if (cte != std::string::npos) {
             size_t cte_end = hdr_lower.find("\r\n", cte);
-            root.encoding = (cte_end != std::string::npos)
-                ? hdr_lower.substr(cte + 27, cte_end - cte - 27)
-                : hdr_lower.substr(cte + 27);
+            // 冒号后没有任何字符（header 在冒号处截断）时 cte+27 越过 size，
+            // substr(pos) 直接抛 out_of_range（fuzz+ASan 实锤）。钳制到边界。
+            const size_t vpos = std::min<size_t>(cte + 27, hdr_lower.size());
+            root.encoding = (cte_end != std::string::npos && cte_end > vpos)
+                ? hdr_lower.substr(vpos, cte_end - vpos)
+                : hdr_lower.substr(vpos);
             root.encoding.erase(0, root.encoding.find_first_not_of(" \t"));
             root.encoding.erase(root.encoding.find_last_not_of(" \t") + 1);
         }
@@ -290,9 +293,13 @@ inline void parse_mime_tree(std::string_view raw, MimePart& root, size_t pos = 0
             while (sub.length > 0 && (raw[search_from + sub.length - 1] == '\r' ||
                                        raw[search_from + sub.length - 1] == '\n'))
                 sub.length--;
-            // 写回真实 body_size
+            // 写回真实 body_size。
+            // sub_sep 必须落在本 part 范围内（< next）：part 在 boundary 前没有
+            // 空行时，find 会一路找到后续内容的分隔符，此时 next-(sub_sep+4)
+            // 无符号下溢成天文数字，下面按它索引 raw 就是野读（fuzz+ASan 实锤，
+            // 生产上落在 mmap 映射末尾即 SIGBUS）。
             size_t sub_sep = raw.find("\r\n\r\n", search_from);
-            if (sub_sep != std::string::npos) {
+            if (sub_sep != std::string::npos && sub_sep < next) {
                 sub.body_size = next - (sub_sep + 4);
                 while (sub.body_size > 0 && (raw[sub_sep + 4 + sub.body_size - 1] == '\r' ||
                                               raw[sub_sep + 4 + sub.body_size - 1] == '\n'))

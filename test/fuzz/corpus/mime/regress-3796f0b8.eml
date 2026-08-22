@@ -1,0 +1,9 @@
+From: a@t
+Content-Type: multipart/mixed; boundary="A"
+
+--A¾
+Content-Type: multipart/alternat?ive; boundary="B"
+content-transfer-encoding:
+
+--B
+Content-Type :tex

@@ -69,7 +69,11 @@ public:
     std::shared_ptr<MailboxStatsCache> get_mailbox_stats_cache() const { return m_mailboxStatsCache; }
 
     ScopedConnection acquire_connection(int shard) {
-        auto pool = m_shardRouter->get_db_pool(static_cast<size_t>(shard));
+        auto pool = m_shardRouter ? m_shardRouter->get_db_pool(static_cast<size_t>(shard)) : nullptr;
+        if (!pool) {
+            LOG_DATABASE_ERROR("No DB pool for shard {}", shard);
+            return ScopedConnection::invalid();
+        }
         return pool->acquire_connection();
     }
 

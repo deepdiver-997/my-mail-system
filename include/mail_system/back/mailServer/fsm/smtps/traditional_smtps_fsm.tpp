@@ -1104,8 +1104,9 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
             // DB 走 async_query 链（而非 sq 同步桥）：真实连接池的默认实现
             // 内联执行 → 查询与下面的 bcrypt 都在本 worker 线程；延迟实现
             // （MockDbPool 手动 fire）也保持兼容 —— 回调链不挑线程。
-            auto conn = std::make_shared<ScopedConnection>(
-                router->get_db_pool(static_cast<size_t>(shard))->acquire_connection());
+            auto db_pool = router->get_db_pool(static_cast<size_t>(shard));
+            if (!db_pool) { LOG_AUTH_ERROR("No DB pool for shard {}", shard); cb(false, 0); return; }
+            auto conn = std::make_shared<ScopedConnection>(db_pool->acquire_connection());
             if (!conn->is_valid()) { LOG_AUTH_ERROR("Failed to get DB connection"); cb(false, 0); return; }
 
             (*conn)->async_query(db::sql::build_auth_user_query(), {mail_address},

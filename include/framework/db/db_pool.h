@@ -115,6 +115,9 @@ public:
     bool is_valid() const { return connection_ && connection_->is_connected(); }
     IDBConnection* operator->() const { return connection_.get(); }
 
+    // 无池/取池失败的空连接：is_valid() 为 false，调用方按连接失败处理
+    static ScopedConnection invalid() { return ScopedConnection(nullptr); }
+
 private:
     friend class DBPool;
     explicit ScopedConnection(DBPool* pool) : pool_(pool) {
