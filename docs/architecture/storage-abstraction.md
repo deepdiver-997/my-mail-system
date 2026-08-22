@@ -123,5 +123,9 @@ executor 惰性取 pool（装配时 worker 池尚未创建），无池配置内�
 ## 后续方向
 
 - 超大对象 multipart/并行分片上传（当前邮件上限 10MB 用不上）。
-- IMAP FETCH 调用点改 async（响应构造循环 → 异步链），接上已就绪的
-  `async_read_all`/`async_object_size` + 装饰器。
+
+至此读写两侧的异步化全部闭环：IMAP FETCH 已改为续作链
+（`fetch_drive` → size/envelope → 正文 → 下一封），逐封走
+`async_object_size`/`async_read_all`；本地内联、远程经装饰器上
+worker。每封正文只读一次（旧路径 header/body/BODYSTRUCTURE 兜底
+最多各读一次，一封三次网络往返）。

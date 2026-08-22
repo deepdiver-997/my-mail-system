@@ -69,7 +69,7 @@ INIT ──(CONNECT)──▶ NOT_AUTHENTICATED
 | LIST | ✅ Complete | RFC 3501 §6.3.8 |
 | LSUB | ✅ Complete | RFC 3501 §6.3.9 |
 | STATUS | ✅ Complete | RFC 3501 §6.3.10 |
-| FETCH | ✅ Complete | RFC 3501 §6.4.5 |
+| FETCH |（读路径已异步化：续作链 + provider async，见 storage-abstraction.md） ✅ Complete | RFC 3501 §6.4.5 |
 | STORE | ✅ Complete | RFC 3501 §6.4.6 |
 | EXPUNGE | ✅ Complete | RFC 3501 §6.4.3 |
 | CLOSE | ✅ Complete | RFC 3501 §6.4.2 |
