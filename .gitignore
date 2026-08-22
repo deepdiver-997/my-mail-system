@@ -2,6 +2,7 @@
 # CMake 构建目录
 build/
 build-tsan/
+build-fuzz/
 build_nohdfs/
 
 # ==================== 任务/一次性文档 ====================

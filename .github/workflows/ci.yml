@@ -24,9 +24,8 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
 
       - name: Build unit tests
-        run: cmake --build build --target smtps_fsm_test smtps_fsm_concurrency_test \
-                                imaps_fsm_test test_inbound_verifier outbound_smoke \
-                                sql_queries_test mime_parser_test -j$(nproc)
+        # unit_tests 是 CMake 里的聚合 target，新增单测自动包含
+        run: cmake --build build --target unit_tests -j$(nproc)
 
       - name: Run unit tests (ctest)
         run: ctest --test-dir build --output-on-failure
@@ -49,3 +48,23 @@ jobs:
 
       - name: Build all
         run: cmake --build build -j$(nproc)
+
+  # ---- Fuzz 冒烟（MIME 解析器，30 秒有界运行，发现崩溃即红） ----
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (clang + libFuzzer)
+        run: |
+          CC=clang CXX=clang++ cmake -B build-fuzz \
+            -DENABLE_FUZZING=ON -DBUILD_TESTS=OFF
+
+      - name: Build fuzz harness
+        run: cmake --build build-fuzz --target mime_fuzz -j$(nproc)
+
+      - name: Fuzz smoke (30s)
+        run: |
+          ./build-fuzz/mime_fuzz test/fuzz/corpus/mime \
+            -max_total_time=30 -rss_limit_mb=2560 -malloc_limit_mb=512 \
+            -artifact_prefix=./crash-

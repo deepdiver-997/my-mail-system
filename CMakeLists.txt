@@ -22,6 +22,7 @@ option(ENABLE_INBOUND_DEDUP_CHECK "Enable inbound duplicate check" ON)
 option(ENABLE_HDFS_WEB_STORAGE "Enable WebHDFS storage (requires libcurl)" ON)
 option(ENABLE_S3_STORAGE "Enable S3/MinIO storage (requires libcurl, OpenSSL)" ON)
 option(BUILD_TESTS "Build test and benchmark targets" ON)
+option(ENABLE_FUZZING "Build libFuzzer harnesses, e.g. mime_fuzz (clang only)" OFF)
 option(ENABLE_TSAN "Build FSM test targets with ThreadSanitizer (-fsanitize=thread -g -O1)" OFF)
 
 # ===== Feature flags — 必须始终定义为 0/1（help_text.cpp 等 #if 使用）=====
@@ -484,8 +485,52 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME buffered_upload_stream_test COMMAND buffered_upload_stream_test)
     add_test(NAME io_error_test COMMAND io_error_test)
     add_test(NAME async_storage_provider_test COMMAND async_storage_provider_test)
+
+    # 聚合 target：新增单测只需在上面 add_executable/add_test，
+    # CI 与本地都构建这一个 target，避免测试清单漂移（此前 CI 的
+    # 显式 target 列表缺了新增的 4 个测试，ctest 因二进制缺失而红）
+    add_custom_target(unit_tests DEPENDS
+        smtps_fsm_test
+        smtps_fsm_concurrency_test
+        imaps_fsm_test
+        test_inbound_verifier
+        outbound_smoke
+        sql_queries_test
+        mime_parser_test
+        mail_body_writer_test
+        buffered_upload_stream_test
+        io_error_test
+        async_storage_provider_test
+    )
 endif()
 
 if(NOT BUILD_OBJECT_ONLY)
     install(TARGETS smtpsServer imapsServer mailServer RUNTIME DESTINATION bin)
+endif()
+
+# ---- Fuzz harnesses（libFuzzer，默认关闭） ----
+# 注意：Apple 自带 clang 不带 libFuzzer 运行时（链接报 libclang_rt.fuzzer_osx.a
+# not found）。macOS 上用 Homebrew LLVM：
+#   CC=/opt/homebrew/opt/llvm/bin/clang CXX=/opt/homebrew/opt/llvm/bin/clang++ \
+#     cmake -B build-fuzz -DENABLE_FUZZING=ON -DBUILD_TESTS=OFF
+# Linux CI 的 clang 直接可用。
+if(ENABLE_FUZZING)
+    add_executable(mime_fuzz test/fuzz/mime_fuzz.cpp)
+    target_include_directories(mime_fuzz PRIVATE "${CMAKE_SOURCE_DIR}/include")
+    target_compile_options(mime_fuzz PRIVATE -fsanitize=fuzzer-no-link -g -O1)
+    target_link_options(mime_fuzz PRIVATE -fsanitize=fuzzer)
+    if(APPLE)
+        # Homebrew LLVM 的 fuzzer 运行时依赖它自带的（更新的）libc++；
+        # 不显式指过去的话 ld 会用 Xcode SDK 的旧 libc++，符号对不上。
+        # HOMEBREW_LLVM_PREFIX 可按环境覆盖。
+        set(HOMEBREW_LLVM_PREFIX "/opt/homebrew/opt/llvm" CACHE PATH "Homebrew LLVM prefix")
+        # -nostdlib++ 去掉隐式 -lc++，再显式链 Homebrew 的 libc++：
+        # 隐式那个会解析到 Xcode SDK 的旧版（缺 __hash_memory 等新符号），
+        # 而 -L 搜索顺序竞争不过 SDK 路径，干脆用绝对路径
+        target_link_options(mime_fuzz PRIVATE
+            -nostdlib++
+            -Wl,-rpath,${HOMEBREW_LLVM_PREFIX}/lib/c++)
+        target_link_libraries(mime_fuzz PRIVATE ${HOMEBREW_LLVM_PREFIX}/lib/c++/libc++.1.dylib)
+    endif()
+    message(STATUS "Fuzz harnesses enabled: mime_fuzz")
 endif()

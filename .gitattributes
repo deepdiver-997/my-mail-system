@@ -1,0 +1,2 @@
+# fuzz corpus line endings are MIME semantics; disable git eol normalization
+test/fuzz/corpus/** -text

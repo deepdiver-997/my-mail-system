@@ -1,0 +1,14 @@
+From: a@t
+Content-Type: multipart/mixed; boundary="B"
+
+preamble
+--B
+Content-Type: text/plain
+
+part one
+--B
+Content-Type: application/octet-stream
+Content-Transfer-Encoding: base64
+
+aGVsbG8=
+--B--
