@@ -57,6 +57,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libspdlog-dev libc-ares-dev \
+                                  libmysqlclient-dev libboost-dev \
+                                  libboost-system-dev libboost-thread-dev \
+                                  nlohmann-json3-dev libcurl4-openssl-dev
+
       - name: Configure (clang + libFuzzer)
         run: |
           CC=clang CXX=clang++ cmake -B build-fuzz \
