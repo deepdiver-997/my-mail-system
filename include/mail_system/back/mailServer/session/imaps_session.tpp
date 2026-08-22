@@ -147,6 +147,24 @@ void ImapsSession<ConnectionType>::handle_read(const std::string& data) {
         size_str.pop_back();
         try {
             size_t literal_size = std::stoull(size_str);
+
+            // 声明大小上限：这就是「按对面声明的长度分配」那类问题 —— 虽然
+            // 本实现只按实际到达的字节累积（不预分配），但不设上限的话客户端
+            // 可以拖着连接把内存喂爆。邮件上限 10MB，literal 给 3 倍余量。
+            // 超限直接 BAD + close：非同步 literal 下客户端仍会发数据，
+            // 无法在不读掉这些字节的情况下安全续同步。
+            constexpr size_t kMaxImapLiteralBytes = 32ull * 1024 * 1024;
+            if (literal_size > kMaxImapLiteralBytes) {
+                LOG_IMAP_WARN("Literal size {} exceeds limit {}, closing connection",
+                              literal_size, kMaxImapLiteralBytes);
+                auto self_sp = this->shared_from_this();
+                auto* fsm_ptr = static_cast<TraditionalImapsFsm<ConnectionType>*>(session->fsm_.get());
+                std::string rtag = line.substr(0, line.find(' '));
+                fsm_ptr->send_tagged(self_sp, rtag, "BAD", "Literal too large");
+                self_sp->close();
+                return;
+            }
+
             std::string cmd_part = line.substr(0, brace_pos);
             while (!cmd_part.empty() && cmd_part.back() == ' ')
                 cmd_part.pop_back();

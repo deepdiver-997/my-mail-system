@@ -173,6 +173,10 @@ public:
     int    stay_times_ = 0;
     int    timeout_times_ = 0;
 
+    // 未出现完整行的命令缓冲上限（见 do_async_read 中的防线）。
+    // 默认 16MB：SMTP 邮件上限 10MB + 单行无换行的合法长行余量。
+    virtual size_t max_command_buffer_bytes() const { return 16ull * 1024 * 1024; }
+
 protected:
     // ── 8. 受保护数据成员 ──────────────────────────────────────
     std::unique_ptr<ConnectionType> connection_;

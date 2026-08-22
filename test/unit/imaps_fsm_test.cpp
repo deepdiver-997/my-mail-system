@@ -304,6 +304,17 @@ TEST(fetch_full_path_with_storage) {
     std::cout << "  [PASS] fetch_full_path_with_storage" << std::endl;
 }
 
+// literal 声明大小超限 → BAD + 断开（OOM 防线）
+TEST(literal_too_large_rejected) {
+    auto h = fx.make_session();
+    h.session->handle_read("A001 APPEND INBOX (\\Flags) {4294967295+}\r\n");
+    auto w = h.conn->written();
+    assert(w.find("BAD") != std::string::npos);
+    assert(w.find("Literal too large") != std::string::npos);
+    assert(h.session->is_closed());
+    std::cout << "  [PASS] literal_too_large_rejected" << std::endl;
+}
+
 // ========== 命令顺序错误 ==========
 
 TEST(invalid_command_in_state) {
@@ -679,6 +690,7 @@ int main() {
         // ── UID FETCH crash repro ──
         test_uid_fetch_no_db(fx);
         test_fetch_full_path_with_storage(fx);
+        test_literal_too_large_rejected(fx);
 
         // ── 命令错误 ──
         test_invalid_command_in_state(fx);

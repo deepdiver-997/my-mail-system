@@ -140,6 +140,18 @@ void SessionBase<ConnectionType>::do_async_read() {
             self->command_read_buffer_.append(
                 self->read_buffer_.data(), bytes);
 
+            // 无换行数据的无界累积防线：单次 read() 受 read_buffer_（8KB）约束，
+            // 内核侧由 TCP 接收窗口兜底，但应用层若永远等不到换行符，缓冲会
+            // 随发送持续增长（SMTP DATA 单行无 CRLF 的 200MB 就从这里过）。
+            // 超上限直接断开：超限数据不可能是合法命令/合法邮件。
+            if (self->command_read_buffer_.size() > self->max_command_buffer_bytes()) {
+                LOG_SESSION_ERROR("Command buffer {} bytes without a complete line (limit {}), closing",
+                                  self->command_read_buffer_.size(),
+                                  self->max_command_buffer_bytes());
+                self->close();
+                return;
+            }
+
             // 流水线消费：paused 时停止消费，等待 DB 回调排空
             while (self->has_buffered_input() && !self->is_paused()) {
                 std::string line = self->extract_one_line();

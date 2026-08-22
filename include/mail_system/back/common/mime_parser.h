@@ -21,7 +21,11 @@ namespace mail_system {
 // 不必先把整封邮件读进 std::string。所有传 std::string 的旧调用点隐式转换，无需改动。
 // MimePart 里存的是偏移量和拷贝出来的小字符串，不持有 raw 的指针，
 // 因此解析完成后映射可以安全释放。
-inline void parse_mime_tree(std::string_view raw, MimePart& root, size_t pos = 0) {
+// depth：multipart 嵌套层级。恶意构造的深嵌套邮件（每层一个 boundary）
+// 会把递归打到栈溢出 —— fuzz 冒烟的第一个必中目标。真实邮件嵌套不超过
+// ~10 层，64 层封顶后该 part 按不透明正文处理，长度信息仍由调用方修正。
+inline void parse_mime_tree(std::string_view raw, MimePart& root, size_t pos = 0,
+                            size_t depth = 0) {
     // 找 header/body 分隔
     size_t sep = raw.find("\r\n\r\n", pos);
     std::string hdrs{(sep != std::string::npos) ? raw.substr(pos, sep - pos) : raw.substr(pos)};
@@ -256,8 +260,8 @@ inline void parse_mime_tree(std::string_view raw, MimePart& root, size_t pos = 0
             if (raw[i] == '\n') root.lines++;
     }
 
-    // multipart: 递归解析子 part
-    if (root.is_multipart() && !root.boundary.empty()) {
+    // multipart: 递归解析子 part（深度封顶防栈溢出）
+    if (root.is_multipart() && !root.boundary.empty() && depth < 64) {
         std::string bdr = "--" + root.boundary;
         size_t search_from = body_start;
 
@@ -280,7 +284,7 @@ inline void parse_mime_tree(std::string_view raw, MimePart& root, size_t pos = 0
                              raw.substr(next + bdr.size(), 2) == "--");
 
             MimePart sub;
-            parse_mime_tree(raw, sub, search_from);
+            parse_mime_tree(raw, sub, search_from, depth + 1);
             // 修正 sub 的 length 到 bdr 边界
             sub.length = next - search_from;
             while (sub.length > 0 && (raw[search_from + sub.length - 1] == '\r' ||
