@@ -1228,8 +1228,6 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     }
 
     // Parse: <sequence-set> <message-data-item-names>
-    // e.g. "1:* (FLAGS INTERNALDATE RFC822.SIZE ENVELOPE)"
-    // or   "1:* (BODY[])"
     auto args = (ctx && ctx->is_uid_command) ? ctx->uid_overridden_args : session->get_last_command_args();
     size_t space = args.find(' ');
     if (space == std::string::npos) {
@@ -1239,7 +1237,6 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
 
     std::string seq_set = args.substr(0, space);
     std::string attrs = args.substr(space + 1);
-    // trim ()
     if (!attrs.empty() && attrs[0] == '(') {
         size_t close = attrs.find(')');
         if (close != std::string::npos) {
@@ -1247,24 +1244,20 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
         }
     }
 
-    // 获取邮箱所有邮件
     std::vector<MailboxMailInfo> mails;
     if (!this->get_mailbox_mails(ctx->selected_mailbox_id, ctx->user_id, mails) || mails.empty()) {
         send_tagged(session, tag, "OK", "FETCH completed (empty)");
         return;
     }
 
-    // RFC 3501: 属性名大小写不敏感
     std::transform(attrs.begin(), attrs.end(), attrs.begin(), ::toupper);
 
-    // RFC 3501: UID FETCH 响应必须无条件包含 UID
     bool want_uid = is_uid || attrs.find("UID") != std::string::npos;
     bool want_flags = attrs.find("FLAGS") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
     bool want_internaldate = attrs.find("INTERNALDATE") != std::string::npos || attrs.find("ALL") != std::string::npos;
     bool want_rfc822_size = attrs.find("RFC822.SIZE") != std::string::npos || attrs.find("ALL") != std::string::npos || attrs.find("FAST") != std::string::npos;
     bool want_envelope = attrs.find("ENVELOPE") != std::string::npos || attrs.find("ALL") != std::string::npos;
     bool want_body = attrs.find("BODY[]") != std::string::npos || attrs.find("BODY.PEEK[]") != std::string::npos;
-    // HEADER.FIELDS / HEADER.FIELDS.NOT support
     bool has_header_fields = attrs.find("HEADER.FIELDS") != std::string::npos;
     bool want_body_header = has_header_fields ||
         attrs.find("BODY.PEEK[HEADER]") != std::string::npos ||
@@ -1280,9 +1273,6 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
                 header_fields_filter = attrs.substr(lp + 1, rp - lp - 1);
         }
     }
-    // BODY[n] 或 BODY.PEEK[n] — 客户端请求特定 MIME part
-    // BODY[n] 或 BODY.PEEK[n] — 客户端请求特定 MIME part。
-    // 从 attrs 中提取 part 编号（如 "BODY.PEEK[1]" → 1）
     int body_part_num = 0;
     {
         auto bracket = attrs.find('[');
@@ -1290,7 +1280,6 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
             auto close = attrs.find(']', bracket);
             if (close != std::string::npos) {
                 std::string num_str = attrs.substr(bracket + 1, close - bracket - 1);
-                // 只处理数字 section（忽略 HEADER、MIME 等）
                 bool all_digits = !num_str.empty();
                 for (char c : num_str) if (c < '0' || c > '9') { all_digits = false; break; }
                 if (all_digits) body_part_num = std::stoi(num_str);
@@ -1298,10 +1287,9 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
         }
     }
     bool want_body_part = (body_part_num > 0);
-    if (want_body_part) want_body = true; // fallback: 返回指定 part
+    if (want_body_part) want_body = true;
     bool want_body_struct = attrs.find("BODYSTRUCTURE") != std::string::npos;
 
-    // Determine sequence ranges（支持逗号分隔，如 "1,3" / "1:3,5" / "1:*"）
     std::vector<std::pair<uint64_t, uint64_t>> ranges;
     expand_seq_set(seq_set, mails.size(), ranges);
     if (ranges.empty()) {
@@ -1309,183 +1297,304 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
         return;
     }
 
-    // Build response
-    std::string response;
-    LOG_IMAP_INFO("FETCH building response: {} ranges mails={}", ranges.size(), mails.size());
-    // 注意 mails 是按 send_time DESC 排的；序列号: mail 在列表的下标 + 1
-    for (const auto& range : ranges) {
-    for (uint64_t seq = range.first; seq <= range.second; ++seq) {
-        size_t idx = seq - 1;
-        const auto& mail_info = mails[idx];
+    auto state = std::make_shared<FetchContext>();
+    state->tag = tag;
+    state->mails = std::move(mails);
+    state->ranges = std::move(ranges);
+    state->want_uid = want_uid;
+    state->want_flags = want_flags;
+    state->want_internaldate = want_internaldate;
+    state->want_rfc822_size = want_rfc822_size;
+    state->want_envelope = want_envelope;
+    state->want_body = want_body;
+    state->want_body_header = want_body_header;
+    state->want_body_struct = want_body_struct;
+    state->has_header_fields = has_header_fields;
+    state->header_fields_not = header_fields_not;
+    state->header_fields_filter = std::move(header_fields_filter);
+    state->body_part_num = body_part_num;
+    auto* srv = session->get_server();
+    state->provider = srv->m_shardRouter ? srv->m_shardRouter->get_storage(0) : nullptr;
 
-        response += "* " + std::to_string(seq) + " FETCH (";
-        if (want_uid) {
-            response += "UID " + std::to_string(mail_info.mail_id) + " ";
+    // 正文读取走 async：本地内联（行为与同步版一致），远程后端由装饰器
+    // 投递 worker —— 逐封 size/正文不再阻塞 io 线程；每封正文只读一次，
+    // header/body/BODYSTRUCTURE 兜底共用（旧路径最多读三次）。
+    fetch_drive(session, state);
+}
+
+// ---------- FETCH 续作链 ----------
+
+template <typename ConnectionType>
+struct TraditionalImapsFsm<ConnectionType>::FetchContext {
+    std::string tag;
+    std::vector<MailboxMailInfo> mails;
+    std::vector<std::pair<uint64_t, uint64_t>> ranges;
+    size_t range_idx = 0;
+    uint64_t cur_seq = 0;             // 0 = 待推进到下一封
+    std::string cur;                  // 当前邮件的响应片段
+    std::string response;
+    std::shared_ptr<storage::IStorageProvider> provider;
+    std::string cur_body_path;        // 供异步回调里的日志
+    bool struct_sidecar_hit = false;
+    MimePart struct_tree;
+
+    bool want_uid = false, want_flags = false, want_internaldate = false;
+    bool want_rfc822_size = false, want_envelope = false;
+    bool want_body = false, want_body_header = false, want_body_struct = false;
+    bool has_header_fields = false, header_fields_not = false;
+    std::string header_fields_filter;
+    int body_part_num = 0;
+
+    // 推进游标到下一封待处理的邮件；false = 全部完成
+    bool advance() {
+        for (;;) {
+            if (cur_seq == 0) {
+                if (range_idx >= ranges.size()) return false;
+                cur_seq = ranges[range_idx].first;
+            }
+            if (cur_seq > ranges[range_idx].second || cur_seq > mails.size()) {
+                ++range_idx;
+                cur_seq = 0;
+                continue;
+            }
+            return true;
         }
-        if (want_flags) {
+    }
+};
+
+// 无 provider 时的本地兜底（与原 read_mail_body 的 ifstream 分支一致）
+static std::string fetch_read_local_body(const std::string& body_path) {
+    if (body_path.empty()) return "";
+    std::ifstream in(body_path, std::ios::binary);
+    if (!in.is_open()) {
+        LOG_FILE_IO_ERROR("Failed to open mail body: {}", body_path);
+        return "";
+    }
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// 用已就绪的正文完成当前邮件剩余 item（纯数据推进，不触碰 session）
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::fetch_complete_mail_with_body(
+    FetchContext& c, std::string body_content)
+{
+    const auto& mail_info = c.mails[c.cur_seq - 1];
+
+    if (c.want_body_header) {
+        std::string headers = body_content;
+        size_t hdr_end = body_content.find("\r\n\r\n");
+        if (hdr_end != std::string::npos)
+            headers = body_content.substr(0, hdr_end + 2);
+
+        std::string label = "BODY[HEADER]";
+        if (c.has_header_fields && !c.header_fields_filter.empty()) {
+            std::set<std::string> wanted;
+            {
+                std::istringstream fs(c.header_fields_filter);
+                std::string f;
+                while (fs >> f) {
+                    std::transform(f.begin(), f.end(), f.begin(), ::tolower);
+                    wanted.insert(f);
+                }
+            }
+            std::string filtered;
+            std::istringstream hs(headers);
+            std::string line;
+            while (std::getline(hs, line)) {
+                if (line.empty() || line == "\r") break;
+                if (line.back() == '\r') line.pop_back();
+                size_t colon = line.find(':');
+                if (colon != std::string::npos) {
+                    std::string hdr_name = line.substr(0, colon);
+                    std::transform(hdr_name.begin(), hdr_name.end(), hdr_name.begin(), ::tolower);
+                    bool match = wanted.count(hdr_name) > 0;
+                    if (c.header_fields_not) match = !match;
+                    if (match) filtered += line + "\r\n";
+                }
+            }
+            if (!filtered.empty() && filtered.size() >= 2)
+                filtered.resize(filtered.size() - 2);
+            headers = filtered;
+            label = c.header_fields_not ? "BODY[HEADER.FIELDS.NOT (" : "BODY[HEADER.FIELDS (";
+            label += c.header_fields_filter + ")]";
+        }
+        c.cur += label + " " + build_fetch_body_response(headers, headers.size()) + " ";
+    }
+    if (c.want_body) {
+        if (c.body_part_num > 0) {
+            MimePart mime_tree;
+            if (ensure_mime_tree(mail_info.body_path, body_content, mime_tree)) {
+                const MimePart* part = nullptr;
+                if (mime_tree.is_multipart() && (size_t)c.body_part_num <= mime_tree.subs.size())
+                    part = &mime_tree.subs[c.body_part_num - 1];
+                else if (!mime_tree.is_multipart() && c.body_part_num == 1)
+                    part = &mime_tree;
+                if (part)
+                    body_content = extract_part_content(body_content, *part);
+                else
+                    body_content.clear();
+            } else {
+                body_content.clear();
+            }
+        }
+        std::string body_label = c.body_part_num > 0 ? ("BODY[" + std::to_string(c.body_part_num) + "]") : "BODY[]";
+        c.cur += body_label + " " + build_fetch_body_response(body_content, body_content.size()) + " ";
+    }
+    if (c.want_body_struct) {
+        if (c.struct_sidecar_hit) {
+            c.cur += "BODYSTRUCTURE " + build_bodystructure_tree(c.struct_tree) + " ";
+        } else if (ensure_mime_tree(mail_info.body_path, body_content, c.struct_tree)) {
+            c.cur += "BODYSTRUCTURE " + build_bodystructure_tree(c.struct_tree) + " ";
+        } else {
+            c.cur += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
+        }
+    }
+
+    if (!c.cur.empty() && c.cur.back() == ' ') c.cur.pop_back();
+    c.cur += ")\r\n";
+    c.response += c.cur;
+    c.cur.clear();
+    ++c.cur_seq;
+}
+
+// size 之后的阶段：envelope（内存）→ 决定是否读正文 → 完成本封。
+// 返回 true 表示已发起异步读取（调用方应立即返回，链在回调里续）。
+template <typename ConnectionType>
+bool TraditionalImapsFsm<ConnectionType>::fetch_after_size(
+    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<FetchContext> ctx)
+{
+    const auto& mail_info = ctx->mails[ctx->cur_seq - 1];
+
+    if (ctx->want_envelope) {
+        std::string date_str;
+        {
+            struct tm result;
+            memset(&result, 0, sizeof(result));
+            time_t t = mail_info.send_time;
+#ifdef _WIN32
+            gmtime_s(&result, &t);
+#else
+            gmtime_r(&t, &result);
+#endif
+            static const char* months[] = {
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+            };
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%02d-%s-%04d",
+                     result.tm_mday, months[result.tm_mon],
+                     result.tm_year + 1900);
+            date_str = buf;
+        }
+        ctx->cur += "ENVELOPE " + build_envelope_string(
+            date_str, mail_info.subject, mail_info.sender, mail_info.sender,
+            "", mail_info.recipient, "", "", "",
+            std::to_string(mail_info.mail_id)) + " ";
+    }
+
+    // BODYSTRUCTURE 先试 sidecar（本地小文件，同步读即可）
+    ctx->struct_sidecar_hit = false;
+    if (ctx->want_body_struct) {
+        ctx->struct_sidecar_hit = load_mime_tree(mail_info.body_path, ctx->struct_tree);
+    }
+    const bool need_body = !mail_info.body_path.empty() &&
+        (ctx->want_body_header || ctx->want_body ||
+         (ctx->want_body_struct && !ctx->struct_sidecar_hit));
+
+    if (need_body && ctx->provider) {
+        session->set_paused(true);
+        ctx->cur_body_path = mail_info.body_path;
+        auto provider = ctx->provider;
+        provider->async_read_all(mail_info.body_path,
+            [session, ctx](bool ok, std::string data, const storage::IoError& error) {
+                if (!ok) {
+                    LOG_FILE_IO_ERROR("Failed to read mail body {}: {}",
+                                      ctx->cur_body_path, error.message);
+                    data.clear();
+                }
+                fetch_complete_mail_with_body(*ctx, std::move(data));
+                fetch_drive(session, ctx);   // 异步链续入下一封
+            });
+        return true;
+    }
+    std::string body = need_body ? fetch_read_local_body(mail_info.body_path) : std::string();
+    fetch_complete_mail_with_body(*ctx, std::move(body));
+    return false;
+}
+
+// 驱动器：同步路径在循环里逐封完成（不递归，万封 FETCH 也不爆栈），
+// 异步路径发起后返回，链在回调里续入。
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::fetch_drive(
+    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<FetchContext> ctx)
+{
+    for (;;) {
+        if (!ctx->advance()) {
+            fetch_finalize(session, ctx);
+            return;
+        }
+        const auto& mail_info = ctx->mails[ctx->cur_seq - 1];
+
+        ctx->cur = "* " + std::to_string(ctx->cur_seq) + " FETCH (";
+        if (ctx->want_uid) {
+            ctx->cur += "UID " + std::to_string(mail_info.mail_id) + " ";
+        }
+        if (ctx->want_flags) {
             std::string flags = build_flags_string(
-                mail_info.status,
-                mail_info.is_starred,
-                mail_info.is_deleted,
-                mail_info.is_important);
-            response += "FLAGS (" + flags + ") ";
+                mail_info.status, mail_info.is_starred,
+                mail_info.is_deleted, mail_info.is_important);
+            ctx->cur += "FLAGS (" + flags + ") ";
         }
-        if (want_internaldate) {
-            response += "INTERNALDATE \"" + imap_timestamp(mail_info.send_time) + "\" ";
+        if (ctx->want_internaldate) {
+            ctx->cur += "INTERNALDATE \"" + imap_timestamp(mail_info.send_time) + "\" ";
         }
-        if (want_rfc822_size) {
-            // 走 provider 的 object_size：本地后端覆写成一次 stat（O(1)，不读正文），
-            // 远程后端有自己的实现。不要在这里直接 filesystem::file_size —— body_path
-            // 对 S3/HDFS 是远程 key，不是本地路径。
+        if (ctx->want_rfc822_size) {
+            if (!mail_info.body_path.empty() && ctx->provider) {
+                session->set_paused(true);
+                ctx->cur_body_path = mail_info.body_path;
+                auto provider = ctx->provider;
+                provider->async_object_size(mail_info.body_path,
+                    [session, ctx](bool ok, std::uint64_t sz, const storage::IoError& error) {
+                        if (!ok) {
+                            LOG_FILE_IO_ERROR("RFC822.SIZE lookup failed for {}: {}",
+                                              ctx->cur_body_path, error.message);
+                            sz = 0;
+                        }
+                        ctx->cur += "RFC822.SIZE " + std::to_string(sz) + " ";
+                        if (fetch_after_size(session, ctx)) return;
+                        fetch_drive(session, ctx);   // size 异步但正文不需要/本地兜底
+                    });
+                return;
+            }
             std::uint64_t sz = 0;
             if (!mail_info.body_path.empty()) {
-                auto provider = this->get_storage(0);
-                storage::IoError size_err;
-                if (provider) {
-                    if (!provider->object_size(mail_info.body_path, sz, size_err)) {
-                        LOG_FILE_IO_ERROR("RFC822.SIZE lookup failed for {}: {}",
-                                          mail_info.body_path, size_err.message);
-                        sz = 0;
-                    }
-                } else {
-                    std::error_code ec;
-                    const auto fsz = std::filesystem::file_size(mail_info.body_path, ec);
-                    sz = ec ? 0 : static_cast<std::uint64_t>(fsz);
-                }
+                std::error_code ec;
+                const auto fsz = std::filesystem::file_size(mail_info.body_path, ec);
+                sz = ec ? 0 : static_cast<std::uint64_t>(fsz);
             }
-            response += "RFC822.SIZE " + std::to_string(sz) + " ";
+            ctx->cur += "RFC822.SIZE " + std::to_string(sz) + " ";
         }
-        if (want_envelope) {
-            // Get sender/recipients
-            std::string sender = mail_info.sender;
-            std::string to = mail_info.recipient;
-            std::string date_str;
-            {
-                // Generate envelope date per RFC 3501: "DD-Mon-YYYY"
-                struct tm result;
-                memset(&result, 0, sizeof(result));
-                time_t t = mail_info.send_time;
-#ifdef _WIN32
-                gmtime_s(&result, &t);
-#else
-                gmtime_r(&t, &result);
-#endif
-                static const char* months[] = {
-                    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-                };
-                char buf[32];
-                snprintf(buf, sizeof(buf), "%02d-%s-%04d",
-                         result.tm_mday, months[result.tm_mon],
-                         result.tm_year + 1900);
-                date_str = buf;
-            }
-            std::string envelope = build_envelope_string(
-                date_str,
-                mail_info.subject,
-                sender,
-                sender,
-                "", // reply-to
-                to,
-                "", // cc
-                "", // bcc
-                "", // in-reply-to
-                std::to_string(mail_info.mail_id) // message-id
-            );
-            response += "ENVELOPE " + envelope + " ";
-        }
-        if (want_body_header) {
-            std::string body_content = this->read_mail_body(mail_info.body_path);
-            // Extract headers (everything before \r\n\r\n)
-            std::string headers = body_content;
-            size_t hdr_end = body_content.find("\r\n\r\n");
-            if (hdr_end != std::string::npos)
-                headers = body_content.substr(0, hdr_end + 2); // include trailing \r\n
-
-            std::string label = "BODY[HEADER]";
-            if (has_header_fields && !header_fields_filter.empty()) {
-                // Filter to only the requested header fields
-                std::set<std::string> wanted;
-                {
-                    std::istringstream fs(header_fields_filter);
-                    std::string f;
-                    while (fs >> f) {
-                        std::transform(f.begin(), f.end(), f.begin(), ::tolower);
-                        wanted.insert(f);
-                    }
-                }
-                std::string filtered;
-                std::istringstream hs(headers);
-                std::string line;
-                while (std::getline(hs, line)) {
-                    if (line.empty() || line == "\r") break;
-                    if (line.back() == '\r') line.pop_back();
-                    size_t colon = line.find(':');
-                    if (colon != std::string::npos) {
-                        std::string hdr_name = line.substr(0, colon);
-                        std::transform(hdr_name.begin(), hdr_name.end(), hdr_name.begin(), ::tolower);
-                        bool match = wanted.count(hdr_name) > 0;
-                        if (header_fields_not) match = !match;
-                        if (match) filtered += line + "\r\n";
-                    }
-                }
-                if (!filtered.empty() && filtered.size() >= 2)
-                    filtered.resize(filtered.size() - 2);
-                headers = filtered;
-                label = header_fields_not ? "BODY[HEADER.FIELDS.NOT (" : "BODY[HEADER.FIELDS (";
-                label += header_fields_filter + ")]";
-            }
-            response += label + " " + build_fetch_body_response(headers, headers.size()) + " ";
-        }
-        if (want_body) {
-            std::string body_content = this->read_mail_body(mail_info.body_path);
-            if (want_body_part && body_part_num > 0) {
-                // 提取第 body_part_num 个 MIME part 的正文：
-                // 跳过该 part 自己的 header，并按 Content-Transfer-Encoding 解码
-                // 无 sidecar 的旧邮件/大邮件会在此现场解析并回写，下次 FETCH 直接命中
-                MimePart mime_tree;
-                if (ensure_mime_tree(mail_info.body_path, body_content, mime_tree)) {
-                    const MimePart* part = nullptr;
-                    if (mime_tree.is_multipart() && (size_t)body_part_num <= mime_tree.subs.size())
-                        part = &mime_tree.subs[body_part_num - 1];
-                    else if (!mime_tree.is_multipart() && body_part_num == 1)
-                        part = &mime_tree;
-                    if (part)
-                        body_content = extract_part_content(body_content, *part);
-                    else
-                        body_content.clear(); // 无效 section
-                } else {
-                    body_content.clear();
-                }
-            }
-            std::string body_label = want_body_part ? ("BODY[" + std::to_string(body_part_num) + "]") : "BODY[]";
-            response += body_label + " " + build_fetch_body_response(body_content, body_content.size()) + " ";
-        }
-        if (want_body_struct) {
-            MimePart mime_tree;
-            if (load_mime_tree(mail_info.body_path, mime_tree)) {
-                response += "BODYSTRUCTURE " + build_bodystructure_tree(mime_tree) + " ";
-            } else {
-                // 无 sidecar：读回原文解析一次并回写，后续 FETCH 不再重复解析
-                std::string body_content = this->read_mail_body(mail_info.body_path);
-                if (ensure_mime_tree(mail_info.body_path, body_content, mime_tree)) {
-                    response += "BODYSTRUCTURE " + build_bodystructure_tree(mime_tree) + " ";
-                } else {
-                    response += "BODYSTRUCTURE " + build_bodystructure(body_content) + " ";
-                }
-            }
-        }
-        // Remove trailing space
-        if (response.back() == ' ') response.pop_back();
-        response += ")\r\n";
+        if (fetch_after_size(session, ctx)) return;   // 正文读取异步中
+        // 同步完成本封 → 循环处理下一封
     }
-    } // for each range
+}
 
-    response += tag + " OK FETCH completed\r\n";
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::fetch_finalize(
+    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<FetchContext> ctx)
+{
+    std::string response = std::move(ctx->response);
+    response += ctx->tag + " OK FETCH completed\r\n";
 
     session->do_async_write(response,
         [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) {
-            if (!ec) s->do_async_read();
+            if (ec) return;
+            // 异步链期间流水线被 pause：先排空缓冲，再视情况续读
+            s->drain_buffered_commands();
+            if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
         });
 }
 
@@ -2874,38 +2983,6 @@ std::string TraditionalImapsFsm<ConnectionType>::decode_imap_utf7(const std::str
         }
     }
     return result;
-}
-
-template <typename ConnectionType>
-std::string TraditionalImapsFsm<ConnectionType>::read_mail_body(const std::string& body_path)
-{
-    if (body_path.empty()) {
-        return "";
-    }
-
-    // 走 provider：body_path 对 S3/HDFS 是远程 key，直接 ifstream 会失败。
-    // 这里返回的是调用方可以随意改的 std::string（FETCH 响应要在其上做切片、
-    // 拼接），所以用 read_all 而不是只读的 open_read。
-    auto provider = this->get_storage(0);
-    if (provider) {
-        std::string content;
-        storage::IoError error;
-        if (!provider->read_all(body_path, content, error)) {
-            LOG_FILE_IO_ERROR("Failed to read mail body {}: {}", body_path, error.message);
-            return "";
-        }
-        return content;
-    }
-
-    // 未配置 provider 时的本地兜底
-    std::ifstream in(body_path, std::ios::binary);
-    if (!in.is_open()) {
-        LOG_FILE_IO_ERROR("Failed to open mail body: {}", body_path);
-        return "";
-    }
-    std::string content((std::istreambuf_iterator<char>(in)),
-                        std::istreambuf_iterator<char>());
-    return content;
 }
 
 template <typename ConnectionType>

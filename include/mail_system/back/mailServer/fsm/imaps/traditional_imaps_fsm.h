@@ -184,7 +184,6 @@ public:
     static std::string decode_imap_utf7(const std::string& imap7);
 
     // 从存储读取邮件内容
-    std::string read_mail_body(const std::string& body_path);
 
     // 缓存感知的邮箱统计
     MailboxCacheEntry get_mailbox_stats_cached(
@@ -265,6 +264,21 @@ private:
     void handle_status(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_fetch(std::shared_ptr<SessionBase<ConnectionType>> session,
                       bool is_uid = false);
+
+    // FETCH 的续作链状态与驱动器（定义在 .tpp）。读取走 provider 的
+    // async 接口：本地内联，远程后端由装饰器投递到 worker —— 逐封
+    // size/正文读取不再阻塞 io 线程。static：回调里无 this。
+    struct FetchContext;
+    static void fetch_drive(std::shared_ptr<SessionBase<ConnectionType>> session,
+                            std::shared_ptr<FetchContext> ctx);
+    // 返回 true = 已发起异步读取，链在回调里续入
+    static bool fetch_after_size(std::shared_ptr<SessionBase<ConnectionType>> session,
+                                 std::shared_ptr<FetchContext> ctx);
+    // 用已就绪的正文完成当前邮件剩余 item（纯数据推进，不触碰 session）
+    static void fetch_complete_mail_with_body(FetchContext& ctx,
+                                              std::string body_content);
+    static void fetch_finalize(std::shared_ptr<SessionBase<ConnectionType>> session,
+                               std::shared_ptr<FetchContext> ctx);
     void handle_store(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_expunge(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_close(std::shared_ptr<SessionBase<ConnectionType>> session);

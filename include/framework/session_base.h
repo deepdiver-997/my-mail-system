@@ -181,7 +181,9 @@ protected:
     std::string command_read_buffer_;
     std::string pending_write_buf_;
     mutable std::string client_address_;
-    bool closed_ = false;
+    // 跨线程访问：io 线程在读写错误路径 close() 写；SPF/DNS/存储等异步
+    // 回调线程在续作入口读（pause 独占约定覆盖不到这个标志本身）。
+    std::atomic<bool> closed_{false};
     std::atomic<bool> paused_{false};
     bool session_authenticated_ = false;
     int  auth_attempt_count_ = 0;

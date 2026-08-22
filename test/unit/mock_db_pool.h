@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <string>
 #include <utility>
 #include <vector>
@@ -59,6 +60,9 @@ class MockDbConnection : public pr::IDBConnection {
 public:
     MockDbConnection() { connected_ = true; }
 
+    std::queue<std::shared_ptr<pr::IDBResult>> sync_results_;
+    mutable std::mutex q_mu_;
+
     void set_deferred(bool v) {
         std::lock_guard<std::mutex> lk(mu_);
         deferred_ = v;
@@ -91,6 +95,16 @@ public:
         return last_sql_;
     }
 
+    // 注意：query() 会在 async_query_impl 持有 mu_ 的情况下被调用，
+    // 因此结果队列必须用独立的锁，否则非递归互斥量重锁直接死锁。
+    std::shared_ptr<pr::IDBResult> pop_sync_result() {
+        std::lock_guard<std::mutex> lk(q_mu_);
+        if (sync_results_.empty()) return std::make_shared<MockDbResult>();
+        auto r = std::move(sync_results_.front());
+        sync_results_.pop();
+        return r;
+    }
+
     void fire_query(std::shared_ptr<pr::IDBResult> result) {
         pr::QueryCallback cb;
         {
@@ -120,12 +134,19 @@ public:
 
     std::shared_ptr<pr::IDBResult> query(const std::string& sql) override {
         (void)sql;
-        return std::make_shared<MockDbResult>();
+        return pop_sync_result();
     }
     std::shared_ptr<pr::IDBResult> query(const std::string& sql,
                                          const std::vector<std::string>& params) override {
         (void)sql; (void)params;
-        return std::make_shared<MockDbResult>();
+        return pop_sync_result();
+    }
+
+    // 同步模式下的可编程结果队列：query() 逐个弹出（空则空结果）。
+    // 供同步 DB 路径（如 IMAP get_mailbox_mails 的 sq 桥）注入行数据。
+    void push_sync_result(std::shared_ptr<pr::IDBResult> r) {
+        std::lock_guard<std::mutex> lk(q_mu_);
+        sync_results_.push(std::move(r));
     }
     bool execute(const std::string& sql) override { (void)sql; return true; }
     bool execute(const std::string& sql,

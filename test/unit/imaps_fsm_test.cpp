@@ -1,6 +1,8 @@
 // IMAP FSM 单元测试 — MockConnection 零 I/O 验证状态转换和响应码
 #undef NDEBUG
 #include <cassert>
+#include <fstream>
+#include <filesystem>
 #include <cstdlib>
 #include "mail_system/back/mailServer/imaps_server.h"
 #include "mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.tpp"
@@ -12,6 +14,8 @@
 #include "mail_system/back/router/static_shard_router.h"
 #include "mail_system/back/common/logger.h"
 #include "mock_connection.h"
+#include "mock_db_pool.h"
+#include "mail_system/back/storage/local_file_storage_provider.h"
 
 #include <iostream>
 #include <memory>
@@ -233,6 +237,71 @@ TEST(uid_fetch_no_db) {
     fx.fsm->process_event(h.session, ImapEvent::UID, "A001");
     auto w = h.conn->written();
     std::cout << "  [PASS] uid_fetch_no_db response=[" << w.substr(0, 80) << "]" << std::endl;
+}
+
+// ========== 全路径 FETCH（续作链 + 存储读取） ==========
+TEST(fetch_full_path_with_storage) {
+    // 覆盖重写后的续作链：mock DB 提供邮件行 + LocalFileStorageProvider
+    // 提供正文；本地 provider 的 async_* 内联执行，响应应同步产出。
+    // 断言 size/正文/BODY 字面量/tagged OK —— 这是 FETCH 热路径的形状。
+    auto io = std::make_shared<IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto db = std::make_shared<test::MockDbPool>();
+    db->mock_conn()->set_deferred(false);   // 同步模式：sq 桥立即拿到注入的行
+    namespace st = mail_system::storage;
+    std::filesystem::create_directories("/tmp/imaps_fetch_test");
+    auto storage = std::make_shared<st::LocalFileStorageProvider>(
+        "/tmp/imaps_fetch_test/", "/tmp/imaps_fetch_test/");
+    auto router2 = std::make_shared<router::StaticShardRouter>(
+        std::vector<std::pair<std::string, int>>{},
+        0,
+        std::vector<std::shared_ptr<DBPool>>{db},
+        std::vector<std::shared_ptr<st::IStorageProvider>>{storage});
+
+    ServerConfig cfg2;
+    cfg2.perf_mode = true; cfg2.apply_perf_mode();
+    cfg2.use_database = false; cfg2.system_domain = "test.local";
+    cfg2.storage.local.mail_path = "/tmp/imaps_fsm_test_mail2";
+    cfg2.storage.local.attachment_path = "/tmp/imaps_fsm_test_att2";
+    auto server2 = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router2));
+    auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
+
+    const std::string body = "Subject: hello\r\n\r\nworld body 123";
+    const std::string body_path = "/tmp/imaps_fetch_test/mail_42";
+    { std::ofstream f(body_path, std::ios::binary); f << body; }
+
+    db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{
+            {"id", "42"}, {"sender", "a@t.local"}, {"recipient", "b@t.local"},
+            {"subject", "hi"}, {"body_path", body_path},
+            {"is_starred", "0"}, {"is_deleted", "0"}, {"is_important", "0"},
+            {"status", "1"}, {"send_time", "1700000000"}}}));
+
+    auto conn_u = std::make_unique<MockConnection>();
+    auto* conn_ptr = conn_u.get();
+    auto session = std::make_shared<ImapsSession<MockConnection>>(
+        server2.get(), std::move(conn_u), fsm2);
+    auto* c = static_cast<ImapContext*>(session->get_context());
+    c->is_authenticated = true;
+    c->user_id = 1;
+    c->mailbox_selected = true;
+    c->selected_mailbox_id = 1;
+    c->current_tag = "A001";
+    session->set_current_state(static_cast<int>(ImapState::SELECTED));
+
+    // 走真实解析+分发路径：handle_read 解析 tag/cmd/args，process_read 派发 FSM
+    session->handle_read("A001 FETCH 1 (FLAGS RFC822.SIZE BODY[])\r\n");
+    session->process_read();
+
+    auto w = conn_ptr->written();
+    assert(w.find("RFC822.SIZE " + std::to_string(body.size())) != std::string::npos);
+    assert(w.find("BODY[] {" + std::to_string(body.size()) + "}") != std::string::npos);
+    assert(w.find("world body 123") != std::string::npos);
+    assert(w.find("A001 OK FETCH completed") != std::string::npos);
+
+    std::filesystem::remove_all("/tmp/imaps_fetch_test");
+    io->stop(); wk->stop();
+    std::cout << "  [PASS] fetch_full_path_with_storage" << std::endl;
 }
 
 // ========== 命令顺序错误 ==========
@@ -609,6 +678,7 @@ int main() {
 
         // ── UID FETCH crash repro ──
         test_uid_fetch_no_db(fx);
+        test_fetch_full_path_with_storage(fx);
 
         // ── 命令错误 ──
         test_invalid_command_in_state(fx);
