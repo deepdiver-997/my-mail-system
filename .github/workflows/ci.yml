@@ -104,3 +104,26 @@ jobs:
 
       - name: Run unit tests (ASan+UBSan)
         run: ctest --test-dir build-asan --output-on-failure
+
+  # ---- 覆盖率（gcc + lcov，HTML 报告上传为 artifact）----
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libspdlog-dev libc-ares-dev \
+                                  libmysqlclient-dev libboost-dev \
+                                  libboost-system-dev libboost-thread-dev \
+                                  nlohmann-json3-dev libcurl4-openssl-dev lcov
+
+      - name: Coverage (build + run + report)
+        run: bash test/scripts/coverage.sh --ci
+
+      - name: Upload coverage HTML
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: build-cov/html

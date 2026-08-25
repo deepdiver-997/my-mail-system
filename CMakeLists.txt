@@ -25,6 +25,7 @@ option(BUILD_TESTS "Build test and benchmark targets" ON)
 option(ENABLE_FUZZING "Build libFuzzer harnesses, e.g. mime_fuzz (clang only)" OFF)
 option(ENABLE_TSAN "Build FSM test targets with ThreadSanitizer (-fsanitize=thread -g -O1)" OFF)
 option(ENABLE_ASAN "Build unit test targets with AddressSanitizer+UBSan (-fsanitize=address,undefined -g -O1)" OFF)
+option(ENABLE_COVERAGE "Build with coverage instrumentation (clang llvm-cov / gcc lcov)" OFF)
 
 # ===== Feature flags — 必须始终定义为 0/1（help_text.cpp 等 #if 使用）=====
 if(USE_SSL)
@@ -85,6 +86,22 @@ endif()
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     add_compile_options(-fdiagnostics-color=auto)
+endif()
+
+# ===== 覆盖率 =====
+# ENABLE_COVERAGE=ON 时打桩。clang 系产出 .profraw（llvm-profdata/llvm-cov 分析），
+# gcc 产出 .gcda（lcov/genhtml 分析）。脚本见 test/scripts/coverage.sh。
+# 用 flags 而非 add_link_options（后者要求 CMake 3.13+，本项目最低 3.10）。
+if(ENABLE_COVERAGE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang")
+        set(CMAKE_CXX_FLAGS   "${CMAKE_CXX_FLAGS} -fprofile-instr-generate -fcoverage-mapping -g -O0")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-instr-generate")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+        set(CMAKE_CXX_FLAGS   "${CMAKE_CXX_FLAGS} --coverage -g -O0")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+    else()
+        message(WARNING "ENABLE_COVERAGE unsupported for compiler ${CMAKE_CXX_COMPILER_ID}")
+    endif()
 endif()
 
 # ===== 日志级别 =====
@@ -420,6 +437,46 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(async_storage_provider_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(async_storage_provider_test)
 
+    # ---- framework 层单元测试 ----
+    # 纯逻辑 / 文件 IO / 线程池：只依赖 framework 头 + 对应 .cpp
+    add_executable(intrusion_detector_test test/unit/intrusion_detector_test.cpp)
+    target_include_directories(intrusion_detector_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(intrusion_detector_test)
+
+    add_executable(server_config_test test/unit/server_config_test.cpp)
+    target_include_directories(server_config_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(server_config_test)
+
+    add_executable(mapped_file_test test/unit/mapped_file_test.cpp)
+    target_include_directories(mapped_file_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(mapped_file_test)
+
+    add_executable(thread_pool_test
+        src/framework/thread_pool/io_thread_pool.cpp
+        src/framework/thread_pool/boost_thread_pool.cpp
+        test/unit/thread_pool_test.cpp
+    )
+    target_include_directories(thread_pool_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(thread_pool_test)
+
+    # 会话/FSM/服务基座：TestSession::close() 引用 ServerBase 成员符号
+    # （server_base.cpp），须链 COMMON_SRCS（同 smtps/imaps_fsm_test 模式）
+    add_executable(fsm_base_test ${COMMON_SRCS} test/unit/fsm_base_test.cpp)
+    target_include_directories(fsm_base_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(fsm_base_test)
+
+    add_executable(fast_fsm_base_test ${COMMON_SRCS} test/unit/fast_fsm_base_test.cpp)
+    target_include_directories(fast_fsm_base_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(fast_fsm_base_test)
+
+    add_executable(session_base_test ${COMMON_SRCS} test/unit/session_base_test.cpp)
+    target_include_directories(session_base_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(session_base_test)
+
+    add_executable(server_base_test ${COMMON_SRCS} test/unit/server_base_test.cpp)
+    target_include_directories(server_base_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(server_base_test)
+
     add_executable(fsm_bench
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/smtps/smtps_server.cpp
@@ -487,6 +544,14 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME buffered_upload_stream_test COMMAND buffered_upload_stream_test)
     add_test(NAME io_error_test COMMAND io_error_test)
     add_test(NAME async_storage_provider_test COMMAND async_storage_provider_test)
+    add_test(NAME fsm_base_test COMMAND fsm_base_test)
+    add_test(NAME fast_fsm_base_test COMMAND fast_fsm_base_test)
+    add_test(NAME intrusion_detector_test COMMAND intrusion_detector_test)
+    add_test(NAME server_config_test COMMAND server_config_test)
+    add_test(NAME mapped_file_test COMMAND mapped_file_test)
+    add_test(NAME thread_pool_test COMMAND thread_pool_test)
+    add_test(NAME session_base_test COMMAND session_base_test)
+    add_test(NAME server_base_test COMMAND server_base_test)
 
     # 聚合 target：新增单测只需在上面 add_executable/add_test，
     # CI 与本地都构建这一个 target，避免测试清单漂移（此前 CI 的
@@ -503,6 +568,14 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         buffered_upload_stream_test
         io_error_test
         async_storage_provider_test
+        fsm_base_test
+        fast_fsm_base_test
+        intrusion_detector_test
+        server_config_test
+        mapped_file_test
+        thread_pool_test
+        session_base_test
+        server_base_test
     )
     # ASan 对全部单测生效：string_view 越界索引不一定 segfault，
     # 没有地址消毒的模糊测试发现不了这类堆/栈越界
@@ -510,7 +583,9 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         set(_asan_tests smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
             mail_body_writer_test buffered_upload_stream_test io_error_test
-            async_storage_provider_test)
+            async_storage_provider_test fsm_base_test fast_fsm_base_test
+            intrusion_detector_test server_config_test mapped_file_test
+            thread_pool_test session_base_test server_base_test)
         foreach(_t IN LISTS _asan_tests)
             # vptr 排除：它给多态向下转型插 typeinfo 引用，跨翻译单元链接不了
             target_compile_options(${_t} PRIVATE -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)

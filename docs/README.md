@@ -25,12 +25,20 @@ docs/
 │   ├── 2026-08-01-smtp-imap-deploy-fixes.md
 │   ├── imap-cpu-busyloop-fix.md       # IMAP CPU 忙等修复
 │   └── prepared-statement-connection-pool-issue.md  # DB 连接池修复
+├── reports/                           # 测试覆盖率报告（量化成果）
+│   └── coverage-YYYY-MM-DD.md         # 由 test/scripts/coverage.sh 生成
 └── style/                             # 规范与总结
     ├── PROJECT_STYLE.md               # 项目编码规范
     └── dev-summary.md                 # 开发总结
 ```
 
 新 bugfix 文档按 `YYYY-MM-DD-简短描述.md` 格式命名。
+
+## 测试覆盖率报告
+
+`test/scripts/coverage.sh` 一键测量单测的源码行覆盖率，生成 `docs/reports/coverage-<日期>.md`
+（模块汇总 + framework 层逐文件 + 最低覆盖 Top15）与 `build-cov/html/`（HTML 详情）。
+CI 的 coverage job 也会产出并上传 HTML artifact。
 
 ## 一次性任务文档
 

@@ -4,6 +4,7 @@ build/
 build-tsan/
 build-fuzz/
 build-asan/
+build-cov/
 
 # libFuzzer 运行时往语料目录写入的生成样本（纯十六进制文件名）；
 # 提交的种子与回归样本都以 .eml 结尾

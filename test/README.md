@@ -15,6 +15,15 @@ test/
 │   ├── buffered_upload_stream_test.cpp # 远程后端整对象缓冲上传流测试
 │   ├── io_error_test.cpp        # IoError 错误分类测试（errno/HTTP → retryable/permanent）
 │   ├── async_storage_provider_test.cpp # 远程后端真异步装饰器测试
+│   ├── fsm_base_test.cpp        # FsmBase 分发语义（terminal/非法转换/缺 handler）
+│   ├── fast_fsm_base_test.cpp   # FastFsmBase O(1) 分发 + fallback 优先级
+│   ├── intrusion_detector_test.cpp # 入侵检测（私网过滤/封禁阈值/LRU/持久化）
+│   ├── server_config_test.cpp   # pr::ServerConfig JSON 加载/校验/listener 工具
+│   ├── mapped_file_test.cpp     # MappedFile/MappedReadStream mmap 只读映射
+│   ├── thread_pool_test.cpp     # BoostThreadPool submit/post + IOThreadPool get_io_context
+│   ├── server_base_test.cpp     # ServerBase 生命周期/计数/入侵集成/reload_config
+│   ├── session_base_test.cpp    # SessionBase 读写/pause-drain/缓冲上限/trace/错误码
+│   ├── test_session.h           # 最小 TestSession（SessionBase<MockConnection> 具体化）
 │   ├── mock_io_context.h        # 简化 asio io_context（任务队列+线程）
 │   ├── mock_connection.h        # 零 I/O Mock 连接（任务投递模型）
 │   ├── mock_dns_resolver.h      # Mock DNS（Sync/Manual/AutoDelay 三模式）
