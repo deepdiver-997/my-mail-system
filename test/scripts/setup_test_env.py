@@ -146,7 +146,10 @@ def setup():
 
     # 2. 拷贝资源
     print("[COPY]")
-    for src_sub, dst_sub in [("crt", "crt"), ("dkim", "dkim"), ("sql", "sql_init")]:
+    # sql/ → sql/ （db_config.json 期望的 initialize_script 路径）
+    # sql/ → sql_init/ （旧路径，保留兼容）
+    for src_sub, dst_sub in [("crt", "crt"), ("dkim", "dkim"),
+                              ("sql", "sql"), ("sql", "sql_init")]:
         src = os.path.join(PROJECT_DIR, "config", src_sub)
         dst = os.path.join(CONFIG_DIR, dst_sub)
         if copy_dir(src, dst):
@@ -179,7 +182,7 @@ def setup():
         f.write("#!/bin/bash\nset -e\n")
         f.write("# 清理测试环境\n")
         f.write(f'rm -rf "{TMP_ROOT}"\n')
-        f.write(f'rm -rf "{CONFIG_DIR}/crt" "{CONFIG_DIR}/dkim" "{CONFIG_DIR}/sql_init"\n')
+        f.write(f'rm -rf "{CONFIG_DIR}/crt" "{CONFIG_DIR}/dkim" "{CONFIG_DIR}/sql_init" "{CONFIG_DIR}/sql"\n')
         f.write(f'rm -f "{CONFIG_DIR}/create_tables.sql"\n')
         f.write(f'rm -f "{CONFIG_DIR}/smtps_mock.json" "{CONFIG_DIR}/smtps_real.json"\n')
         f.write(f'rm -f "{CONFIG_DIR}/imaps_mock.json" "{CONFIG_DIR}/imaps_real.json"\n')

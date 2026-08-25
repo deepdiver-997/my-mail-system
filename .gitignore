@@ -1,3 +1,6 @@
+# CTest 误生成的临时目录（不是 test/）
+Testing/
+
 # ==================== 编译产物 ====================
 # CMake 构建目录
 build/
@@ -150,6 +153,7 @@ $RECYCLE.BIN/
 # 测试环境（由 setup_test_env.py 生成）
 test/config/crt/
 test/config/dkim/
+test/config/sql/
 test/config/sql_init/
 test/config/create_tables.sql
 test/config/db_config.json

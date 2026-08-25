@@ -250,6 +250,7 @@ private:
     // ── claim 回调：修正水位 + 分发 + 续拉 / 退避重试 ────────
     void on_claim_complete(std::vector<OutboxRecord> records) {
         int pulled = static_cast<int>(records.size());
+        LOG_SMTP_INFO("Outbound: on_claim_complete pulled={}", pulled);
 
         // 修正预占水位（只会少不会多，over >= 0）
         int over = DEFAULT_BATCH_SIZE - pulled;
@@ -288,6 +289,8 @@ private:
             int target_port = resolve_port(domain);
             // target_host: static_routes 命中时是 IP/host（跳过 DNS），否则是 domain
             std::string target_host = resolve_target_host(domain);
+            LOG_SMTP_INFO("Outbound: dispatching mail_id={} recipient={} target_host={} port={}",
+                          rec.mail_id, rec.recipient, target_host, target_port);
             auto session = acquire_session(target_host, target_port);
             if (session) session->submit(std::move(task));
         }

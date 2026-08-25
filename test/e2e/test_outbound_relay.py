@@ -118,6 +118,90 @@ def kill_pg(proc):
         pass
 
 
+# ── /etc/hosts 注入：让测试和生产共享同一份 cfg 模板 ─────────
+# 思路：e2e 启动时往 /etc/hosts 注入 b.local→127.0.0.1，结束时撤掉。
+# 这样 outbound.static_routes[b.local] 可以写真实域名（生产配置风格），
+# 不需要 hardcode IP（否则 prod / test 走两套 binary）。
+# /etc/hosts 写需要 sudo；如果没 sudo 就 skip（test 在能 sudo 的环境跑）。
+HOSTS_FILE = '/etc/hosts'
+HOSTS_MARKER_BEGIN = '# >>> protorelay-e2e test injection (b.local) >>>'
+HOSTS_MARKER_END   = '# <<< protorelay-e2e test injection (b.local) <<<'
+HOSTS_INJECT_LINE  = f'127.0.0.1\tb.local\t{HOSTS_MARKER_BEGIN}'
+
+def _read_hosts():
+    with open(HOSTS_FILE) as f:
+        return f.read()
+
+def _write_hosts(content):
+    # 原子写：先写临时再 rename（避免写到一半失败）
+    tmp = HOSTS_FILE + '.protorelay-e2e.tmp'
+    with open(tmp, 'w') as f:
+        f.write(content)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, HOSTS_FILE)
+
+def setup_local_dns():
+    """注入 b.local→127.0.0.1 到 /etc/hosts。需要 sudo，失败就 raise。"""
+    try:
+        original = _read_hosts()
+    except PermissionError as e:
+        raise RuntimeError(
+            f"读 {HOSTS_FILE} 没权限，e2e 需要 sudo。run: sudo -E python3 ..."
+        ) from e
+    if HOSTS_MARKER_BEGIN in original:
+        # 之前注入残留（异常退出没清掉）
+        print("  [dns] 旧 marker 残留，先清再注")
+        original = _remove_injection(original)
+    new = (
+        original.rstrip('\n') + '\n'
+        + HOSTS_INJECT_LINE + '\n'
+        + HOSTS_MARKER_END + '\n'
+    )
+    # 直接写（已经是 root 才能 import 不到的话）
+    try:
+        _write_hosts(new)
+    except PermissionError as e:
+        raise RuntimeError(
+            f"写 {HOSTS_FILE} 没权限，e2e 需要 sudo。"
+        ) from e
+    # 验证
+    import socket as _s
+    real = _s.gethostbyname('b.local')
+    if real != '127.0.0.1':
+        raise RuntimeError(f"/etc/hosts 注入后 b.local 仍解析为 {real!r}")
+    print(f"  [dns] 注入 b.local→127.0.0.1 OK")
+
+def _remove_injection(content):
+    """删掉 marker 之间的注入行。"""
+    lines = content.split('\n')
+    out, in_block = [], False
+    for line in lines:
+        if HOSTS_MARKER_BEGIN in line:
+            in_block = True
+            continue
+        if HOSTS_MARKER_END in line:
+            in_block = False
+            continue
+        if not in_block:
+            out.append(line)
+    return '\n'.join(out)
+
+def teardown_local_dns():
+    """从 /etc/hosts 撤掉注入。失败只 warn，不 raise（e2e 一定要清干净）。"""
+    try:
+        original = _read_hosts()
+    except (PermissionError, FileNotFoundError):
+        return
+    if HOSTS_MARKER_BEGIN not in original:
+        return
+    new = _remove_injection(original)
+    try:
+        _write_hosts(new)
+        print(f"  [dns] 撤掉 b.local→127.0.0.1 注入 OK")
+    except PermissionError:
+        print(f"  [WARN] 撤注入失败，留下了 marker。请手动编辑 {HOSTS_FILE}")
+
+
 def load_config(template, proj_root, listeners, system_domain, outbound_cfg,
                  use_database, mail_path, db_config_path):
     """基于生产模板构造一份 smtpsServer 配置。"""
@@ -189,6 +273,9 @@ def start_server(server_bin, cfg, proj_root):
         cwd=proj_root,
         stdout=stdout_f, stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
+        # E2E 模式：强制 server log 每条 info 立即 flush（默认只在 warn 才 flush，
+        # 导致 30s wait_for 期间 Python 端读不到 Outbound: dispatching 日志）。
+        env={**os.environ, 'PR_E2E_FLUSH_LOGS': '1'},
     )
     # 把 stdout_f 句柄挂在 proc 上，避免被 GC 关掉
     proc._stdout_f = stdout_f
@@ -210,6 +297,9 @@ def main():
     parser.add_argument('--config', default=CONFIG_TEMPLATE)
     parser.add_argument('--keep-temp', action='store_true',
                         help='保留临时 config 目录（调试用）')
+    parser.add_argument('--inject-dns', action='store_true',
+                        help='opt-in: 通过 /etc/hosts 注入 b.local→127.0.0.1（需 sudo）'
+                             '。默认不启用：static_routes 仍写 127.0.0.1 跑通。')
     args = parser.parse_args()
 
     proj_root = os.path.normpath(
@@ -232,33 +322,38 @@ def main():
         print("  -> run: python3 test/scripts/setup_test_env.py")
         return 2
 
-    # db_config.json 的 initialize_script 路径 (sql/create_tables.sql) 需要该文件存在
-    # setup_test_env.py 把 SQL 复制到 test/config/sql_init/，我们手动创建 test/config/sql/
-    # 链接，让 MySQL pool init 时能找到（即使表已 LOAD 完）。
-
     # 临时 mail_path（A=null 模式无；B 真实写盘）
     work_root = tempfile.mkdtemp(prefix='outbound_relay_e2e_')
     a_mail_dir = os.path.join(work_root, 'a_mail')   # 不会被写
     b_mail_dir = os.path.join(work_root, 'b_mail')
 
-    # 自动建测试用户（如果 DB 已就绪）
-    try:
-        import subprocess
-        with open(db_cfg_path) as f:
-            db_cfg = json.load(f)
-        mysql_args = [
-            'mysql', '-h', db_cfg.get('host', 'localhost'),
-            '-P', str(db_cfg.get('port', 3306)),
-            '-u', db_cfg.get('user', 'root'),
-            f'-p{db_cfg.get("password", "")}',
-            db_cfg.get('database', 'mail'),
-            '-e',
-            f"INSERT IGNORE INTO users (mail_address, password, name) VALUES "
-            f"('{SMTP_AUTH_USER}', '{SMTP_AUTH_PASSWORD}', 'e2e relay test');",
-        ]
-        subprocess.run(mysql_args, check=False, capture_output=True, timeout=10)
-    except Exception as e:
-        print(f"  [warn] failed to auto-insert test user: {e}")
+    # 加载 e2e 种子数据（alice + bob + alice INBOX）— e2e 自带 SQL
+    # 替代之前的 inline INSERT IGNORE hack；失败 warn 不 fail
+    e2e_seed_sql = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), 'sql', 'e2e_seed.sql')
+    if not os.path.exists(e2e_seed_sql):
+        print(f"  [warn] e2e_seed.sql not found: {e2e_seed_sql}")
+    else:
+        try:
+            with open(db_cfg_path) as f:
+                db_cfg = json.load(f)
+            mysql_args = [
+                'mysql', '-h', db_cfg.get('host', 'localhost'),
+                '-P', str(db_cfg.get('port', 3306)),
+                '-u', db_cfg.get('user', 'root'),
+                f'-p{db_cfg.get("password", "")}',
+                db_cfg.get('database', 'mail'),
+            ]
+            with open(e2e_seed_sql) as f:
+                sql_text = f.read()
+            r = subprocess.run(mysql_args, input=sql_text, capture_output=True,
+                               timeout=10, text=True)
+            if r.returncode == 0:
+                print(f"  [seed] e2e_seed.sql loaded OK")
+            else:
+                print(f"  [warn] e2e_seed.sql load failed: {r.stderr[:200]}")
+        except Exception as e:
+            print(f"  [warn] failed to load e2e_seed.sql: {e}")
 
     passed = []
     failed = []
@@ -266,11 +361,31 @@ def main():
 
     proc_a = proc_b = None
     tmpdir_a = tmpdir_b = None
+    dns_injected = False
 
     try:
+        # ── DNS 注入（opt-in）：让 b.local 解析到 127.0.0.1（生产/test 共享 cfg） ──
+        # 默认不改 /etc/hosts（避免 system-wide 副作用）；传 --inject-dns 时启
+        # 用并要求 sudo（程序会自己检查，失败就 return 1）。
+        if args.inject_dns:
+            try:
+                setup_local_dns()
+                dns_injected = True
+            except RuntimeError as e:
+                print(f"\n[setup] /etc/hosts 注入失败: {e}")
+                print("  e2e 必须能修改 /etc/hosts（用 sudo 重跑）")
+                return 1
         # ── A 配置：DB on, storage=local (必需!null storage 会让 PQ 写 body 失败) ──
         # A 的 mail_dir 仍会收到 alice@a.local 自己的副本（这是 SMTP 标准行为）；
         # 本测试不验证 A 的 mail_dir 状态，只关注 OutboundServer 拉到 outbox + 尝试连 B。
+        # static_routes 的 host:
+        #   - 默认 ('127.0.0.1'): 走 IP 直连，简单可靠（生产/test 共用 binary）
+        #   - --inject-dns (B_DOMAIN): 走真实域名，要求 /etc/hosts 把 b.local 解析到
+        #     127.0.0.1（生产配置风格；用户显式 opt-in 启用，避免 system-wide 副作用）
+        if args.inject_dns:
+            static_route_host = B_DOMAIN
+        else:
+            static_route_host = '127.0.0.1'
         cfg_a = load_config(
             args.config, proj_root,
             listeners=[{'type': 'tcp', 'port': A_PORT, 'auth_policy': 'on'}],
@@ -282,7 +397,7 @@ def main():
                 'max_attempts': 3,
                 'ports': [B_PORT],   # 兜底：static_routes 不命中时用
                 'static_routes': {
-                    B_DOMAIN: {'host': '127.0.0.1', 'port': B_PORT},
+                    B_DOMAIN: {'host': static_route_host, 'port': B_PORT},
                 },
                 'dkim': {'enabled': False},
             },
@@ -411,6 +526,25 @@ def main():
             passed.append("A's PersistentQueue received mail (post-auth DATA ok)")
         else:
             failed.append("A's PersistentQueue never received mail")
+
+        # ── 等 OutboundServer 真正调度到 session（验证 static_routes + on_claim_complete 路径） ──
+        # PQ 写 outbox 是 async，所以 claim 也要等几百毫秒。30s timeout。
+        def a_outbound_dispatched():
+            try:
+                with open(log_a) as f:
+                    body = f.read()
+                    return ('Outbound: dispatching' in body or
+                            'Outbound: connect to' in body or
+                            'Outbound: connected to' in body)
+            except OSError:
+                return False
+        print(f"\n[wait] A logs to show 'Outbound: dispatching ... target_host=...' ...")
+        if wait_for(a_outbound_dispatched, timeout=30, poll=0.2):
+            passed.append("A's OutboundServer dispatched mail to a session (static_routes resolved)")
+        else:
+            failed.append(
+                "A's OutboundServer never logged dispatching — claim_async 路径或 "
+                "on_claim_complete 分发卡住了")
 
         # ── 验证 B 端 SMTP banner + listening（接收方正常） ──
         os.makedirs(b_mail_dir, exist_ok=True)

@@ -105,7 +105,18 @@ public:
 
             spdlog::set_default_logger(m_loggers[static_cast<size_t>(LogModule::SERVER)]);
             spdlog::set_level(level);
-            spdlog::flush_on(spdlog::level::warn);
+            // E2E 测试模式（PR_E2E_FLUSH_LOGS=1）强制每条 info 立即 flush，
+            // 让 Python 进程能实时读到 server.log。否则 spdlog 默认只在
+            // warn/error 触发 flush，30s 等待期内写入会留在 buffer。
+            // 注意：spdlog::set_default_logger 只影响 spdlog::info() 静态 API，
+            // 真正的写入路径走 m_loggers[mod.name] 实例，每个 logger 需单独 flush_on。
+            const char* e2e_env = std::getenv("PR_E2E_FLUSH_LOGS");
+            const auto flush_level = (e2e_env && std::string(e2e_env) == "1")
+                ? spdlog::level::info : spdlog::level::warn;
+            for (auto& lg : m_loggers) {
+                if (lg) lg->flush_on(flush_level);
+            }
+            spdlog::flush_on(flush_level);
             m_initialized = true;
             spdlog::info("Logger initialized");
         } catch (const spdlog::spdlog_ex& ex) {
