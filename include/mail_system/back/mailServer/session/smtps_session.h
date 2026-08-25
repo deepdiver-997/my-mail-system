@@ -6,7 +6,6 @@
 #include "framework/connection/ssl_connection.h"
 #include "framework/session_base.h"
 #include "mail_system/back/entities/mail.h"
-#include "mail_system/back/entities/usr.h"
 #include "mail_system/back/mailServer/fsm/smtps/smtps_types.hpp"
 #include "mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
@@ -64,7 +63,6 @@ public:
     // ── Mail 实体管理（已从 SessionBase 下放到此）──────────────
     mail* get_mail() { return mail_.get(); }
     std::unique_ptr<mail> get_mail_ptr() { return std::move(mail_); }
-    usr* get_usr() { return usr_.get(); }
 
     void create_mail_on_data_command();
     persist_storage::SubmitOwnedMailResult submit_mail_to_queue();
@@ -122,7 +120,6 @@ private:
     persist_storage::PersistSubmissionTicket pending_submission_;
 
     std::unique_ptr<mail> mail_;
-    std::unique_ptr<usr> usr_;
 };
 
 using TcpSmtpsSession = SmtpsSession<TcpConnection>;

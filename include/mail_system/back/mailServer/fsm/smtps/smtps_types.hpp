@@ -92,46 +92,6 @@ struct SmtpsContext {
     std::string dkim_result;                   // DKIM 验证结果
     std::string dmarc_result;                  // DMARC 验证结果
     int shard_index = 0;                       // 由 shard router 在认证时分配
-
-    void clear() {
-        is_authenticated = false;
-        client_username.clear();
-        sender_address.clear();
-        recipient_addresses.clear();
-        mail_data.clear();
-        parsed_subject.clear();
-        source_message_id.clear();
-        header_parsed = false;
-        streaming_enabled = false;
-        multipart = false;
-        has_attachment = false;
-        text_body_size = 0;
-        buffered_body_size = 0;
-        body_limit_exceeded = false;
-        abort_reason.clear();
-        boundary.clear();
-        header_buffer.clear();
-        line_buffer.clear();
-        text_body_buffer.clear();
-        current_part_headers.clear();
-        in_part_header = false;
-        current_part_is_attachment = false;
-        current_part_encoding.clear();
-        current_part_mime.clear();
-        current_attachment_filename.clear();
-        current_attachment_path.clear();
-        base64_remainder.clear();
-        current_attachment_size = 0;
-        streamed_attachments.clear();
-        ehlo_domain.clear();
-        is_trusted_server = false;
-        auth_results_header.clear();
-        verification_run = false;
-        spf_checked = false;
-        spf_result.clear();
-        spf_reason.clear();
-        shard_index = 0;
-    }
 };
 
 } // namespace mail_system

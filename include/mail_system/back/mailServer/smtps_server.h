@@ -20,9 +20,6 @@ public:
          std::shared_ptr<DBPool> dbPool = nullptr);
     virtual ~SmtpsServer() override;
 
-    std::shared_ptr<TraditionalSmtpsFsm<TcpConnection>> get_tcp_fsm() const { return m_tcp_fsm; }
-    std::shared_ptr<TraditionalSmtpsFsm<SslConnection>> get_ssl_fsm() const { return m_ssl_fsm; }
-
 protected:
     void stop(ServerState state = ServerState::Pausing) override;
     bool should_reject_connection(std::string& reason, const std::string& client_ip = "") const override;
