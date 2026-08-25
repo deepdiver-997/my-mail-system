@@ -31,6 +31,7 @@ public:
                   ReloadHandler reload_handler = nullptr,
                   RefreshProvider refresh = nullptr)
         : io_ctx_(io_ctx), acceptor_(io_ctx_), port_(port)
+        , bound_port_(0)
         , bind_address_(bind_address), reload_handler_(std::move(reload_handler))
         , refresh_provider_(std::move(refresh)), running_(false) {}
 
@@ -38,6 +39,10 @@ public:
 
     MetricsServer(const MetricsServer&) = delete;
     MetricsServer& operator=(const MetricsServer&) = delete;
+
+    // 返回实际绑定的端口（start 之后）。port=0 时由 OS 分配，调用方从
+    // bound_port() 读到真实端口（方便测试用 port=0 + 读 bound_port 避端口冲突）。
+    uint16_t bound_port() const { return bound_port_; }
 
     // ── 指标注入接口 (线程安全) ──────────────────────────────────
 
@@ -67,6 +72,10 @@ public:
 
     // ── HTTP 服务 ───────────────────────────────────────────────
 
+    // 公开的渲染接口：复用 build_metrics() 内部逻辑（refresh + 锁 + Prometheus 格式）。
+    // 生产用 HTTP /metrics；测试用本方法不启 HTTP 端点就能验证 push 的数据真到内部 map。
+    std::string scrape_text() { return build_metrics(); }
+
     void start() {
         if (running_.exchange(true)) return;
         boost::asio::ip::tcp::endpoint ep(
@@ -74,6 +83,8 @@ public:
         acceptor_.open(ep.protocol());
         acceptor_.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
         acceptor_.bind(ep);
+        // bind 后读 OS 实际分配的端口（port=0 时才有意义；非 0 时 = port_）
+        bound_port_ = acceptor_.local_endpoint().port();
         acceptor_.listen();
         do_accept();
     }
@@ -241,6 +252,7 @@ private:
     boost::asio::io_context& io_ctx_;
     boost::asio::ip::tcp::acceptor acceptor_;
     uint16_t port_;
+    uint16_t bound_port_;   // start() 后从 acceptor_.local_endpoint() 读出
     std::string bind_address_;
     ReloadHandler reload_handler_;
     RefreshProvider refresh_provider_;
