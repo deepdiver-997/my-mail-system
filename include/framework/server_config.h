@@ -4,10 +4,12 @@
 #include "framework/server_config_base.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/db_pool.h"
+#include "mail_system/back/outbound/outbound_config.h"
 #include "mail_system/back/storage/storage_config.h"
 #include <nlohmann/json.hpp>
 #include <string>
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace mail_system {
@@ -193,6 +195,9 @@ struct ServerConfig : public pr::ServerConfig {
     std::string outbound_dkim_domain;
     std::string outbound_dkim_private_key_file;
 
+    // 静态路由：domain → { host, port }，跳过 DNS 直接连
+    std::unordered_map<std::string, outbound::OutboundConfig::StaticRoute> outbound_static_routes;
+
     bool metrics_enabled;
     uint16_t metrics_port;
     std::string metrics_bind_address;
@@ -354,6 +359,42 @@ struct ServerConfig : public pr::ServerConfig {
         outbound_poll_backoff_base_ms= j.value("outbound_poll_backoff_base_ms", outbound_poll_backoff_base_ms);
         outbound_poll_backoff_max_ms = j.value("outbound_poll_backoff_max_ms", outbound_poll_backoff_max_ms);
         outbound_poll_backoff_shift_cap= j.value("outbound_poll_backoff_shift_cap", outbound_poll_backoff_shift_cap);
+
+        // 嵌套 outbound { ... } 块（实际配置文件如 config/smtpsConfig.json 用此风格）
+        // 这里覆盖上面平铺字段并解析 static_routes（平铺字段没有对应物）。
+        if (j.contains("outbound") && j["outbound"].is_object()) {
+            auto& ob = j["outbound"];
+            outbound_helo_domain = ob.value("helo_domain", outbound_helo_domain);
+            outbound_mail_from_domain = ob.value("mail_from_domain", outbound_mail_from_domain);
+            outbound_rewrite_header_from = ob.value("rewrite_header_from", outbound_rewrite_header_from);
+            outbound_max_attempts = ob.value("max_attempts", outbound_max_attempts);
+            if (ob.contains("ports") && ob["ports"].is_array()) {
+                outbound_ports.clear();
+                for (auto& p : ob["ports"])
+                    if (p.is_number_unsigned() && p.get<uint32_t>() <= 65535)
+                        outbound_ports.push_back(static_cast<uint16_t>(p.get<uint32_t>()));
+            }
+            if (ob.contains("dkim") && ob["dkim"].is_object()) {
+                auto& d = ob["dkim"];
+                outbound_dkim_enabled = d.value("enabled", outbound_dkim_enabled);
+                outbound_dkim_selector = d.value("selector", outbound_dkim_selector);
+                outbound_dkim_domain   = d.value("domain", outbound_dkim_domain);
+                outbound_dkim_private_key_file = resolve_path(filename,
+                    d.value("private_key_file", outbound_dkim_private_key_file));
+            }
+            // static_routes: {"b.local": {"host": "127.0.0.1", "port": 10026}, ...}
+            if (ob.contains("static_routes") && ob["static_routes"].is_object()) {
+                outbound_static_routes.clear();
+                for (auto it = ob["static_routes"].begin();
+                     it != ob["static_routes"].end(); ++it) {
+                    if (!it.value().is_object()) continue;
+                    outbound::OutboundConfig::StaticRoute r;
+                    r.host = it.value().value("host", std::string());
+                    r.port = static_cast<uint16_t>(it.value().value("port", 25));
+                    if (!r.host.empty()) outbound_static_routes[it.key()] = r;
+                }
+            }
+        }
 
         inbound_ack_mode = inbound_ack_mode_from_string(
             j.value("inbound_ack_mode", std::string(inbound_ack_mode_to_string(inbound_ack_mode))));

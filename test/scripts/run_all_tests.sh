@@ -131,6 +131,7 @@ PY_TESTS=(
     "test/e2e/test_pipeline.py:SMTP pipeline"
     "test/e2e/test_tcp_sticky.py:TCP sticky/truncation"
     "test/e2e/test_outbound.py:Outbound delivery"
+    "test/e2e/test_outbound_relay.py:Outbound relay (process-level e2e, needs MySQL)"
 )
 
 for entry in "${PY_TESTS[@]}"; do

@@ -2,6 +2,7 @@
 #include "framework/connection/ssl_connection.h"
 #include "framework/connection/tcp_connection.h"
 #include "mail_system/back/outbound/cares_dns_resolver.h"
+#include "mail_system/back/outbound/outbound_config.h"
 #include "mail_system/back/common/logger.h"
 #include <iostream>
 #include <memory>
@@ -35,7 +36,26 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
             LOG_SERVER_INFO("PersistentQueue created for SMTP server");
         }
 
-        // 旧 SmtpOutboundClient 已移除，出站投递由 OutboundServer (m_outboundServer) 接管
+        // 新 outbound 引擎：DB 路径下默认启用，PQ 在 has_external_recipient
+        // 命中时会调 submit() 触发投递。
+        if (!m_outboundServer) {
+            m_outboundServer = std::make_shared<outbound::OutboundServer>(this);
+            // 把 server_config 平铺字段组装成 OutboundConfig（含 static_routes）
+            outbound::OutboundConfig ob_cfg;
+            ob_cfg.helo_domain = cfg->outbound_helo_domain;
+            ob_cfg.mail_from_domain = cfg->outbound_mail_from_domain;
+            ob_cfg.rewrite_header_from = cfg->outbound_rewrite_header_from;
+            ob_cfg.dkim_enabled = cfg->outbound_dkim_enabled;
+            ob_cfg.dkim_selector = cfg->outbound_dkim_selector;
+            ob_cfg.dkim_domain = cfg->outbound_dkim_domain;
+            ob_cfg.dkim_private_key_file = cfg->outbound_dkim_private_key_file;
+            ob_cfg.ports = cfg->outbound_ports;
+            ob_cfg.max_attempts = cfg->outbound_max_attempts;
+            ob_cfg.static_routes = std::move(cfg->outbound_static_routes);
+            m_outboundServer->set_config(std::move(ob_cfg));
+        }
+        m_persistentQueue->set_outbound_server(m_outboundServer);
+        LOG_SERVER_INFO("OutboundServer (new engine) wired into PersistentQueue");
     } else {
         LOG_SERVER_WARN("No database pool — SMTP outbound delivery disabled");
     }
@@ -45,7 +65,7 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
     m_ssl_fsm = std::make_shared<TraditionalSmtpsFsm<SslConnection>>(
         m_ioThreadPool, m_workerThreadPool, m_persistentQueue, m_shardRouter);
 
-    // 新 outbound 引擎（如果外部注入了）
+    // DB 路径下 m_outboundServer 已被 wire 到 PersistentQueue；启动它开始拉 outbox
     if (m_outboundServer) {
         m_outboundServer->start();
         LOG_SERVER_INFO("OutboundServer (new engine) started");

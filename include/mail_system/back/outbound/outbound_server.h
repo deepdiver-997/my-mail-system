@@ -100,12 +100,16 @@ public:
     }
 
     // ── 投递入口 ──────────────────────────────────────────────
-    void submit(std::unique_ptr<MailDeliveryTask> task, int port = 25) {
+    void submit(std::unique_ptr<MailDeliveryTask> task, int port = -1) {
         std::string domain = extract_domain(task->recipient);
         if (domain.empty()) return;
 
+        // 端口解析顺序：static_routes[domain] > ports[0] > 25
+        int target_port = (port > 0) ? port : resolve_port(domain);
+        // target_host: static_routes 命中时是 IP/host（跳过 DNS），否则是 domain
+        std::string target_host = resolve_target_host(domain);
         pending_count_.fetch_add(1);
-        auto session = acquire_session(domain, port);
+        auto session = acquire_session(target_host, target_port);
         if (session) {
             session->submit(std::move(task));
             try_pull();  // 事件驱动：新任务到达后检查是否需要拉取
@@ -198,7 +202,31 @@ public:
     }
     bool is_running() const { return running_.load(); }
 
+    // ── 配置注入 ──────────────────────────────────────────────
+    // 必须在 start() 之前调用。注入后 OutboundServer 持有副本，
+    // 不再依赖外层 server_config。default 构造给出合理兜底。
+    void set_config(OutboundConfig c) { config_ = std::move(c); }
+    const OutboundConfig& config() const { return config_; }
+
 private:
+    // 端口解析：static_routes[domain] > ports[0] > 25
+    int resolve_port(const std::string& domain) const {
+        auto it = config_.static_routes.find(domain);
+        if (it != config_.static_routes.end() && it->second.port > 0)
+            return it->second.port;
+        if (!config_.ports.empty()) return config_.ports[0];
+        return 25;
+    }
+
+    // 路由目标 host 解析：static_routes[domain] 命中则用静态 host（跳过 DNS）；
+    // 未命中返 domain 字符串（让 OutboundSmtpSession 走 DNS 解析）
+    std::string resolve_target_host(const std::string& domain) const {
+        auto it = config_.static_routes.find(domain);
+        if (it != config_.static_routes.end() && !it->second.host.empty())
+            return it->second.host;
+        return domain;
+    }
+
     using SessionPtr = std::shared_ptr<OutboundSmtpSession<TcpConnection>>;
     using SessionList = std::vector<SessionPtr>;
     using CompletionCb = OutboundSmtpSession<TcpConnection>::CompletionCb;
@@ -257,7 +285,10 @@ private:
 
             // 直接路由到 session，不通过 public submit() 避免重复计数
             std::string domain = extract_domain(task->recipient);
-            auto session = acquire_session(domain, 25);
+            int target_port = resolve_port(domain);
+            // target_host: static_routes 命中时是 IP/host（跳过 DNS），否则是 domain
+            std::string target_host = resolve_target_host(domain);
+            auto session = acquire_session(target_host, target_port);
             if (session) session->submit(std::move(task));
         }
 
@@ -349,6 +380,7 @@ private:
     std::string worker_id_;
     OutboxRepository repo_;
     CompletionCb completion_cb_;
+    OutboundConfig config_;   // set_config() 注入；submit() 派生 port 用
 
     std::atomic<int64_t> pending_count_{0};
     std::atomic<bool> is_pulling_{false};
