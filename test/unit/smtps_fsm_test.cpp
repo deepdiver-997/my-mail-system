@@ -264,6 +264,7 @@ TEST(full_delivery_pipeline) {
         "hello smtp fsm\r\n"
         ".\r\n"
         "QUIT\r\n");
+    size_t mails_accepted_before = fx.server->mails_accepted_total_.load();
     fx.start(h);
     auto w = h.conn->written();
     assert(HAS(w, "220 SMTPS Server"));
@@ -272,6 +273,16 @@ TEST(full_delivery_pipeline) {
     assert(HAS(w, "354 Start mail input"));
     assert(HAS(w, "250 "));         // message accepted (queue ID)
     assert(HAS(w, "221 Bye"));      // QUIT
+    // 剧情 invariant：AFTER_ENQUEUE 模式下 finish_data_end_after_read 走 submit_owned_mail
+    // → reset_mail_state → increment_mails_accepted。这是「FSM → 持久化」跨函数契约断言
+    // (不是协议层断言)。mails_accepted_total_ 单调递增，无竞争。
+    size_t mails_accepted_after = fx.server->mails_accepted_total_.load();
+    if (mails_accepted_after <= mails_accepted_before) {
+        std::cerr << "  [DEBUG] mails_accepted_before=" << mails_accepted_before
+                  << " after=" << mails_accepted_after << std::endl;
+    }
+    assert(mails_accepted_after > mails_accepted_before &&
+           "DATA END should have triggered submit_owned_mail + mails_accepted++");
     std::cout << "  [PASS] full_delivery_pipeline" << std::endl;
 }
 
@@ -605,6 +616,7 @@ TEST(multiple_transactions) {
         "body2\r\n"
         ".\r\n"
         "QUIT\r\n");
+    size_t mails_accepted_before = fx.server->mails_accepted_total_.load();
     fx.start(h);
     auto w = h.conn->written();
     // 应该有两次 250 OK (排队 ID)
@@ -612,6 +624,14 @@ TEST(multiple_transactions) {
     size_t pos = 0;
     while ((pos = w.find("250 ", pos)) != std::string::npos) { ++cnt; ++pos; }
     assert(cnt >= 3); // greeting + 2 queue-ID 接受
+    // 剧情 invariant：两封邮件 → 至少 2 次 submit_owned_mail → mails_accepted_total += 2
+    size_t mails_accepted_after = fx.server->mails_accepted_total_.load();
+    if (mails_accepted_after < mails_accepted_before + 2) {
+        std::cerr << "  [DEBUG] mails_accepted before=" << mails_accepted_before
+                  << " after=" << mails_accepted_after << std::endl;
+    }
+    assert(mails_accepted_after >= mails_accepted_before + 2 &&
+           "Two DATA END should have triggered 2 submit_owned_mail -> mails_accepted += 2");
     std::cout << "  [PASS] multiple_transactions (250 OK count=" << cnt << ")" << std::endl;
 }
 
@@ -711,7 +731,7 @@ int main() {
         test_mail_from_ok(fx);
         test_rcpt_to_ok(fx);
         test_data_354(fx);
-        // test_full_delivery_pipeline(fx);  // 已知: 需要 persist queue worker + DB
+        test_full_delivery_pipeline(fx);
         test_multiple_rcpt(fx);
         test_quit_221(fx);
         test_re_ehlo_in_wait_auth(fx);
@@ -743,11 +763,11 @@ int main() {
         test_rset_envelope_reset(fx);
 
         // ── 多事务 ──
-        // test_multiple_transactions(fx);  // 已知: 需要 persist queue
+        test_multiple_transactions(fx);   // 串两封邮件入队
 
         // ── DATA 边界条件 ──
-        // test_empty_body(fx);       // 已知: 需要 persist queue
-        // test_dot_stuffing(fx);     // 已知: 需要 persist queue
+        test_empty_body(fx);
+        test_dot_stuffing(fx);
         test_data_without_rcpt(fx);
 
         // ── Timeout/Error ──

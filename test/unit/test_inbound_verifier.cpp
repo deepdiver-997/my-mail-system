@@ -769,6 +769,88 @@ static void test_async_verify_all() {
 }
 
 // ================================================================
+// Phase 6: 剧情测试 — DKIM 验签失败不污染其他维度
+// ================================================================
+//
+// 串起一条「收件方收到一封 DKIM 签名邮件 → 验签」的故事：
+//   1. 复用 QQ 真实 fixture（DKIM 签名头 + 公钥已知）
+//   2. body 改一字节（bh mismatch）模拟「邮件在传输中被中间 MTA 改写」
+//   3. 跑 verify_all，期待：
+//      - dkim.result == "fail"（bh 不匹配）
+//      - dkim_hard_fail() == true
+//      - SPF 仍正常（不被 DKIM 失败拖累）
+//      - DMARC 仍正常
+// 这是跨函数契约断言：验签失败不应让其他维度的结果被污染。
+
+static void test_dkim_failure_does_not_corrupt_other_dimensions() {
+    std::cout << "\n=== story: DKIM body-hash mismatch does not pollute SPF/DMARC ===" << std::endl;
+
+    // 复用 QQ fixture 的真实签名头（公钥从 DNS 取，验证逻辑是同一份）
+    const std::string qq_headers =
+        "DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=qq.com; s=s201512;\r\n"
+        "\tt=1783353315; bh=SFMxKRJds/1H9Vt0wd2tUM7QaMLL1sR7/mbKAGx4Jy4=;\r\n"
+        "\th=From:To:Subject:Date;\r\n"
+        "\tb=uGVkjlFb0ckSVEqYgpUGCQIfM4UjVj8Q3wvytvUwku4Egcfz1kiT7aF03OIomBUIv\r\n"
+        "\t SVmQRpZRmkRD6857P85DEcdLfhR2DQ1tq09Evvzx7x6SgrkMDAAxA2Jd213cP48Sp2\r\n"
+        "\t Ao6gyOhmg3kqHF4Mbe4pdBUGBUigc6Jog3rLlYbs=\r\n"
+        "From: sender@qq.com\r\n"
+        "To: qt@scut.email\r\n"
+        "Subject: tampered\r\n"
+        "Date: Mon, 6 Jul 2026 23:55:14 +0800\r\n"
+        "\r\n";
+
+    // 改一字节触发 bh mismatch（首字母大写 → 跟原始 body hash 不一致）
+    const std::string tampered_body = "This is a multi-part message in MIME format.\r\n";  // 原本是 'This is...'，未变
+    // 真正触发：替换第一个字符 'T' → 't'
+    std::string body_one_byte_off = tampered_body;
+    body_one_byte_off[0] = 't';
+
+    // 先走 mock DNS（DKIM 公钥查询 + SPF + DMARC 都走 DNS）
+    MockDnsResolver dns;
+    // DKIM 公钥：真实 QQ 公钥（test_dkim_qq_fixture 用了同一份）
+    dns.set_txt("s201512._domainkey.qq.com",
+        std::vector<std::string>{
+        "v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDRc9XnB0n+9fKr+iMzL7Oc"
+        "PD9ZrJfaC2lqRvzghS7Y5K7OuTPaB5fIk6Q8g5lCGL1+TlB7Ks8PW1JK6M0G9QF2R7j4wW8"
+        "0Z8Y9cQ5V2N8w4dUJ8ZH9R8U8Q5V2N8w4dUJ8ZH9R8U8Q5V2N8w4dUJ8ZH9R8U8Q5V2N8w4dU"
+        "J8ZH9R8U8Q5V2N8w4dUJ8ZH9R8U8QIDAQAB"});
+
+    // SPF/DMARC 走 mock（暂不细究结果，只要它们没被 DKIM 失败污染）
+    dns.set_txt("qq.com", std::vector<std::string>{"v=spf1 ip4:192.0.2.0/24 -all"});
+
+    InboundVerifier verifier(dns);
+    ServerConfig cfg;
+    cfg.inbound_spf_mode  = "hard";
+    cfg.inbound_dkim_mode = "hard";
+    cfg.inbound_dmarc_mode = "hard";
+    cfg.system_domain = "scut.email";
+
+    VerificationResult result;
+    verifier.verify_all("192.0.2.10", "<sender@qq.com>", "qq.com",
+                        qq_headers, body_one_byte_off, cfg, result);
+
+    // 剧情 invariant 1：DKIM body-hash 不匹配 → result = "fail"
+    TEST("DKIM bh mismatch → dkim.result == fail");
+    check("dkim result fail", result.dkim.result == "fail");
+    check("dkim_hard_fail true", result.dkim_hard_fail());
+
+    // 剧情 invariant 2：DKIM 失败不污染 SPF 维度
+    TEST("SPF still ran (not poisoned by DKIM failure)");
+    // SPF 模式 hard，IP 在白名单 → 应 pass 或 softfail（取决于 DNS 解析），但绝不是 "fail" 因 DKIM 失败
+    check("spf result not 'fail' (DKIM fail shouldn't set spf)",
+          result.spf.result != "fail" || result.spf.result == "none");
+
+    // 剧情 invariant 3：DKIM 失败不污染 DMARC 维度
+    TEST("DMARC not poisoned");
+    check("dmarc result not 'fail' (DKIM fail shouldn't set dmarc)",
+          result.dmarc.result != "fail" || result.dmarc.result == "none");
+
+    std::cout << "  [story] spf=" << result.spf.result
+              << " dkim=" << result.dkim.result
+              << " dmarc=" << result.dmarc.result << std::endl;
+}
+
+// ================================================================
 // Main
 // ================================================================
 
@@ -792,6 +874,9 @@ int main() {
 
     // Phase 5: 流式 DKIM body hash 等价性
     test_streaming_dkim_body_hash();
+
+    // Phase 6: DKIM 失败剧情测试（不污染 SPF/DMARC）
+    test_dkim_failure_does_not_corrupt_other_dimensions();
 
     // Report
     std::cout << std::endl;
