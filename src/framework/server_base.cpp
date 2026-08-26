@@ -280,17 +280,21 @@ void ServerBase::decrement_connection_count() {
     active_connections_.fetch_sub(1, std::memory_order_relaxed);
     push_metric_gauge("protorelay_active_connections", {}, active_connections_.load());
 }
+// 2026-08-27 fix: 之前把 fetch_add 返回的累计值 v 当 delta 传给 inc_counter
+// （c.value += delta），结果 N 次调用后 counter map 累加 1+2+...+N = N*(N+1)/2
+// （三角形数），不是 N。inc_counter 语义是"additive delta"，应传 1。
+// 修法：fetch_add 后传 delta=1，保留 ServerBase 自己的 atomic 累计值供其他用途。
 void ServerBase::increment_connections_total() {
-    auto v = connections_total_.fetch_add(1, std::memory_order_relaxed) + 1;
-    push_metric_counter("protorelay_connections_total", {}, v);
+    connections_total_.fetch_add(1, std::memory_order_relaxed);
+    push_metric_counter("protorelay_connections_total", {}, 1);
 }
 void ServerBase::increment_connections_rejected() {
-    auto v = connections_rejected_total_.fetch_add(1, std::memory_order_relaxed) + 1;
-    push_metric_counter("protorelay_connections_rejected_total", {}, v);
+    connections_rejected_total_.fetch_add(1, std::memory_order_relaxed);
+    push_metric_counter("protorelay_connections_rejected_total", {}, 1);
 }
 void ServerBase::increment_mails_accepted() {
-    auto v = mails_accepted_total_.fetch_add(1, std::memory_order_relaxed) + 1;
-    push_metric_counter("protorelay_mails_accepted_total", {}, v);
+    mails_accepted_total_.fetch_add(1, std::memory_order_relaxed);
+    push_metric_counter("protorelay_mails_accepted_total", {}, 1);
 }
 
 void ServerBase::refresh_metrics() {
