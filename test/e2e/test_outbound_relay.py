@@ -326,8 +326,86 @@ def main():
 
     # 临时 mail_path（A=null 模式无；B 真实写盘）
     work_root = tempfile.mkdtemp(prefix='outbound_relay_e2e_')
+
+    # ── B 端独立 DB（避免共享 DB 的 Message-ID dedup 副作用）──────────
+    # A 和 B 共用 mail 库时，B 收到 A 投递的邮件会因 source_message_id 重复
+    # 命中 PersistentQueue::is_duplicate_by_source_message_id_async → 跳过
+    # 落盘（B log: "Message-ID dedup hit, skip persistence"）。A 自己接收时
+    # 也入 PQ，B 收到同一 Message-ID → dedup → 9/9 落盘断言失败。
+    # 修法：建独立 mail_b 库，用 create_tables_mail2.sql 改库名 + 写临时
+    # db_config_b.json 指向它；e2e 跑完删库（finally 块）。
+    B_DB_NAME = 'mail_b'
+    db_cfg_b_path = db_cfg_path   # 兜底
+    b_cfg_dir = None
+    try:
+        with open(db_cfg_path) as f:
+            db_cfg_template = json.load(f)
+        mysql_host = db_cfg_template.get('host', 'localhost')
+        mysql_port = db_cfg_template.get('port', 3306)
+        mysql_user = db_cfg_template.get('user', 'root')
+        mysql_pass = db_cfg_template.get('password', '')
+        mysql_admin_args = [
+            'mysql', '-h', mysql_host, '-P', str(mysql_port),
+            '-u', mysql_user, f'-p{mysql_pass}',
+        ]
+        # 1) CREATE DATABASE
+        r = subprocess.run(
+            mysql_admin_args + ['-e', f'CREATE DATABASE IF NOT EXISTS {B_DB_NAME} '
+                                     f'CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;'],
+            capture_output=True, timeout=10, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"CREATE DATABASE {B_DB_NAME} failed: {r.stderr[:200]}")
+        # 2) 用 create_tables_mail2.sql 模板替换库名 → 写临时 SQL → 跑表
+        sql_template = os.path.join(proj_root, 'test/config/sql/create_tables_mail2.sql')
+        if not os.path.exists(sql_template):
+            raise RuntimeError(f"missing {sql_template}")
+        with open(sql_template) as f:
+            sql_text = f.read()
+        sql_text = sql_text.replace('CREATE DATABASE IF NOT EXISTS mail2;',
+                                    f'CREATE DATABASE IF NOT EXISTS {B_DB_NAME};')
+        sql_text = sql_text.replace('USE mail2;', f'USE {B_DB_NAME};')
+        b_init_sql = os.path.join(work_root, 'init_b.sql')
+        with open(b_init_sql, 'w') as f:
+            f.write(sql_text)
+        r = subprocess.run(
+            mysql_admin_args + [B_DB_NAME], input=open(b_init_sql).read(),
+            capture_output=True, timeout=15, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"init {B_DB_NAME} tables failed: {r.stderr[:300]}")
+        # 3) seed bob 用户到 mail_b（B 端 PQ 的 mail_mailbox 关联需要）。
+        # mail_b 用 create_tables_mail2.sql schema：mailboxes 列名是 `name`（非 mailbox_name）。
+        b_seed_sql = (
+            f"USE {B_DB_NAME};\n"
+            "INSERT IGNORE INTO users (mail_address, password, name, register_time) "
+            "VALUES ('bob@b.local', 'e2e_password', 'e2e relay test recipient', NOW());\n"
+            "INSERT IGNORE INTO mailboxes (user_id, name, is_system, box_type, create_time) "
+            "SELECT id, 'INBOX', TRUE, 1, NOW() "
+            "FROM users WHERE mail_address='bob@b.local';\n"
+        )
+        r = subprocess.run(
+            mysql_admin_args + [B_DB_NAME], input=b_seed_sql,
+            capture_output=True, timeout=10, text=True)
+        if r.returncode != 0:
+            print(f"  [warn] seed {B_DB_NAME} bob user failed: {r.stderr[:200]}")
+        # 4) 写 db_config_b.json 指向 mail_b
+        #    initialize_script 改成绝对路径（db_config_b.json 放在 b_cfg_dir，
+        #    原相对路径 sql/create_tables.sql 找不到）。建表已用 mysql 命令完成，
+        #    这里再跑一次是幂等的（CREATE TABLE IF NOT EXISTS）。
+        b_cfg_dir = tempfile.mkdtemp(prefix='outbound_relay_b_cfg_')
+        db_cfg_b_path = os.path.join(b_cfg_dir, 'db_config.json')
+        b_cfg_data = {**db_cfg_template, 'database': B_DB_NAME}
+        b_cfg_data['initialize_script'] = os.path.join(
+            proj_root, 'test/config/sql/create_tables_mail2.sql')
+        with open(db_cfg_b_path, 'w') as f:
+            json.dump(b_cfg_data, f, indent=2)
+        print(f"  [setup] B 独立 DB '{B_DB_NAME}' ready, db_config={db_cfg_b_path}")
+    except Exception as e:
+        print(f"  [warn] B DB setup failed: {e}")
+        print(f"  回退：用 A 共享 DB（dedup 会让 9/9 落盘断言失败，但 8/8 仍 PASS）")
+
     a_mail_dir = os.path.join(work_root, 'a_mail')   # 不会被写
     b_mail_dir = os.path.join(work_root, 'b_mail')
+
 
     # 加载 e2e 种子数据（alice + bob + alice INBOX）— e2e 自带 SQL
     # 替代之前的 inline INSERT IGNORE hack；失败 warn 不 fail
@@ -420,7 +498,7 @@ def main():
             outbound_cfg=None,
             use_database=True,
             mail_path=b_mail_dir,
-            db_config_path=db_cfg_path,
+            db_config_path=db_cfg_b_path,
         )
 
         print(f"[setup] work_root = {work_root}")
@@ -549,37 +627,34 @@ def main():
                 "A's OutboundServer never logged dispatching — claim_async 路径或 "
                 "on_claim_complete 分发卡住了")
 
-        # ── 验证 B 端不落盘（已知 C++ 限制：9/9 落盘未达） ──
-        # 9/9 真落盘目标不可达，原因不在 B 端（auth_policy=off 已生效）：
-        #   1. A.OutboundSmtpSession.connect_to_mx 完成后直接派
-        #      OutboundSmtpEvent::CONNECTED，但 OutboundSmtpFsm.process_event
-        #      (outbound_smtp_fsm.h:19-21) 总是从 CONNECTED 状态 dispatch，
-        #      触发表里没有「CONNECTED + CONNECTED」→ on_invalid_transition
-        #      → session 立即 close，DATA 永远发不出去
-        #   2. 即便 FSM 修好，A/B 共用同一 MySQL DB，B.on_claim_complete 用
-        #      B 自己的 worker_id 也会 CAS 抢到 A 投递的 record；但 B 的
-        #      SmtpsServer 注入 OutboundServer 时 B 自己没有 outbound 转发场景
-        #      → B 的 config_.static_routes 为空，on_claim_complete 拿到 A
-        #      记录后会用 ports[0]=465 + b.local 拼装（DNS 不可解析 + 端口
-        #      B 也没监听），同样无法落盘
-        # 修法（独立 PR，超出本次 plan 范围）：
-        #   - FSM fix：connect_to_mx 先派 CONNECT（INIT→CONNECTING），
-        #     resolve 完派 CONNECTED（CONNECTING→CONNECTED）
-        #   - 共享 DB 测试拓扑：给 B 一个"消费但不再投递"的 outbound config
-        #     (consume_only=true 短路 on_claim_complete 的 dispatch)
-        #   - 或干脆给 A/B 各配独立 MySQL DB
-        # 当前保留 8/8 PASS 形式：listdir 看下，有就当 bonus（说明 A→B 通了）
-        os.makedirs(b_mail_dir, exist_ok=True)
-        b_files = [f for f in os.listdir(b_mail_dir)
-                   if os.path.isfile(os.path.join(b_mail_dir, f))]
-        if not b_files:
-            passed.append(
-                "B mail_dir empty (expected: A→B 真落盘因 FSM bug + 共享 DB "
-                "被 block；9/9 落盘目标留 TODO，见上方注释)")
+        # ── 9/9: B 端真落盘 + EML 头验证 ──
+        # FSM bug 已修：session 真用 current_state、parse_response 按 state 区分 250、
+        # connect_to_mx 派 CONNECT+CONNECTED 两阶段。详见 outbound_smtp_fsm.h:19-36
+        # 和 outbound_smtp_session.h:104-110/131-159/181-210/262-267。
+        print(f"\n[verify] Polling B mail_dir for landed EML (timeout 30s)...")
+        def is_eml(p):
+            n = os.path.basename(p)
+            return n.isdigit() and len(n) >= 18  # snowflake 64-bit 整数, 18-19 位
+        landed = wait_for_file(b_mail_dir, is_eml, timeout=30, poll=0.5)
+        if landed is None:
+            failed.append(
+                f"B mail_dir {b_mail_dir} empty after 30s "
+                f"(A→B 真投递未落盘；看 A log 'Outbound: mail ... accepted')")
         else:
-            # 真有文件是 bonus：说明 A→B 全链路通了
-            passed.append(
-                f"B has mail files: {len(b_files)} (bonus: A→B full delivery worked!)")
+            with open(landed, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+            has_subject = 'Subject:' in content
+            has_from    = f'From: {SMTP_SENDER}' in content
+            has_to      = f'To: {SMTP_RECIPIENT}' in content
+            if has_subject and has_from and has_to:
+                passed.append(
+                    f"B received mail landed at {landed} "
+                    f"({os.path.getsize(landed)} bytes; Subject/From/To all present)")
+            else:
+                failed.append(
+                    f"B landed EML {landed} missing headers: "
+                    f"subject={has_subject} from={has_from} to={has_to}; "
+                    f"first 200 bytes: {content[:200]!r}")
 
     finally:
         if proc_a: kill_pg(proc_a)
@@ -588,6 +663,21 @@ def main():
             shutil.rmtree(work_root, ignore_errors=True)
             if tmpdir_a: shutil.rmtree(tmpdir_a, ignore_errors=True)
             if tmpdir_b: shutil.rmtree(tmpdir_b, ignore_errors=True)
+            if b_cfg_dir: shutil.rmtree(b_cfg_dir, ignore_errors=True)
+            # 删 mail_b 库（避免污染；失败只 warn）
+            if db_cfg_b_path != db_cfg_path:
+                try:
+                    with open(db_cfg_path) as f:
+                        _db = json.load(f)
+                    subprocess.run(
+                        ['mysql', '-h', _db.get('host', 'localhost'),
+                         '-P', str(_db.get('port', 3306)),
+                         '-u', _db.get('user', 'root'),
+                         f"-p{_db.get('password', '')}",
+                         '-e', f'DROP DATABASE IF EXISTS {B_DB_NAME};'],
+                        capture_output=True, timeout=10, text=True)
+                except Exception:
+                    pass
         else:
             print(f"[keep] work_root = {work_root}")
             if tmpdir_a: print(f"[keep] A tmpdir = {tmpdir_a}")
