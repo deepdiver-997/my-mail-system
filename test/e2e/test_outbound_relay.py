@@ -406,13 +406,14 @@ def main():
             db_config_path=db_cfg_path,
         )
 
-        # ── B 配置：DB on, storage=local ──
-        # B 也开 auth_policy=on（与 A 一致）。A 的 OutboundSmtpSession 不发 AUTH，
-        # B 端 FSM 会拒外部域 relay。**这是已知 C++ 缺陷**——本测试不验证落盘，
-        # 只验证 A → B 的连接尝试真实发生（A 日志 + B 日志均有 127.0.0.1 连接记录）。
+        # ── B 配置：DB on, storage=local，auth_policy=off ──
+        # 关掉 auth 是因为 A 的 OutboundSmtpSession 不发 AUTH（RFC 5321 §3.1 可选），
+        # B 端启 AUTH 只会把 9/9 落盘断言变成 8/8 dispatching 验证。关闭后 B 收
+        # 任何 sender（含 alice@a.local）都直接进 RCPT。RCPT 域检查仍走
+        # system_domain 比对（b.local == B.system_domain，不会被拒 relay）。
         cfg_b = load_config(
             args.config, proj_root,
-            listeners=[{'type': 'tcp', 'port': B_PORT, 'auth_policy': 'on'}],
+            listeners=[{'type': 'tcp', 'port': B_PORT, 'auth_policy': 'off'}],
             system_domain=B_DOMAIN,
             outbound_cfg=None,
             use_database=True,
