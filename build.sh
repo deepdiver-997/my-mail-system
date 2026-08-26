@@ -74,31 +74,32 @@ fi
 
 # 使用方法
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 [--pure-log] <Debug|Release|SafeRelease> [clean] [jobs] [object-only] [cross-x64] [no-tests] [serial]"
+    echo "Usage: $0 [--pure-log] <Debug|Release|SafeRelease> [clean] [jobs] [object-only] [cross-x64] [no-tests]"
     echo "       $0 sync-sysroot [server]"
+    echo ""
+    echo "Note: build 永远 per-target 串行（lib → exe → test）+ 单 target 内并行（默认 -j 4）"
+    echo "      防止 16GB 机器上 30+ target 全并行 OOM；数字参数 <jobs> = per-target 并行度"
     echo ""
     echo "Examples:"
     echo "  $0 Debug           # 构建 Debug 版本（无优化，启用所有调试日志）"
     echo "  $0 Release         # 构建 Release 版本（高优化，仅 INFO 级别日志）"
     echo "  $0 --pure-log Release  # 日志压缩模式：LOG_* → LOG_PURE(hash, args, ts)"
-    echo "  $0 SafeRelease     # 低内存兜底构建（2核2G服务器推荐）"
+    echo "  $0 SafeRelease     # 低内存兜底构建（2核2G服务器推荐，-j 1/target）"
     echo "  $0 Debug clean     # 清理后重新构建 Debug 版本"
     echo "  $0 Release clean   # 清理后重新构建 Release 版本"
-    echo "  $0 Release clean 1 # 单线程构建（低内存服务器推荐）"
-    echo "  $0 SafeRelease clean"
+    echo "  $0 Release 1       # per-target -j 1（极低内存服务器）"
+    echo "  $0 Release 8       # per-target -j 8（32GB+ 推荐）"
     echo "  $0 Release clean 1 object-only   # 仅编译 .o，不做最终链接"
     echo "  $0 Debug object-only             # 快速验证编译（需头文件，不强制链接库）"
     echo "  $0 Release cross-x64             # 交叉编译到 Linux x86_64（自动处理 sysroot）"
     echo "  $0 Release no-tests              # 跳过 test/bench 目标（重构时有用）"
-    echo "  $0 Release serial                # per-target 串行 + 单 target -j 4（防 16GB OOM）"
-    echo "  $0 Release serial 8              # 同上但单 target -j 8（32GB 推荐）"
     echo "  $0 sync-sysroot                  # 从服务器同步 spdlog/fmt 头文件到本地 sysroot"
     echo ""
     echo "Env override: BUILD_JOBS=<n>, EXTRA_CMAKE_ARGS='<...>'"
     echo "              ARTIFACT_DIR=<path>, CROSS_CC=<path>, CROSS_CXX=<path>"
     echo "              USE_BOOST_LEGACY_FIND=<ON|OFF>"
     echo "              CROSS_SYSROOT=<path>, CROSS_SYSROOT_SERVER=<ssh-host>"
-    echo "              SERIAL_JOBS=<n>  # serial 模式单 target 并行度（默认 4）"
+    echo "              SERIAL_JOBS=<n>  # per-target 并行度（默认 4，可被数字参数覆盖）"
     echo "              PURE_LOG_DIR=<path>  # 纯日志变换输出目录"
     echo ""
     exit 1
@@ -123,11 +124,12 @@ USER_JOBS=""
 BUILD_OBJECT_ONLY="OFF"
 CROSS_X64_LINUX="OFF"
 BUILD_TESTS="ON"
-SERIAL_BUILD="OFF"
 CROSS_CC="${CROSS_CC:-}"
 CROSS_CXX="${CROSS_CXX:-}"
 
 # 解析可选参数，顺序不限：clean / <jobs> / object-only / cross-x64
+# 注：build 永远是 per-target 串行（防 16GB OOM），无 opt-out flag；
+# 数字参数 <jobs> 复用为 per-target 并行度（旧语义 = 全局 -j 已废弃）
 for arg in "${@:2}"; do
     if [[ "$arg" == "clean" ]]; then
         CLEAN_BUILD="clean"
@@ -139,11 +141,9 @@ for arg in "${@:2}"; do
         CROSS_X64_LINUX="ON"
     elif [[ "$arg" == "no-tests" || "$arg" == "no-test" || "$arg" == "skip-tests" ]]; then
         BUILD_TESTS="OFF"
-    elif [[ "$arg" == "serial" || "$arg" == "per-target" ]]; then
-        SERIAL_BUILD="ON"
     else
         print_warning "Unknown argument: $arg"
-        echo "Allowed optional args: clean, <jobs>, object-only, cross-x64, no-tests, serial"
+        echo "Allowed optional args: clean, <jobs>, object-only, cross-x64, no-tests"
         exit 1
     fi
 done
@@ -424,51 +424,48 @@ if [ ${#_MASKS[@]} -gt 0 ]; then
 fi
 
 # 编译
-if [ "$SERIAL_BUILD" = "ON" ]; then
-    # ---- SERIAL 模式：per-target 串行 + 单 target 内并行 ----
-    # 默认 -j 12 在 16GB 机器上 30+ target 同时抢内存会 OOM+swap 风暴。
-    # 改为：target 串行（mailServer lib → 各 exe → 各 test），单 target 内
-    # 默认 -j 4（4 路编译各 ~1.5GB + 链接器 ~2GB = 峰值 ~8GB，远低于 16GB）。
-    # 想调高用 `serial 8` 或 env SERIAL_JOBS=8（适合 32GB+）。
-    if [ -n "${SERIAL_JOBS:-}" ]; then
-        SERIAL_PER_TARGET_JOBS="$SERIAL_JOBS"
-    elif [ -n "$USER_JOBS" ]; then
-        # serial 后面跟数字时复用为 per-target 并行度
-        SERIAL_PER_TARGET_JOBS="$USER_JOBS"
-    else
-        SERIAL_PER_TARGET_JOBS=4
-    fi
-    if [ "$SERIAL_PER_TARGET_JOBS" -gt "$BUILD_JOBS_VALUE" ]; then
-        SERIAL_PER_TARGET_JOBS="$BUILD_JOBS_VALUE"
-    fi
-    print_info "SERIAL mode: per-target loop, ${SERIAL_PER_TARGET_JOBS} jobs/target (was -j${BUILD_JOBS_VALUE} for all targets)"
+# ---- per-target 串行 + 单 target 内并行（强制 always-on 防 OOM） ----
+# 之前默认 -j 12 在 16GB 机器上 30+ target 同时抢内存会 OOM+swap 风暴
+# （vm_stat 累计 9 千万+ swapin / 1亿+ swapout，load avg 飙到 77）。
+# 改为：target 串行（mailServer lib → 各 exe → 各 test），单 target 内
+# 默认 -j 4（4 路编译各 ~1.5GB + 链接器 ~2GB = 峰值 ~8GB，远低于 16GB）。
+# 调高方法：`bash build.sh Release 8`（= 8 jobs/target）或 env SERIAL_JOBS=8
+# （适合 32GB+）。
+if [ -n "${SERIAL_JOBS:-}" ]; then
+    SERIAL_PER_TARGET_JOBS="$SERIAL_JOBS"
+elif [ -n "$USER_JOBS" ]; then
+    # 数字参数复用为 per-target 并行度（避免 -j 全并行的危险行为）
+    SERIAL_PER_TARGET_JOBS="$USER_JOBS"
+else
+    SERIAL_PER_TARGET_JOBS=4
+fi
+if [ "$SERIAL_PER_TARGET_JOBS" -gt "$BUILD_JOBS_VALUE" ]; then
+    SERIAL_PER_TARGET_JOBS="$BUILD_JOBS_VALUE"
+fi
+print_info "Building per-target: ${SERIAL_PER_TARGET_JOBS} jobs/target (target order: lib → exe → test)"
 
-    # 目标顺序：lib 先（最重并行工作），再 exe（依赖 lib + 链接器峰值），
-    # 最后 test（依赖 lib）
-    SERIAL_TARGETS_LIB=("mailServer")
-    SERIAL_TARGETS_EXE=("smtpsServer" "imapsServer" "smtp_client")
+# 目标顺序：lib 先（最重并行工作），再 exe（依赖 lib + 链接器峰值），
+# 最后 test（依赖 lib）
+SERIAL_TARGETS_LIB=("mailServer")
+SERIAL_TARGETS_EXE=("smtpsServer" "imapsServer" "smtp_client")
 
-    for target in "${SERIAL_TARGETS_LIB[@]}" "${SERIAL_TARGETS_EXE[@]}"; do
-        if [ "$BUILD_OBJECT_ONLY" = "ON" ] && [[ "$target" != "mailServer" ]]; then
-            continue   # object-only 模式不链接 exe
-        fi
+for target in "${SERIAL_TARGETS_LIB[@]}" "${SERIAL_TARGETS_EXE[@]}"; do
+    if [ "$BUILD_OBJECT_ONLY" = "ON" ] && [[ "$target" != "mailServer" ]]; then
+        continue   # object-only 模式不链接 exe
+    fi
+    print_info "  → $target (jobs=$SERIAL_PER_TARGET_JOBS)"
+    cmake --build "$BUILD_DIR" --target "$target" -j"$SERIAL_PER_TARGET_JOBS"
+done
+
+if [ "$BUILD_TESTS" = "ON" ]; then
+    # 抓 CMake 已注册的所有 test target（名字以 _test 结尾），排除聚合 unit_tests
+    SERIAL_TEST_TARGETS=$(cmake --build "$BUILD_DIR" --target help 2>/dev/null \
+        | grep -E "^\.\.\. " | awk '{print $2}' \
+        | grep -E "_test$" | grep -vE "^unit_tests$" || true)
+    for target in $SERIAL_TEST_TARGETS; do
         print_info "  → $target (jobs=$SERIAL_PER_TARGET_JOBS)"
         cmake --build "$BUILD_DIR" --target "$target" -j"$SERIAL_PER_TARGET_JOBS"
     done
-
-    if [ "$BUILD_TESTS" = "ON" ]; then
-        # 抓 CMake 已注册的所有 test target（名字以 _test 结尾），排除聚合 unit_tests
-        SERIAL_TEST_TARGETS=$(cmake --build "$BUILD_DIR" --target help 2>/dev/null \
-            | grep -E "^\.\.\. " | awk '{print $2}' \
-            | grep -E "_test$" | grep -vE "^unit_tests$" || true)
-        for target in $SERIAL_TEST_TARGETS; do
-            print_info "  → $target (jobs=$SERIAL_PER_TARGET_JOBS)"
-            cmake --build "$BUILD_DIR" --target "$target" -j"$SERIAL_PER_TARGET_JOBS"
-        done
-    fi
-else
-    print_info "Building with ${BUILD_JOBS_VALUE} thread(s)..."
-    cmake --build "$BUILD_DIR" -j"$BUILD_JOBS_VALUE"
 fi
 
 # 输出结果
