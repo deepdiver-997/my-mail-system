@@ -14,6 +14,7 @@
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <atomic>
 
 namespace mail_system {
 namespace outbound {
@@ -98,9 +99,15 @@ public:
     void process_read() override {}
     void* get_fsm() const override { return fsm_.get(); }
     void* get_context() override { return nullptr; }
-    void set_current_state(int) override {}
-    void set_next_event(int) override {}
-    int  get_current_state() const override { return 0; }
+    // 2026-08-26 fix: 之前全是 no-op，导致 OutboundSmtpFsm 读 session state 永远是 0 (INIT)。
+    // 现在用 atomic 真存（参考 smtps_session.tpp:108-110 + smtps_session.h:109）。
+    void set_current_state(int s) override {
+        fsm_state_.store(s, std::memory_order_release);
+    }
+    void set_next_event(int) override { /* outbound 是 client push，不缓存 next_event */ }
+    int  get_current_state() const override {
+        return fsm_state_.load(std::memory_order_acquire);
+    }
     int  get_next_event() const override { return 0; }
     std::string get_last_command_args() const override { return ""; }
     std::chrono::milliseconds compute_reply_delay() const override { return std::chrono::milliseconds(0); }
@@ -131,8 +138,21 @@ private:
         char c = buf[0];
         if (c == '2') {
             if (strncmp(buf.c_str(), "220", 3) == 0) return OutboundSmtpEvent::GREETING_220;
-            if (strncmp(buf.c_str(), "250", 3) == 0) return OutboundSmtpEvent::EHLO_250;
             if (strncmp(buf.c_str(), "221", 3) == 0) return OutboundSmtpEvent::QUIT_221;
+            if (strncmp(buf.c_str(), "250", 3) == 0) {
+                // 2026-08-26 fix: 之前所有 250 一律映射 EHLO_250，导致 handler 表里
+                // (MAIL_FROM, MAIL_250) / (RCPT_TO, RCPT_250) / (WAIT_ACCEPT, ACCEPT_250)
+                // 全部死代码。现在按当前 FSM 状态区分：同样的 250 码在不同状态对应不同事件。
+                auto st = static_cast<OutboundSmtpState>(fsm_state_.load(std::memory_order_acquire));
+                switch (st) {
+                    case OutboundSmtpState::EHLO:        return OutboundSmtpEvent::EHLO_250;
+                    case OutboundSmtpState::MAIL_FROM:   return OutboundSmtpEvent::MAIL_250;
+                    case OutboundSmtpState::RCPT_TO:     return OutboundSmtpEvent::RCPT_250;
+                    case OutboundSmtpState::DATA_BODY:   return OutboundSmtpEvent::ACCEPT_250;  // body 末 250
+                    case OutboundSmtpState::WAIT_ACCEPT: return OutboundSmtpEvent::ACCEPT_250;  // 链式第二封+
+                    default:                            return OutboundSmtpEvent::ACCEPT_250;
+                }
+            }
             return OutboundSmtpEvent::ACCEPT_250;
         }
         if (c == '3') return OutboundSmtpEvent::DATA_354;
@@ -153,6 +173,7 @@ private:
         fsm_->add_handler(S::RCPT_TO,    E::RCPT_250,     h(&OutboundSmtpSession::handle_rcpt_250));
         fsm_->add_handler(S::DATA,       E::DATA_354,     h(&OutboundSmtpSession::handle_data_354));
         fsm_->add_handler(S::WAIT_ACCEPT,E::ACCEPT_250,   h(&OutboundSmtpSession::handle_accept_250));
+        fsm_->add_handler(S::DATA_BODY,  E::ACCEPT_250,   h(&OutboundSmtpSession::handle_accept_250));  // 2026-08-26: body 末 250 也走 handle_accept_250
         fsm_->add_handler(S::WAIT_ACCEPT,E::ERROR_4XX,    h(&OutboundSmtpSession::handle_temp_error));
         fsm_->add_handler(S::WAIT_ACCEPT,E::ERROR_5XX,    h(&OutboundSmtpSession::handle_perm_error));
         fsm_->add_handler(S::CLOSED,     E::CONNECTION_LOST, h(&OutboundSmtpSession::handle_closed));
@@ -181,6 +202,11 @@ private:
                         LOG_SMTP_INFO("Outbound: connected to {}", self->mx_host_);
                         self->connection_ = std::make_unique<TcpConnection>(std::move(sock));
                         self->mails_sent_on_conn_ = 0;
+                        // 2026-08-26: 派 CONNECT + CONNECTED 两阶段走完 INIT→CONNECTING→CONNECTED，
+                        // 否则单派 CONNECTED 时 transition (INIT, CONNECTED) 不在表里。
+                        // (INIT,CONNECT) / (CONNECTING,CONNECTED) 在 register_handlers 里没注册 handler，
+                        // 走 on_handler_not_found 默认空实现（仅用于状态推进，无副作用）。
+                        self->fsm_->process_event(self, OutboundSmtpEvent::CONNECT);
                         self->fsm_->process_event(self, OutboundSmtpEvent::CONNECTED);
                         self->do_async_read();
                     });
@@ -235,6 +261,10 @@ private:
         // 放锁后发 MAIL FROM
         current_task_ = std::move(task);
         mails_sent_on_conn_++;
+        // 2026-08-26: 发 MAIL FROM 之前显式 set state=MAIL_FROM，否则 parse_response
+        // 看 state 还是 WAIT_ACCEPT（链式第二封+），会把 MAIL FROM 250 错认成 ACCEPT_250
+        // → 立即 handle_accept_250 → 漏发 RCPT/DATA。
+        this->set_current_state(static_cast<int>(OutboundSmtpState::MAIL_FROM));
         auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
         this->do_async_write("MAIL FROM:<" + current_task_->sender + ">\r\n",
             [self](auto, const boost::system::error_code&) mutable { self->do_async_read(); });
@@ -367,6 +397,9 @@ private:
     int connect_retries_ = 0;
     std::shared_ptr<boost::asio::steady_timer> retry_timer_;
     std::shared_ptr<boost::asio::steady_timer> idle_timer_;
+    // 2026-08-26: FSM 真状态。跨 io 线程读（parse_response L129-142）+ 单 io 线程写
+    // （process_event 派发后自动 set；deliver_next 显式 set MAIL_FROM）。atomic 足够。
+    std::atomic<int> fsm_state_{static_cast<int>(OutboundSmtpState::INIT)};
 };
 
 } // namespace outbound
