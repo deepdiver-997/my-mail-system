@@ -1,8 +1,8 @@
 #ifndef MAIL_SYSTEM_OUTBOUND_UTILS_H
 #define MAIL_SYSTEM_OUTBOUND_UTILS_H
 
-#include "mail_system/back/outbound/outbox_repository.h"
-#include "mail_system/back/outbound/outbound_config.h"
+#include "mail_system/back/mailServer/outbound/outbox_repository.h"
+#include "mail_system/back/mailServer/outbound/outbound_config.h"
 #include "mail_system/back/entities/mail.h"
 
 #include <string>

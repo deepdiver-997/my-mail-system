@@ -1,8 +1,8 @@
 #include "mail_system/back/mailServer/smtps_server.h"
 #include "framework/connection/ssl_connection.h"
 #include "framework/connection/tcp_connection.h"
-#include "mail_system/back/outbound/cares_dns_resolver.h"
-#include "mail_system/back/outbound/outbound_config.h"
+#include "mail_system/back/mailServer/outbound/cares_dns_resolver.h"
+#include "mail_system/back/mailServer/outbound/outbound_config.h"
 #include "mail_system/back/common/logger.h"
 #include <iostream>
 #include <memory>

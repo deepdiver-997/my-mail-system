@@ -7,7 +7,7 @@
 #include "mail_system/back/mailServer/session/smtps_session.h"
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
-#include "mail_system/back/outbound/outbound_server.h"
+#include "mail_system/back/mailServer/outbound_server.h"
 
 namespace mail_system {
 

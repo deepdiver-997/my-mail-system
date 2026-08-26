@@ -1,7 +1,7 @@
 // ================================================================
 // OutboundServer — 出站投递调度器实现
 //
-// 实现从 include/mail_system/back/outbound/outbound_server.h 拆出
+// 实现从 include/mail_system/back/mailServer/outbound_server.h 拆出
 // （参考 src/framework/server_base.cpp 与 include/framework/server_base.h
 //  的 .h+.cpp 范式）
 //
@@ -12,7 +12,7 @@
 // 模板类（OutboundSmtpSession / OutboundSmtpFsm）保持 .h 现状
 // ================================================================
 
-#include "mail_system/back/outbound/outbound_server.h"
+#include "mail_system/back/mailServer/outbound_server.h"
 #include "framework/thread_pool/io_thread_pool.h"
 #include "mail_system/back/common/logger.h"
 

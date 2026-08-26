@@ -4,8 +4,8 @@
 #include "framework/session_base.h"
 #include "framework/connection/tcp_connection.h"
 #include "framework/thread_pool/io_thread_pool.h"
-#include "mail_system/back/outbound/outbound_types.hpp"
-#include "mail_system/back/outbound/outbound_smtp_fsm.h"
+#include "mail_system/back/mailServer/outbound/outbound_types.hpp"
+#include "mail_system/back/mailServer/fsm/outbound/outbound_smtp_fsm.h"
 #include "mail_system/back/common/logger.h"
 #include <queue>
 #include <mutex>

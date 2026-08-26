@@ -3,9 +3,9 @@
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/db/sql_queries.h"
 #include "framework/metrics_server.h"
-#include "mail_system/back/outbound/mx_routing_utils.h"
-#include "mail_system/back/outbound/outbox_repository.h"
-#include "mail_system/back/outbound/outbound_server.h"
+#include "mail_system/back/mailServer/outbound/mx_routing_utils.h"
+#include "mail_system/back/mailServer/outbound/outbox_repository.h"
+#include "mail_system/back/mailServer/outbound_server.h"
 #include <array>
 #include <algorithm>
 #include <chrono>

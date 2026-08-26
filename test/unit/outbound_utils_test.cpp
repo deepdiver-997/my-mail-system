@@ -19,10 +19,10 @@
 #include <vector>
 
 #include "mail_system/back/entities/mail.h"
-#include "mail_system/back/outbound/outbound_config.h"
-#include "mail_system/back/outbound/outbound_utils.h"
-#include "mail_system/back/outbound/outbox_repository.h"
-#include "mail_system/back/outbound/mx_routing_utils.h"
+#include "mail_system/back/mailServer/outbound/outbound_config.h"
+#include "mail_system/back/mailServer/outbound/outbound_utils.h"
+#include "mail_system/back/mailServer/outbound/outbox_repository.h"
+#include "mail_system/back/mailServer/outbound/mx_routing_utils.h"
 
 using namespace mail_system;
 

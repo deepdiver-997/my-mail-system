@@ -2,9 +2,9 @@
 #define MAIL_SYSTEM_OUTBOUND_SERVER_H
 
 #include "framework/server_base.h"
-#include "mail_system/back/outbound/outbound_smtp_session.h"
-#include "mail_system/back/outbound/outbound_types.hpp"
-#include "mail_system/back/outbound/outbox_repository.h"
+#include "mail_system/back/mailServer/session/outbound_smtp_session.h"
+#include "mail_system/back/mailServer/outbound/outbound_types.hpp"
+#include "mail_system/back/mailServer/outbound/outbox_repository.h"
 #include <boost/asio/steady_timer.hpp>
 #include <map>
 #include <vector>
@@ -29,7 +29,7 @@ namespace outbound {
 //   - 空闲回收由独立 steady_timer 驱动
 //   - 不再常驻占用 worker 线程
 //
-//   实现：见 src/mail_system/back/outbound/outbound_server.cpp
+//   实现：见 src/mail_system/back/mailServer/outbound/outbound_server.cpp
 //   (non-template 类，仅声明保留在头文件)
 // ================================================================
 class OutboundServer {

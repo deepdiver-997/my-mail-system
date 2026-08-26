@@ -1,5 +1,5 @@
 #include "mail_system/back/db/sql_queries.h"
-#include "mail_system/back/outbound/outbox_repository.h"
+#include "mail_system/back/mailServer/outbound/outbox_repository.h"
 
 #include <algorithm>
 #include <sstream>

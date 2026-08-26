@@ -273,11 +273,11 @@ set(COMMON_SRCS
     src/mail_system/back/storage/distributed_file_storage_provider.cpp
     src/mail_system/back/storage/local_file_storage_provider.cpp
     src/framework/storage/local_file_write_stream.cpp
-    src/mail_system/back/outbound/outbox_repository.cpp
-    src/mail_system/back/outbound/outbound_utils.cpp
-    src/mail_system/back/outbound/mx_routing_utils.cpp
-    src/mail_system/back/outbound/cares_dns_resolver.cpp
-    src/mail_system/back/outbound/outbound_server.cpp
+    src/mail_system/back/mailServer/outbound/outbox_repository.cpp
+    src/mail_system/back/mailServer/outbound/outbound_utils.cpp
+    src/mail_system/back/mailServer/outbound/mx_routing_utils.cpp
+    src/mail_system/back/mailServer/outbound/cares_dns_resolver.cpp
+    src/mail_system/back/mailServer/outbound/outbound_server.cpp
     src/mail_system/back/common/bcrypt.cpp
     src/mail_system/back/algorithm/smtp_utils.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp

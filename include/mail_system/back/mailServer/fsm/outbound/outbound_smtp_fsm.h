@@ -2,7 +2,7 @@
 #define OUTBOUND_SMTP_FSM_H
 
 #include "framework/fsm_base.h"
-#include "mail_system/back/outbound/outbound_types.hpp"
+#include "mail_system/back/mailServer/outbound/outbound_types.hpp"
 #include "mail_system/back/common/logger.h"
 
 namespace mail_system {

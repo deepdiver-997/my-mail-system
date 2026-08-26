@@ -1,10 +1,10 @@
-#include "mail_system/back/outbound/outbox_repository.h"
+#include "mail_system/back/mailServer/outbound/outbox_repository.h"
 
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/db_pool.h"
 #include "mail_system/back/db/mysql_pool.h"
 #include "mail_system/back/db/sql_queries.h"
-#include "mail_system/back/outbound/outbound_utils.h"
+#include "mail_system/back/mailServer/outbound/outbound_utils.h"
 #include <algorithm>
 #include <chrono>
 #include <sstream>

@@ -4,7 +4,7 @@
 #include "framework/server_config_base.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/db_pool.h"
-#include "mail_system/back/outbound/outbound_config.h"
+#include "mail_system/back/mailServer/outbound/outbound_config.h"
 #include "mail_system/back/storage/storage_config.h"
 #include <nlohmann/json.hpp>
 #include <string>

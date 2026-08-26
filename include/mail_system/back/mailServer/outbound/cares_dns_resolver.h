@@ -1,7 +1,7 @@
 #ifndef MAIL_SYSTEM_CARES_DNS_RESOLVER_H
 #define MAIL_SYSTEM_CARES_DNS_RESOLVER_H
 
-#include "mail_system/back/outbound/dns_resolver.h"
+#include "mail_system/back/mailServer/outbound/dns_resolver.h"
 #include <ares.h>
 #include <chrono>
 #include <mutex>

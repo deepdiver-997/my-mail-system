@@ -1,8 +1,8 @@
 // outbound_smoke — 出站 SMTP FSM/Session/Types 功能完整性验证
-#include "mail_system/back/outbound/outbound_smtp_fsm.h"
-#include "mail_system/back/outbound/outbound_smtp_session.h"
-#include "mail_system/back/outbound/outbound_types.hpp"
-#include "mail_system/back/outbound/outbound_server.h"
+#include "mail_system/back/mailServer/fsm/outbound/outbound_smtp_fsm.h"
+#include "mail_system/back/mailServer/session/outbound_smtp_session.h"
+#include "mail_system/back/mailServer/outbound/outbound_types.hpp"
+#include "mail_system/back/mailServer/outbound_server.h"
 
 #include <cassert>
 #include <iostream>

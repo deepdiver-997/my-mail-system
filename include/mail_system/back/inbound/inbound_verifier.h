@@ -1,7 +1,7 @@
 #ifndef MAIL_SYSTEM_INBOUND_VERIFIER_H
 #define MAIL_SYSTEM_INBOUND_VERIFIER_H
 
-#include "mail_system/back/outbound/dns_resolver.h"
+#include "mail_system/back/mailServer/outbound/dns_resolver.h"
 #include <chrono>
 #include <functional>
 #include <optional>

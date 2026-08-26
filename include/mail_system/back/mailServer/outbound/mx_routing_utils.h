@@ -2,9 +2,9 @@
 #define MAIL_SYSTEM_MX_ROUTING_UTILS_H
 
 #include "mail_system/back/entities/mail.h"
-#include "mail_system/back/outbound/dns_resolver.h"
-#include "mail_system/back/outbound/outbound_config.h"
-#include "mail_system/back/outbound/outbox_repository.h"
+#include "mail_system/back/mailServer/outbound/dns_resolver.h"
+#include "mail_system/back/mailServer/outbound/outbound_config.h"
+#include "mail_system/back/mailServer/outbound/outbox_repository.h"
 
 #include <string>
 #include <unordered_map>
