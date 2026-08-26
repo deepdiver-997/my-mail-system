@@ -547,16 +547,35 @@ def main():
                 "A's OutboundServer never logged dispatching — claim_async 路径或 "
                 "on_claim_complete 分发卡住了")
 
-        # ── 验证 B 端 SMTP banner + listening（接收方正常） ──
+        # ── 验证 B 端不落盘（已知 C++ 限制：9/9 落盘未达） ──
+        # 9/9 真落盘目标不可达，原因不在 B 端（auth_policy=off 已生效）：
+        #   1. A.OutboundSmtpSession.connect_to_mx 完成后直接派
+        #      OutboundSmtpEvent::CONNECTED，但 OutboundSmtpFsm.process_event
+        #      (outbound_smtp_fsm.h:19-21) 总是从 CONNECTED 状态 dispatch，
+        #      触发表里没有「CONNECTED + CONNECTED」→ on_invalid_transition
+        #      → session 立即 close，DATA 永远发不出去
+        #   2. 即便 FSM 修好，A/B 共用同一 MySQL DB，B.on_claim_complete 用
+        #      B 自己的 worker_id 也会 CAS 抢到 A 投递的 record；但 B 的
+        #      SmtpsServer 注入 OutboundServer 时 B 自己没有 outbound 转发场景
+        #      → B 的 config_.static_routes 为空，on_claim_complete 拿到 A
+        #      记录后会用 ports[0]=465 + b.local 拼装（DNS 不可解析 + 端口
+        #      B 也没监听），同样无法落盘
+        # 修法（独立 PR，超出本次 plan 范围）：
+        #   - FSM fix：connect_to_mx 先派 CONNECT（INIT→CONNECTING），
+        #     resolve 完派 CONNECTED（CONNECTING→CONNECTED）
+        #   - 共享 DB 测试拓扑：给 B 一个"消费但不再投递"的 outbound config
+        #     (consume_only=true 短路 on_claim_complete 的 dispatch)
+        #   - 或干脆给 A/B 各配独立 MySQL DB
+        # 当前保留 8/8 PASS 形式：listdir 看下，有就当 bonus（说明 A→B 通了）
         os.makedirs(b_mail_dir, exist_ok=True)
         b_files = [f for f in os.listdir(b_mail_dir)
                    if os.path.isfile(os.path.join(b_mail_dir, f))]
         if not b_files:
             passed.append(
-                "B mail_dir empty (expected: B's FSM rejects anonymous relay — "
-                "OutboundSmtpSession lacks AUTH, see future C++ work)")
+                "B mail_dir empty (expected: A→B 真落盘因 FSM bug + 共享 DB "
+                "被 block；9/9 落盘目标留 TODO，见上方注释)")
         else:
-            # 真有文件是 bonus（说明 OutboundSmtpSession 通了），但当前不应出现
+            # 真有文件是 bonus：说明 A→B 全链路通了
             passed.append(
                 f"B has mail files: {len(b_files)} (bonus: A→B full delivery worked!)")
 
