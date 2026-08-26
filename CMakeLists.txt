@@ -277,6 +277,7 @@ set(COMMON_SRCS
     src/mail_system/back/outbound/outbound_utils.cpp
     src/mail_system/back/outbound/mx_routing_utils.cpp
     src/mail_system/back/outbound/cares_dns_resolver.cpp
+    src/mail_system/back/outbound/outbound_server.cpp
     src/mail_system/back/common/bcrypt.cpp
     src/mail_system/back/algorithm/smtp_utils.cpp
     src/mail_system/back/inbound/inbound_verifier.cpp
