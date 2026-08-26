@@ -275,7 +275,9 @@ def start_server(server_bin, cfg, proj_root):
         preexec_fn=os.setsid,
         # E2E 模式：强制 server log 每条 info 立即 flush（默认只在 warn 才 flush，
         # 导致 30s wait_for 期间 Python 端读不到 Outbound: dispatching 日志）。
-        env={**os.environ, 'PR_E2E_FLUSH_LOGS': '1'},
+        # PR_E2E_LOCAL_SHORTCUT=1 让 .local 后缀 host 直接走 127.0.0.1，
+        # 跳过系统 mDNS resolver（即便 static_routes 漏配也能连通）。
+        env={**os.environ, 'PR_E2E_FLUSH_LOGS': '1', 'PR_E2E_LOCAL_SHORTCUT': '1'},
     )
     # 把 stdout_f 句柄挂在 proc 上，避免被 GC 关掉
     proc._stdout_f = stdout_f

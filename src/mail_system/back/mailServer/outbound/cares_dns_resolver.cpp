@@ -161,6 +161,11 @@ void CaresDnsResolver::destroy_channel_locked() {
 // ---- async 接口 ----
 void CaresDnsResolver::async_resolve_mx(const std::string& domain, MxCallback cb) {
     if (domain.empty() || !cb) return;
+    // .local 短路：env var PR_E2E_LOCAL_SHORTCUT=1 时直接返回 127.0.0.1 作为 MX
+    if (auto short_host = local_shortcut_if_enabled(domain); short_host != domain) {
+        cb({MxRecord{short_host, 10}});
+        return;
+    }
     std::lock_guard lk(mutex_);
     if (!init_channel_locked()) { cb({}); return; }
     auto* ctx = new QueryContext<MxCallback>{std::move(cb)};
@@ -169,6 +174,11 @@ void CaresDnsResolver::async_resolve_mx(const std::string& domain, MxCallback cb
 
 void CaresDnsResolver::async_resolve_host(const std::string& host, AddrCallback cb) {
     if (host.empty() || !cb) return;
+    // .local 短路：env var PR_E2E_LOCAL_SHORTCUT=1 时直接返回 127.0.0.1
+    if (auto short_host = local_shortcut_if_enabled(host); short_host != host) {
+        cb({short_host});
+        return;
+    }
     std::lock_guard lk(mutex_);
     if (!init_channel_locked()) { cb({}); return; }
     auto* ctx = new QueryContext<AddrCallback>{std::move(cb)};

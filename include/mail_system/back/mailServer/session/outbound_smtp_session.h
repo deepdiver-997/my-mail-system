@@ -4,6 +4,7 @@
 #include "framework/session_base.h"
 #include "framework/connection/tcp_connection.h"
 #include "framework/thread_pool/io_thread_pool.h"
+#include "mail_system/back/mailServer/outbound/dns_resolver.h"
 #include "mail_system/back/mailServer/outbound/outbound_types.hpp"
 #include "mail_system/back/mailServer/fsm/outbound/outbound_smtp_fsm.h"
 #include "mail_system/back/common/logger.h"
@@ -160,9 +161,13 @@ private:
     // ── 连接 ──────────────────────────────────────────────────
     void connect_to_mx() {
         auto& io_ctx = static_cast<IOThreadPool*>(this->m_server->m_ioThreadPool.get())->get_io_context();
+        // .local 短路：env var PR_E2E_LOCAL_SHORTCUT=1 时，mx_host_.local
+        // 直接替换为 127.0.0.1，跳过 boost resolver 和系统 mDNS。
+        // 让 A→B（b.local）在 e2e 测试里无需配置 mDNS responder。
+        const std::string resolve_host = local_shortcut_if_enabled(mx_host_);
         auto resolver = std::make_shared<boost::asio::ip::tcp::resolver>(io_ctx);
         auto self = std::static_pointer_cast<OutboundSmtpSession>(this->shared_from_this());
-        resolver->async_resolve(mx_host_, std::to_string(mx_port_),
+        resolver->async_resolve(resolve_host, std::to_string(mx_port_),
             [self, resolver](const boost::system::error_code& ec,
                              boost::asio::ip::tcp::resolver::results_type endpoints) mutable {
                 if (ec || endpoints.empty()) { self->handle_connect_failure(); return; }
