@@ -20,6 +20,12 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
 
     // DNS resolver (共享基础资源，入站验证+出站投递+DNSBL共用)
     m_dnsResolver = std::make_shared<outbound::CaresDnsResolver>();
+    // 2026-08-27: 注入 metrics。DNS 解析慢/失败的可见性靠这个 weak_ptr 推。
+    // m_dnsResolver 是 shared_ptr<IDnsResolver> 接口类型，set_metrics 是
+    // CaresDnsResolver 派生类扩展；本构造器知道创建的是 CaresDnsResolver 实例，
+    // 用 static_pointer_cast 安全下转。
+    std::static_pointer_cast<outbound::CaresDnsResolver>(m_dnsResolver)
+        ->set_metrics(get_metrics());
 
     // SMTP 专用：持久化队列和出站投递
     if (m_shardRouter && cfg->use_database) {

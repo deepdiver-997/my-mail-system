@@ -5,23 +5,59 @@
 #include <arpa/nameser.h>
 #include <netdb.h>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <memory>
 #include <netinet/in.h>
+#include <string>
 
 namespace mail_system {
 namespace outbound {
 namespace {
 
-// ---- c-ares 回调上下文：持有用户 callback ----
+// 2026-08-27: 把 c-ares status 映射成 metrics label 字符串。粗粒度：ok/nxdomain/
+// timeout/servfail/other，够监控告警用，不必 1:1 映射 30+ ares 错误码。
+const char* ares_status_label(int status) {
+    switch (status) {
+        case ARES_SUCCESS:    return "ok";
+        case ARES_ENOTFOUND:  return "nxdomain";
+        case ARES_ETIMEOUT:   return "timeout";
+        case ARES_ESERVFAIL:  return "servfail";
+        case ARES_ENODATA:    return "nodata";
+        default:              return "other";
+    }
+}
+
+// ---- c-ares 回调上下文：持有用户 callback + metrics 字段 ----
+// 必须先于 push_dns_metrics 定义（C++ 模板/类型前向引用规则）。
+struct QueryContextBase {
+    std::chrono::steady_clock::time_point start_time;
+    std::weak_ptr<MetricsServer> metrics;
+};
 template <typename Cb>
-struct QueryContext {
+struct QueryContext : QueryContextBase {
     Cb callback;
 };
+
+// 2026-08-27: 推 DNS metrics 的 helper。4 个 callback 复用，避免重复 5 行 push 代码。
+// 注意 c-ares 回调在 c-ares 内部线程跑（ARES_EVSYS_DEFAULT），不在 IO 线程；
+// MetricsServer 用 shared_mutex 保护 map，跨线程 push 安全。
+void push_dns_metrics(QueryContextBase* base, int status, const char* qtype) {
+    auto m = base->metrics.lock();
+    if (!m) return;
+    auto dur = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - base->start_time).count();
+    const char* status_str = ares_status_label(status);
+    MetricsServer::LabelMap labels{{"qtype", qtype}, {"status", status_str}};
+    m->observe("protorelay_dns_query_duration_seconds", labels, dur);
+    m->inc_counter("protorelay_dns_query_total", labels, 1);
+}
 
 // ---- 提取数据的 c-ares 回调 ----
 void mx_callback(void* arg, int status, int, unsigned char* abuf, int alen) {
     auto* ctx = static_cast<QueryContext<MxCallback>*>(arg);
-    if (!ctx || !ctx->callback) return;
+    if (!ctx || !ctx->callback) { delete ctx; return; }
+    push_dns_metrics(ctx, status, "MX");
     std::vector<MxRecord> records;
     if (status == ARES_SUCCESS && abuf && alen > 0) {
         struct ares_mx_reply* reply = nullptr;
@@ -48,7 +84,8 @@ void mx_callback(void* arg, int status, int, unsigned char* abuf, int alen) {
 
 void addr_callback(void* arg, int status, int, struct ares_addrinfo* result) {
     auto* ctx = static_cast<QueryContext<AddrCallback>*>(arg);
-    if (!ctx || !ctx->callback) return;
+    if (!ctx || !ctx->callback) { delete ctx; return; }
+    push_dns_metrics(ctx, status, "A");
     std::vector<std::string> addrs;
     if (status == ARES_SUCCESS && result) {
         for (auto* node = result->nodes; node; node = node->ai_next) {
@@ -71,7 +108,8 @@ void addr_callback(void* arg, int status, int, struct ares_addrinfo* result) {
 
 void txt_callback(void* arg, int status, int, unsigned char* abuf, int alen) {
     auto* ctx = static_cast<QueryContext<TxtCallback>*>(arg);
-    if (!ctx || !ctx->callback) return;
+    if (!ctx || !ctx->callback) { delete ctx; return; }
+    push_dns_metrics(ctx, status, "TXT");
     std::vector<std::string> records;
     if (status == ARES_SUCCESS && abuf && alen > 0) {
         struct ares_txt_reply* reply = nullptr;
@@ -95,7 +133,8 @@ void txt_callback(void* arg, int status, int, unsigned char* abuf, int alen) {
 
 void ptr_callback(void* arg, int status, int, unsigned char* abuf, int alen) {
     auto* ctx = static_cast<QueryContext<PtrCallback>*>(arg);
-    if (!ctx || !ctx->callback) return;
+    if (!ctx || !ctx->callback) { delete ctx; return; }
+    push_dns_metrics(ctx, status, "PTR");
     std::vector<std::string> hostnames;
     if (status == ARES_SUCCESS && abuf && alen > 0) {
         struct hostent* host = nullptr;
@@ -159,29 +198,36 @@ void CaresDnsResolver::destroy_channel_locked() {
 }
 
 // ---- async 接口 ----
+// 2026-08-27: 4 个 async_resolve_* 入口统一设 start_time + metrics 字段。
+// 注意 .local 短路（local_shortcut_if_enabled）路径不走 ares 也不走 callback
+// push，metrics 也不计 — 它是测试设施，不是真实 DNS 查询。
 void CaresDnsResolver::async_resolve_mx(const std::string& domain, MxCallback cb) {
     if (domain.empty() || !cb) return;
-    // .local 短路：env var PR_E2E_LOCAL_SHORTCUT=1 时直接返回 127.0.0.1 作为 MX
     if (auto short_host = local_shortcut_if_enabled(domain); short_host != domain) {
         cb({MxRecord{short_host, 10}});
         return;
     }
     std::lock_guard lk(mutex_);
     if (!init_channel_locked()) { cb({}); return; }
-    auto* ctx = new QueryContext<MxCallback>{std::move(cb)};
+    auto* ctx = new QueryContext<MxCallback>{};
+    ctx->callback = std::move(cb);
+    ctx->start_time = std::chrono::steady_clock::now();
+    ctx->metrics = m_metrics_;
     ares_query(channel_, domain.c_str(), ns_c_in, ns_t_mx, &mx_callback, ctx);
 }
 
 void CaresDnsResolver::async_resolve_host(const std::string& host, AddrCallback cb) {
     if (host.empty() || !cb) return;
-    // .local 短路：env var PR_E2E_LOCAL_SHORTCUT=1 时直接返回 127.0.0.1
     if (auto short_host = local_shortcut_if_enabled(host); short_host != host) {
         cb({short_host});
         return;
     }
     std::lock_guard lk(mutex_);
     if (!init_channel_locked()) { cb({}); return; }
-    auto* ctx = new QueryContext<AddrCallback>{std::move(cb)};
+    auto* ctx = new QueryContext<AddrCallback>{};
+    ctx->callback = std::move(cb);
+    ctx->start_time = std::chrono::steady_clock::now();
+    ctx->metrics = m_metrics_;
     ares_addrinfo_hints hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -192,7 +238,10 @@ void CaresDnsResolver::async_resolve_txt(const std::string& domain, TxtCallback 
     if (domain.empty() || !cb) return;
     std::lock_guard lk(mutex_);
     if (!init_channel_locked()) { cb({}); return; }
-    auto* ctx = new QueryContext<TxtCallback>{std::move(cb)};
+    auto* ctx = new QueryContext<TxtCallback>{};
+    ctx->callback = std::move(cb);
+    ctx->start_time = std::chrono::steady_clock::now();
+    ctx->metrics = m_metrics_;
     ares_query(channel_, domain.c_str(), ns_c_in, ns_t_txt, &txt_callback, ctx);
 }
 
@@ -203,7 +252,10 @@ void CaresDnsResolver::async_resolve_ptr(const std::string& ip, PtrCallback cb) 
     if (!ptr_name[0]) { cb({}); return; }
     std::lock_guard lk(mutex_);
     if (!init_channel_locked()) { cb({}); return; }
-    auto* ctx = new QueryContext<PtrCallback>{std::move(cb)};
+    auto* ctx = new QueryContext<PtrCallback>{};
+    ctx->callback = std::move(cb);
+    ctx->start_time = std::chrono::steady_clock::now();
+    ctx->metrics = m_metrics_;
     ares_query(channel_, ptr_name, ns_c_in, ns_t_ptr, &ptr_callback, ctx);
 }
 
