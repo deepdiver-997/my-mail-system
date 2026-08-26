@@ -74,7 +74,7 @@ fi
 
 # 使用方法
 if [ "$#" -lt 1 ]; then
-    echo "Usage: $0 [--pure-log] <Debug|Release|SafeRelease> [clean] [jobs] [object-only] [cross-x64] [no-tests]"
+    echo "Usage: $0 [--pure-log] <Debug|Release|SafeRelease> [clean] [jobs] [object-only] [cross-x64] [no-tests] [serial]"
     echo "       $0 sync-sysroot [server]"
     echo ""
     echo "Examples:"
@@ -90,12 +90,15 @@ if [ "$#" -lt 1 ]; then
     echo "  $0 Debug object-only             # 快速验证编译（需头文件，不强制链接库）"
     echo "  $0 Release cross-x64             # 交叉编译到 Linux x86_64（自动处理 sysroot）"
     echo "  $0 Release no-tests              # 跳过 test/bench 目标（重构时有用）"
+    echo "  $0 Release serial                # per-target 串行 + 单 target -j 4（防 16GB OOM）"
+    echo "  $0 Release serial 8              # 同上但单 target -j 8（32GB 推荐）"
     echo "  $0 sync-sysroot                  # 从服务器同步 spdlog/fmt 头文件到本地 sysroot"
     echo ""
     echo "Env override: BUILD_JOBS=<n>, EXTRA_CMAKE_ARGS='<...>'"
     echo "              ARTIFACT_DIR=<path>, CROSS_CC=<path>, CROSS_CXX=<path>"
     echo "              USE_BOOST_LEGACY_FIND=<ON|OFF>"
     echo "              CROSS_SYSROOT=<path>, CROSS_SYSROOT_SERVER=<ssh-host>"
+    echo "              SERIAL_JOBS=<n>  # serial 模式单 target 并行度（默认 4）"
     echo "              PURE_LOG_DIR=<path>  # 纯日志变换输出目录"
     echo ""
     exit 1
@@ -120,6 +123,7 @@ USER_JOBS=""
 BUILD_OBJECT_ONLY="OFF"
 CROSS_X64_LINUX="OFF"
 BUILD_TESTS="ON"
+SERIAL_BUILD="OFF"
 CROSS_CC="${CROSS_CC:-}"
 CROSS_CXX="${CROSS_CXX:-}"
 
@@ -135,9 +139,11 @@ for arg in "${@:2}"; do
         CROSS_X64_LINUX="ON"
     elif [[ "$arg" == "no-tests" || "$arg" == "no-test" || "$arg" == "skip-tests" ]]; then
         BUILD_TESTS="OFF"
+    elif [[ "$arg" == "serial" || "$arg" == "per-target" ]]; then
+        SERIAL_BUILD="ON"
     else
         print_warning "Unknown argument: $arg"
-        echo "Allowed optional args: clean, <jobs>, object-only, cross-x64, no-tests"
+        echo "Allowed optional args: clean, <jobs>, object-only, cross-x64, no-tests, serial"
         exit 1
     fi
 done
@@ -418,8 +424,52 @@ if [ ${#_MASKS[@]} -gt 0 ]; then
 fi
 
 # 编译
-print_info "Building with ${BUILD_JOBS_VALUE} thread(s)..."
-cmake --build "$BUILD_DIR" -j"$BUILD_JOBS_VALUE"
+if [ "$SERIAL_BUILD" = "ON" ]; then
+    # ---- SERIAL 模式：per-target 串行 + 单 target 内并行 ----
+    # 默认 -j 12 在 16GB 机器上 30+ target 同时抢内存会 OOM+swap 风暴。
+    # 改为：target 串行（mailServer lib → 各 exe → 各 test），单 target 内
+    # 默认 -j 4（4 路编译各 ~1.5GB + 链接器 ~2GB = 峰值 ~8GB，远低于 16GB）。
+    # 想调高用 `serial 8` 或 env SERIAL_JOBS=8（适合 32GB+）。
+    if [ -n "${SERIAL_JOBS:-}" ]; then
+        SERIAL_PER_TARGET_JOBS="$SERIAL_JOBS"
+    elif [ -n "$USER_JOBS" ]; then
+        # serial 后面跟数字时复用为 per-target 并行度
+        SERIAL_PER_TARGET_JOBS="$USER_JOBS"
+    else
+        SERIAL_PER_TARGET_JOBS=4
+    fi
+    if [ "$SERIAL_PER_TARGET_JOBS" -gt "$BUILD_JOBS_VALUE" ]; then
+        SERIAL_PER_TARGET_JOBS="$BUILD_JOBS_VALUE"
+    fi
+    print_info "SERIAL mode: per-target loop, ${SERIAL_PER_TARGET_JOBS} jobs/target (was -j${BUILD_JOBS_VALUE} for all targets)"
+
+    # 目标顺序：lib 先（最重并行工作），再 exe（依赖 lib + 链接器峰值），
+    # 最后 test（依赖 lib）
+    SERIAL_TARGETS_LIB=("mailServer")
+    SERIAL_TARGETS_EXE=("smtpsServer" "imapsServer" "smtp_client")
+
+    for target in "${SERIAL_TARGETS_LIB[@]}" "${SERIAL_TARGETS_EXE[@]}"; do
+        if [ "$BUILD_OBJECT_ONLY" = "ON" ] && [[ "$target" != "mailServer" ]]; then
+            continue   # object-only 模式不链接 exe
+        fi
+        print_info "  → $target (jobs=$SERIAL_PER_TARGET_JOBS)"
+        cmake --build "$BUILD_DIR" --target "$target" -j"$SERIAL_PER_TARGET_JOBS"
+    done
+
+    if [ "$BUILD_TESTS" = "ON" ]; then
+        # 抓 CMake 已注册的所有 test target（名字以 _test 结尾），排除聚合 unit_tests
+        SERIAL_TEST_TARGETS=$(cmake --build "$BUILD_DIR" --target help 2>/dev/null \
+            | grep -E "^\.\.\. " | awk '{print $2}' \
+            | grep -E "_test$" | grep -vE "^unit_tests$" || true)
+        for target in $SERIAL_TEST_TARGETS; do
+            print_info "  → $target (jobs=$SERIAL_PER_TARGET_JOBS)"
+            cmake --build "$BUILD_DIR" --target "$target" -j"$SERIAL_PER_TARGET_JOBS"
+        done
+    fi
+else
+    print_info "Building with ${BUILD_JOBS_VALUE} thread(s)..."
+    cmake --build "$BUILD_DIR" -j"$BUILD_JOBS_VALUE"
+fi
 
 # 输出结果
 print_success "Build completed successfully!"
