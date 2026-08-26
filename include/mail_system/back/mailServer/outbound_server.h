@@ -1,6 +1,7 @@
 #ifndef MAIL_SYSTEM_OUTBOUND_SERVER_H
 #define MAIL_SYSTEM_OUTBOUND_SERVER_H
 
+#include "framework/metrics_server.h"
 #include "framework/server_base.h"
 #include "mail_system/back/mailServer/session/outbound_smtp_session.h"
 #include "mail_system/back/mailServer/outbound/outbound_types.hpp"
@@ -71,6 +72,11 @@ public:
     void set_config(OutboundConfig c);
     const OutboundConfig& config() const;
 
+    // 2026-08-27: metrics 注入。weak_ptr 避免循环引用；未注入时 push no-op。
+    // 注入时机：SmtpsServer 启动后调 inject_metrics_to_outbound()
+    // （与 SmtpsServer::m_persistentQueue 注入同模式）。
+    void set_metrics(std::weak_ptr<MetricsServer> m) { m_metrics = m; }
+
 private:
     // 端口解析：static_routes[domain] > ports[0] > 25
     int resolve_port(const std::string& domain) const;
@@ -120,6 +126,9 @@ private:
     std::atomic<bool> running_{false};
     std::unique_ptr<boost::asio::steady_timer> evict_timer_;
     std::unique_ptr<boost::asio::steady_timer> retry_timer_;
+
+    // 2026-08-27: weak_ptr 持 metrics，outbound_server 析构后自动失效。
+    std::weak_ptr<MetricsServer> m_metrics;
 };
 
 } // namespace outbound

@@ -48,6 +48,14 @@ void OutboundServer::start() {
             });
         }
 
+        // 2026-08-27: 投递结果 metrics。domain label 在此 lambda 拿不到（task
+        // 已 reset），仅用 {} 标签。counts 数本身比按域分桶价值高（聚合告警阈值）。
+        if (auto m = m_metrics.lock()) {
+            m->inc_counter(success ? "protorelay_outbound_delivered_total"
+                                   : "protorelay_outbound_bounced_total",
+                           {}, 1);
+        }
+
         // 计数递减和 try_pull 立即可执行（不依赖 DB 写入结果）
         int64_t prev = pending_count_.fetch_sub(1) - 1;
         if (prev < LOW_WATERMARK) try_pull();
@@ -84,6 +92,12 @@ void OutboundServer::stop() {
 void OutboundServer::submit(std::unique_ptr<MailDeliveryTask> task, int port) {
     std::string domain = extract_domain(task->recipient);
     if (domain.empty()) return;
+
+    // 2026-08-27: 外部 submit 入口的 attempts 计数（on_claim_complete 是内部
+    // 拉取路径，那里再 push 一次，外部 submit 直接跳过外层路由）。
+    if (auto m = m_metrics.lock()) {
+        m->inc_counter("protorelay_outbound_attempts_total", {{"domain", domain}}, 1);
+    }
 
     // 端口解析顺序：static_routes[domain] > ports[0] > 25
     int target_port = (port > 0) ? port : resolve_port(domain);
@@ -257,8 +271,15 @@ void OutboundServer::on_claim_complete(std::vector<OutboxRecord> records) {
         task->attempt_count = rec.attempt_count;
         task->max_attempts = rec.max_attempts;
 
-        // 直接路由到 session，不通过 public submit() 避免重复计数
+        // 2026-08-27: 内部 claim 路径的 attempts 计数。submit() 也 push 一次
+        // （外部入站用），这里是 DB outbox 拉取的入站用，两条路径互斥。
         std::string domain = extract_domain(task->recipient);
+        if (auto m = m_metrics.lock()) {
+            m->inc_counter("protorelay_outbound_attempts_total",
+                           {{"domain", domain}}, 1);
+        }
+
+        // 直接路由到 session，不通过 public submit() 避免重复计数
         int target_port = resolve_port(domain);
         // target_host: static_routes 命中时是 IP/host（跳过 DNS），否则是 domain
         std::string target_host = resolve_target_host(domain);

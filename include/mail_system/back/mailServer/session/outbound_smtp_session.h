@@ -3,6 +3,7 @@
 
 #include "framework/session_base.h"
 #include "framework/connection/tcp_connection.h"
+#include "framework/metrics_server.h"
 #include "framework/thread_pool/io_thread_pool.h"
 #include "mail_system/back/mailServer/outbound/dns_resolver.h"
 #include "mail_system/back/mailServer/outbound/outbound_types.hpp"
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <sstream>
 #include <atomic>
+#include <chrono>
 
 namespace mail_system {
 namespace outbound {
@@ -181,6 +183,10 @@ private:
 
     // ── 连接 ──────────────────────────────────────────────────
     void connect_to_mx() {
+        // 2026-08-27: 记 connect 起点。async_connect 完成时算 duration（秒）。
+        // 用 steady_clock 不受墙钟跳变影响；不存 start_ 会有 dns_resolve 时间算进去，
+        // 这里仅测 TCP 三次握手 + 立即 connect 完成时间。
+        connect_start_ = std::chrono::steady_clock::now();
         auto& io_ctx = static_cast<IOThreadPool*>(this->m_server->m_ioThreadPool.get())->get_io_context();
         // .local 短路：env var PR_E2E_LOCAL_SHORTCUT=1 时，mx_host_.local
         // 直接替换为 127.0.0.1，跳过 boost resolver 和系统 mDNS。
@@ -199,6 +205,13 @@ private:
                     [self, sock = std::move(sock)](const boost::system::error_code& ec,
                                                    boost::asio::ip::tcp::endpoint) mutable {
                         if (ec) { self->handle_connect_failure(); return; }
+                        // 2026-08-27: 推 connect_duration。失败路径推 connect_attempts_failed_total
+                        // 留给后续 e2e 故事测试（需要 mock resolver 失败，难单测）。
+                        if (auto m = self->m_server->get_metrics().lock()) {
+                            auto dur = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - self->connect_start_).count();
+                            m->observe("protorelay_outbound_connect_duration_seconds", {}, dur);
+                        }
                         LOG_SMTP_INFO("Outbound: connected to {}", self->mx_host_);
                         self->connection_ = std::make_unique<TcpConnection>(std::move(sock));
                         self->mails_sent_on_conn_ = 0;
@@ -361,6 +374,12 @@ private:
 
     void handle_temp_error(std::shared_ptr<SessionBase<ConnectionType>>) {
         LOG_SMTP_WARN("Outbound: 4xx temp error for {} to {}", current_task_->mail_id, mx_host_);
+        // 2026-08-27: deferred 计数。handle_perm_error 不在此处推 bounced_total，
+        // 那是 OutboundServer completion_cb 的事（统一收口，避免重复）。
+        if (auto m = this->m_server->get_metrics().lock()) {
+            m->inc_counter("protorelay_outbound_deferred_total",
+                           {{"mx", mx_host_}}, 1);
+        }
         deliver_next();
     }
 
@@ -400,6 +419,8 @@ private:
     // 2026-08-26: FSM 真状态。跨 io 线程读（parse_response L129-142）+ 单 io 线程写
     // （process_event 派发后自动 set；deliver_next 显式 set MAIL_FROM）。atomic 足够。
     std::atomic<int> fsm_state_{static_cast<int>(OutboundSmtpState::INIT)};
+    // 2026-08-27: connect 起点。connect_to_mx 入口记，async_connect 成功 callback 算 duration。
+    std::chrono::steady_clock::time_point connect_start_{};
 };
 
 } // namespace outbound

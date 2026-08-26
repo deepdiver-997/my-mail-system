@@ -40,6 +40,10 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
         // 命中时会调 submit() 触发投递。
         if (!m_outboundServer) {
             m_outboundServer = std::make_shared<outbound::OutboundServer>(this);
+            // 2026-08-27: 注入 metrics weak_ptr（同 PersistentQueue::inject_metrics 模式）。
+            // OutboundServer 内部 5 个指标（attempts/delivered/deferred/bounced/connect_duration）
+            // 全部通过这个 weak_ptr push，server 析构后自动失效。
+            m_outboundServer->set_metrics(get_metrics());
             // 把 server_config 平铺字段组装成 OutboundConfig（含 static_routes）
             outbound::OutboundConfig ob_cfg;
             ob_cfg.helo_domain = cfg->outbound_helo_domain;
