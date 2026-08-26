@@ -98,11 +98,25 @@ public:
     IntrusionDetector m_intrusionDetector;
     void record_session_end(const std::string& ip, bool authenticated) {
         m_intrusionDetector.record_session(ip, authenticated);
+        // 2026-08-27: 未认证会话的 suspicious 计数。push 推迟到 ServerBase 这层
+        // 而非 IntrusionDetector 内部，避免动 is_banned 的 const 正确性。
+        if (!authenticated) {
+            if (auto m = get_metrics().lock()) {
+                m->inc_counter("protorelay_intrusion_suspicious_total", {}, 1);
+            }
+        }
     }
     bool is_ip_banned(const std::string& ip) const {
         auto cfg = std::atomic_load(&m_config);
         if (!cfg->intrusion_detection_enabled || cfg->intrusion_ban_threshold <= 0) return false;
-        return m_intrusionDetector.is_banned(ip);
+        bool banned = m_intrusionDetector.is_banned(ip);
+        // 2026-08-27: ban 命中计数（被拒连接时上层 reject 路径会查 is_ip_banned）。
+        if (banned) {
+            if (auto m = get_metrics().lock()) {
+                m->inc_counter("protorelay_intrusion_bans_total", {}, 1);
+            }
+        }
+        return banned;
     }
 
     // ── Metrics ───────────────────────────────────────────────
