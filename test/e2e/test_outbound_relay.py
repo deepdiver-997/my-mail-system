@@ -627,10 +627,12 @@ def main():
                 "A's OutboundServer never logged dispatching — claim_async 路径或 "
                 "on_claim_complete 分发卡住了")
 
-        # ── 9/9: B 端真落盘 + EML 头验证 ──
+        # ── 8/9 + 9/9: B 端真落盘 + EML 内容验证（拆成两项） ──
         # FSM bug 已修：session 真用 current_state、parse_response 按 state 区分 250、
         # connect_to_mx 派 CONNECT+CONNECTED 两阶段。详见 outbound_smtp_fsm.h:19-36
         # 和 outbound_smtp_session.h:104-110/131-159/181-210/262-267。
+        # 8/9: 文件真落盘 + 大小 > 0（光存在不空）
+        # 9/9: 头 From/To/Subject 全在 + body 含原始 msg 字符串（验真 EML，非 dot-stuff 残留）
         print(f"\n[verify] Polling B mail_dir for landed EML (timeout 30s)...")
         def is_eml(p):
             n = os.path.basename(p)
@@ -643,17 +645,32 @@ def main():
         else:
             with open(landed, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
+            landed_size = os.path.getsize(landed)
+            if landed_size > 0:
+                passed.append(
+                    f"B received mail landed at {landed} ({landed_size} bytes)")
+            else:
+                failed.append(
+                    f"B landed EML {landed} is 0 bytes (empty file)")
+
             has_subject = 'Subject:' in content
             has_from    = f'From: {SMTP_SENDER}' in content
             has_to      = f'To: {SMTP_RECIPIENT}' in content
-            if has_subject and has_from and has_to:
+            # msg body 里我们用 "Body delivered via OutboundServer static_routes." 标记
+            # 验 body 真在 B 落盘文件里（不是空、不是 dot-stuff 残留 ..Body delivered via）
+            has_body    = 'Body delivered via OutboundServer static_routes.' in content
+            if has_subject and has_from and has_to and has_body:
                 passed.append(
-                    f"B received mail landed at {landed} "
-                    f"({os.path.getsize(landed)} bytes; Subject/From/To all present)")
+                    f"B landed EML has all headers + original body "
+                    f"(Subject/From/To/body all present, no dot-stuff residue)")
             else:
+                missing = []
+                if not has_subject: missing.append('Subject')
+                if not has_from:    missing.append(f'From: {SMTP_SENDER}')
+                if not has_to:      missing.append(f'To: {SMTP_RECIPIENT}')
+                if not has_body:    missing.append('body text')
                 failed.append(
-                    f"B landed EML {landed} missing headers: "
-                    f"subject={has_subject} from={has_from} to={has_to}; "
+                    f"B landed EML {landed} missing: {', '.join(missing)}; "
                     f"first 200 bytes: {content[:200]!r}")
 
     finally:

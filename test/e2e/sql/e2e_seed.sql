@@ -29,8 +29,8 @@ VALUES (
 );
 
 -- ── alice 的 INBOX mailbox（A 是 local 域，alice 收件会入 INBOX）────
--- 注意：如果 users.id 是 AUTO_INCREMENT，mailboxes.user_id 关联
-INSERT IGNORE INTO mailboxes (user_id, mailbox_name, uid_next, uid_validity)
-SELECT id, 'INBOX', 1, UNIX_TIMESTAMP()
+-- 注意：mailboxes 列名是 `name`（mail2 schema 同款），没有 mailbox_name / uid_next / uid_validity
+INSERT IGNORE INTO mailboxes (user_id, name, is_system, box_type, create_time)
+SELECT id, 'INBOX', TRUE, 1, NOW()
 FROM users
 WHERE mail_address = 'alice@a.local';
