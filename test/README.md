@@ -18,6 +18,7 @@ test/
 │   ├── fsm_base_test.cpp        # FsmBase 分发语义（terminal/非法转换/缺 handler）
 │   ├── fast_fsm_base_test.cpp   # FastFsmBase O(1) 分发 + fallback 优先级
 │   ├── intrusion_detector_test.cpp # 入侵检测（私网过滤/封禁阈值/LRU/持久化）
+│   ├── metrics_core_test.cpp   # MetricsServer counter/gauge/histogram 语义不变量（counter N 次增 = N）
 │   ├── server_config_test.cpp   # pr::ServerConfig JSON 加载/校验/listener 工具
 │   ├── mapped_file_test.cpp     # MappedFile/MappedReadStream mmap 只读映射
 │   ├── thread_pool_test.cpp     # BoostThreadPool submit/post + IOThreadPool get_io_context
@@ -42,6 +43,7 @@ test/
 │   ├── test_smtp_flow.py        # SMTP 全流程测试 (端口 25/465/587)
 │   ├── test_dual_server.py      # 双服务器互通测试 (带 static route)
 │   ├── test_outbound.py         # 出站投递
+│   ├── test_metrics_exposure.py # 验 /metrics 端点 + counter 语义修复（不依赖 DB）
 │   ├── test_pipeline.py         # SMTP 流水线
 │   └── test_tcp_sticky.py       # TCP 粘包/截断/延迟
 ├── server/                      # 服务器入口（main）
@@ -195,6 +197,27 @@ Server A (:10025) ──static route b.local→127.0.0.1:10026──→ Server B
 
 ```bash
 python3 test/e2e/test_dual_server.py
+```
+
+### test_metrics_exposure.py — `/metrics` 端点 + counter 语义修复
+
+**故事**：2026-08-27 修了一个 counter 语义 bug —— `ServerBase::increment_*` 三个 helper
+把 `fetch_add` 返回的累计值 `v`（1,2,3,...）传给 `inc_counter` 当 delta，导致
+counter map 累加成 `1+2+...+N = N*(N+1)/2`（三角形数），`/metrics` 渲染出错的数字。
+详见 [counter 三角形 bug 复盘](../docs/bugfixes/2026-08-27-counter-triangle-bug.md)。
+
+**测试策略**（不依赖 database，`use_database=False`，避免 DB 启动成本）：
+- 起一个真 `smtpsServer`（`metrics_enabled=True`，`metrics_port=19090`）
+- 发 N 条 TCP 连接 + EHLO/QUIT（不发邮件 — 本地 RCPT 校验需 DB，目标是验 counter 语义 + 端点，不是 SMTP 协议）
+- 拉 `/metrics`、`/status`、`/health/live`，断言：
+  - `protorelay_connections_total` diff == N（不是三角形数）
+  - `/metrics` 文本格式正确
+  - `/status` 返回 JSON，`/health/live` 返回 OK
+
+```bash
+python3 test/e2e/test_metrics_exposure.py
+# 保留临时文件:
+python3 test/e2e/test_metrics_exposure.py --keep-temp
 ```
 
 ### 真实 DB 测试后清理
