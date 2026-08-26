@@ -1,0 +1,29 @@
+{
+  "system_domain": "scut.email",
+  "log_file": "logs/pop3Server.log",
+  "log_level": "INFO",
+  "log_to_console": true,
+  "log_to_file": true,
+  "maxConnections": 2000,
+  "intrusion_detection_enabled": true,
+  "intrusion_ban_threshold": 0,
+  "storage": {
+    "provider": "local",
+    "local": {
+      "mail_path": "storage/pop3/mail",
+      "attachment_path": "storage/pop3/attachments"
+    }
+  },
+  "metrics": {
+    "enabled": true,
+    "port": 0,
+    "host": "127.0.0.1"
+  },
+  "listeners": [
+    {
+      "type": "tcp",
+      "port": 110,
+      "auth_policy": "off"
+    }
+  ]
+}

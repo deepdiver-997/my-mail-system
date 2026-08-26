@@ -37,6 +37,10 @@ test/*.o
 test/smtpsServer
 test/register_user
 test/*Server
+# test/*Server 在 case-insensitive FS 上会误匹配 test/server/ 目录，
+# 需显式放行 test/server/ 下的源码。
+!test/server/
+!test/server/pop3_test.cpp
 smtpsServer
 
 # ==================== 日志文件 ====================

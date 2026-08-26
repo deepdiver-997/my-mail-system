@@ -289,6 +289,8 @@ set(COMMON_SRCS
     src/mail_system/back/mailServer/session/imaps_session_inst.cpp
     src/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm_inst.cpp
     src/mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm_inst.cpp
+    src/mail_system/back/mailServer/fsm/pop3/traditional_pop3_fsm_inst.cpp
+    src/mail_system/back/mailServer/session/pop3_session_inst.cpp
 )
 
 if(ENABLE_HDFS_WEB_STORAGE)
@@ -387,6 +389,13 @@ else()
         test/server/mail_server_combined.cpp
     )
     setup_mail_target(mailServer)
+
+    add_executable(pop3Server
+        ${COMMON_SRCS}
+        src/mail_system/back/mailServer/pop3/pop3_server.cpp
+        test/server/pop3_test.cpp
+    )
+    setup_mail_target(pop3Server)
 endif()
 
 # ================================================================
@@ -528,6 +537,14 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(imaps_fsm_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(imaps_fsm_test)
 
+    add_executable(pop3_fsm_test
+        ${COMMON_SRCS}
+        src/mail_system/back/mailServer/pop3/pop3_server.cpp
+        test/unit/pop3_fsm_test.cpp
+    )
+    target_include_directories(pop3_fsm_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(pop3_fsm_test)
+
     add_executable(smtp_client test/bench/smtp_client.cpp)
     target_compile_features(smtp_client PRIVATE cxx_std_17)
 
@@ -547,6 +564,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME smtps_fsm_test   COMMAND smtps_fsm_test)
     add_test(NAME smtps_fsm_concurrency_test COMMAND smtps_fsm_concurrency_test)
     add_test(NAME imaps_fsm_test   COMMAND imaps_fsm_test)
+    add_test(NAME pop3_fsm_test    COMMAND pop3_fsm_test)
     add_test(NAME inbound_verifier COMMAND test_inbound_verifier)
     add_test(NAME outbound_smoke   COMMAND outbound_smoke)
     add_test(NAME sql_queries_test COMMAND sql_queries_test)
@@ -573,6 +591,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         smtps_fsm_test
         smtps_fsm_concurrency_test
         imaps_fsm_test
+        pop3_fsm_test
         test_inbound_verifier
         outbound_smoke
         sql_queries_test
@@ -596,6 +615,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     # 没有地址消毒的模糊测试发现不了这类堆/栈越界
     if(ENABLE_ASAN)
         set(_asan_tests smtps_fsm_test smtps_fsm_concurrency_test imaps_fsm_test
+            pop3_fsm_test
             test_inbound_verifier outbound_smoke sql_queries_test mime_parser_test
             mail_body_writer_test buffered_upload_stream_test io_error_test
             async_storage_provider_test fsm_base_test fast_fsm_base_test
