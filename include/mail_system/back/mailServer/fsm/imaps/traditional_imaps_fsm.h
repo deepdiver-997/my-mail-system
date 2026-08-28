@@ -47,9 +47,14 @@ protected:
     std::shared_ptr<ThreadPoolBase> m_workerThreadPool;
     std::shared_ptr<router::IShardRouter> m_shardRouter;
     std::shared_ptr<MailboxStatsCache> m_mailboxStatsCache;
-    // 邮箱统计后台刷新的在途 key 集合：同一 key 只允许一个刷新任务在跑，避免雪崩
-    std::set<std::string> m_statsRefreshInFlight;
-    std::mutex m_statsRefreshMutex;
+    // SELECT/STATUS 统计的 single-flight：同一 (user,mailbox) 只允许一个回源查询链
+    // 在途，其余并发 SELECT 挂到等待列表上（owner 完成后统一通知），防缓存
+    // miss/stale 时 N 个连接各自查库打爆数据库。
+    struct StatsFlight {
+        std::vector<std::function<void(MailboxCacheEntry, bool, bool)>> waiters;
+    };
+    std::unordered_map<std::string, std::shared_ptr<StatsFlight>> m_statsFlights;
+    std::mutex m_statsFlightsMutex;
 
 public:
     TraditionalImapsFsm(
@@ -142,67 +147,116 @@ public:
         return it != names.end() ? it->second : "UNKNOWN_EVENT";
     }
 
-    // ========== 数据库操作 ==========
+    // ========== 数据库操作（CPS：async_query/async_execute 链） ==========
+    // 全部 static：可在 worker/异步回调里调用，依赖显式传入。
+    // 底层 MySQL async_* 目前是默认同步包装（回调同步触发），但调用方结构
+    // 已异步就绪；将来接真异步 DB 时这些调用方无需改动。conn 由调用方持有的
+    // shared ScopedConnection 保活，链中每个回调都捕获它避免悬垂。
 
     // 用户认证（复用和 SMTP 相同的 users 表）
-    // 登录认证（查 DB + bcrypt），static：整体跑在 worker 线程上，
-    // 依赖显式传入。bcrypt 几十~几百 ms 纯 CPU，不许在 io 线程算。
-    static bool auth_user(const std::shared_ptr<router::IShardRouter>& shard_router,
-                          const std::shared_ptr<AuthCache>& auth_cache,
-                          const std::string& mail_address,
-                          const std::string& password,
-                          uint64_t& out_user_id,
-                          int& out_shard);
+    // 登录认证（查 DB + bcrypt）。bcrypt 几十~几百 ms 纯 CPU，调用方
+    // 必须在 worker 线程发起本函数（见 handle_login）。
+    static void auth_user_async(const std::shared_ptr<router::IShardRouter>& shard_router,
+                                const std::shared_ptr<AuthCache>& auth_cache,
+                                const std::string& mail_address,
+                                const std::string& password,
+                                std::function<void(bool ok, uint64_t user_id, int shard)> cb);
 
-    bool get_mailboxes(uint64_t user_id,
-                       std::vector<std::tuple<uint64_t, std::string, int>>& mailboxes);
+    // 邮箱列表（LIST/LSUB）。失败 cb(false, {})。
+    static void get_mailboxes_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
+                                    std::function<void(bool,
+                                        std::vector<std::tuple<uint64_t, std::string, int>>)> cb);
 
-    uint64_t find_mailbox_id(uint64_t user_id, const std::string& mailbox_name);
+    // 按名称找邮箱 id（含 INBOX 兜底）。失败 cb(0)。
+    static void find_mailbox_id_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
+                                      const std::string& mailbox_name,
+                                      std::function<void(uint64_t)> cb);
 
-    bool get_mailbox_mails(uint64_t mailbox_id, uint64_t user_id,
-                           std::vector<MailboxMailInfo>& mails);
+    // 邮箱内邮件列表（FETCH/SEARCH/STORE/EXPUNGE/COPY/MOVE 用）。
+    static void get_mailbox_mails_async(std::shared_ptr<ScopedConnection> conn,
+                                        uint64_t mailbox_id, uint64_t user_id,
+                                        std::function<void(bool, std::vector<MailboxMailInfo>)> cb);
 
-    bool get_mail_info(uint64_t mail_id, MailboxMailInfo& info);
+    static void get_mail_info_async(std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
+                                    std::function<void(bool, MailboxMailInfo)> cb);
 
-    std::string get_mail_sender(uint64_t mail_id);
+    static void get_mail_sender_async(std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
+                                      std::function<void(std::string)> cb);
 
-    std::vector<std::string> get_mail_recipients(uint64_t mail_id);
+    static void get_mail_recipients_async(std::shared_ptr<ScopedConnection> conn, uint64_t mail_id,
+                                          std::function<void(std::vector<std::string>)> cb);
 
-    std::string get_user_email(uint64_t user_id);
+    static void get_user_email_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
+                                     std::function<void(std::string)> cb);
 
-    bool update_mail_seen(uint64_t mail_id, const std::string& recipient, bool seen);
+    // 邮件持久化（APPEND）。storage 写入 + DB 插入；调用方应在 worker 线程发起
+    // （storage append 是阻塞 I/O，不许在 io 线程）。cb(mail_id, body_path, error)，
+    // 失败 mail_id=0。
+    static void create_mail_async(const std::shared_ptr<storage::IStorageProvider>& storage,
+                                  std::shared_ptr<ScopedConnection> conn,
+                                  const std::string& subject, const std::string& body_content,
+                                  std::function<void(uint64_t, std::string, std::string)> cb);
 
-    bool update_mail_deleted(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id, bool deleted);
-
-    bool update_mail_flagged(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id, bool flagged);
-
-    // 邮件持久化
-    uint64_t create_mail(const std::string& subject, const std::string& body_content,
-                         std::string& out_body_path, std::string& error);
-
-    bool link_mail_to_mailbox(uint64_t mail_id, uint64_t user_id, uint64_t mailbox_id,
-                              const std::string& sender, const std::string& recipient,
-                              int status);
+    static void link_mail_to_mailbox_async(std::shared_ptr<ScopedConnection> conn,
+                                           uint64_t mail_id, uint64_t user_id,
+                                           uint64_t mailbox_id,
+                                           const std::string& sender,
+                                           const std::string& recipient,
+                                           int status, std::function<void(bool)> cb);
 
     // IMAP-UTF-7 解码
     static std::string decode_imap_utf7(const std::string& imap7);
 
-    // 从存储读取邮件内容
+    // 缓存感知的邮箱统计（CPS）。缓存命中且未过期时 cb 同步触发。
+    // 本函数在 miss/stale 时自行回源并写回缓存，无需调用方再刷。
+    void get_mailbox_stats_cached_async(std::shared_ptr<ScopedConnection> conn,
+                                        uint64_t user_id, uint64_t mailbox_id,
+                                        std::function<void(MailboxCacheEntry, bool, bool)> cb);
 
-    // 缓存感知的邮箱统计
-    MailboxCacheEntry get_mailbox_stats_cached(
-        uint64_t user_id, uint64_t mailbox_id,
-        bool& from_cache_out, bool& stale_out);
+    static void get_mailbox_count_async(std::shared_ptr<ScopedConnection> conn,
+                                        uint64_t mailbox_id, uint64_t user_id,
+                                        std::function<void(size_t)> cb);
 
-    size_t get_mailbox_count(uint64_t mailbox_id, uint64_t user_id);
+    static void get_mailbox_unseen_count_async(std::shared_ptr<ScopedConnection> conn,
+                                               uint64_t mailbox_id, uint64_t user_id,
+                                               std::function<void(size_t)> cb);
 
-    size_t get_mailbox_unseen_count(uint64_t mailbox_id, uint64_t user_id);
+    static void get_mailbox_uidnext_async(std::shared_ptr<ScopedConnection> conn,
+                                          uint64_t mailbox_id, uint64_t user_id,
+                                          std::function<void(uint64_t)> cb);
 
-    uint64_t get_mailbox_uidnext(uint64_t mailbox_id, uint64_t user_id);
+    // 批量 flag 更新（STORE）：单条 IN 列表 SQL 拍平 N 循环。
+    static void batch_mark_seen_async(std::shared_ptr<ScopedConnection> conn,
+                                      const std::vector<uint64_t>& mail_ids,
+                                      const std::string& recipient, int status,
+                                      std::function<void(bool)> cb);
+    static void batch_mark_deleted_async(std::shared_ptr<ScopedConnection> conn,
+                                         const std::vector<uint64_t>& mail_ids,
+                                         uint64_t user_id, uint64_t mailbox_id, int deleted,
+                                         std::function<void(bool)> cb);
+    static void batch_mark_flagged_async(std::shared_ptr<ScopedConnection> conn,
+                                         const std::vector<uint64_t>& mail_ids,
+                                         uint64_t user_id, uint64_t mailbox_id, int flagged,
+                                         std::function<void(bool)> cb);
 
-    void expunge_mailbox(uint64_t mailbox_id, uint64_t user_id);
+    // EXPUNGE：物理删除已标记 \Deleted 的行。
+    static void expunge_mailbox_async(std::shared_ptr<ScopedConnection> conn,
+                                      uint64_t mailbox_id, uint64_t user_id,
+                                      std::function<void(bool)> cb);
 
-    std::vector<uint64_t> get_expunged_ids(uint64_t mailbox_id, uint64_t user_id);
+    // COPY/MOVE 批量插入：INSERT IGNORE ... VALUES (...),(...)（mail_mailbox 有
+    // UNIQUE KEY uk_mail_box_user 自动去重 + id AUTO_INCREMENT）。cb 报告实际插入数
+    //（通过 SELECT ROW_COUNT()，dup 被 IGNORE 的不计入）。
+    static void batch_insert_mailbox_async(std::shared_ptr<ScopedConnection> conn,
+                                           const std::vector<uint64_t>& mail_ids,
+                                           uint64_t target_id, uint64_t user_id,
+                                           std::function<void(size_t)> cb);
+
+    // MOVE 源邮箱删除：单条 UPDATE ... IN（仅标记 is_deleted，expunge 时物理删）。
+    static void batch_mark_move_deleted_async(std::shared_ptr<ScopedConnection> conn,
+                                              const std::vector<uint64_t>& mail_ids,
+                                              uint64_t user_id, uint64_t source_mailbox_id,
+                                              std::function<void(bool)> cb);
 
     // 通用 IMAP 响应写回
     void send_untagged(std::shared_ptr<SessionBase<ConnectionType>> session, const std::string& data);

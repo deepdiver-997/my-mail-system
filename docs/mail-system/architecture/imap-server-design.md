@@ -124,7 +124,38 @@ users ──┬── mailboxes (INBOX, Sent, Trash, etc.)
 ### UID Assignment
 
 UID is the Snowflake `mail_id` (globally unique, monotonically increasing).
-`UIDVALIDITY` = `mailbox_id`. `UIDNEXT` = `MAX(mail_id) + 1` in the mailbox.
+`UIDVALIDITY` = `mailbox_id`. `UIDNEXT` is a per-mailbox high-watermark kept in
+the `mailbox_uidnext` table (see `migration_imap_uidnext.sql`): a row lock +
+`GREATEST()` advance makes it atomic and monotonic across concurrent / cross-instance
+readers, and prevents regression after expunging the largest mail_id.
+
+## Database Access — Async CPS
+
+All DB access in the FSM goes through **CPS** (`async_query` / `async_execute` +
+callback continuations), same pattern as POP3/SMTP. There is no synchronous
+query/execute bridge in the IMAP path.
+
+- **Read helpers** (need the result to reply) — async CPS chains:
+  `auth_user_async`, `get_mailboxes_async`, `find_mailbox_id_async`,
+  `get_mailbox_mails_async`, `get_mailbox_stats_cached_async`,
+  `get_mailbox_count/unseen/uidnext_async`, `get_user_email_async`, …
+- **Write helpers** (fire-and-forget or awaited before reply) — single statements:
+  `create_mail_async`, `link_mail_to_mailbox_async`, `expunge_mailbox_async`, …
+- **Bulk loops flattened to one IN-list SQL**: STORE uses
+  `batch_mark_seen/deleted/flagged_async`; COPY/MOVE use
+  `batch_insert_mailbox_async` (`INSERT IGNORE ... VALUES (...),(...)`, count via
+  `SELECT ROW_COUNT()`) and `batch_mark_move_deleted_async`.
+- The `conn` is a `std::shared_ptr<ScopedConnection>` kept alive through the whole
+  chain (each callback captures it). Callers must guard `!conn || !conn->is_valid()`
+  (an empty shard router yields an *invalid* ScopedConnection — null `connection_`).
+
+The MySQL `async_*` wrappers currently execute inline (synchronous), but the caller
+structure is already async-ready: when a real async DB lands, callbacks fire on a DB
+thread and only the shared `conn` lifetime matters.
+
+Mailbox stats (SELECT/STATUS) additionally use a **single-flight** dedup so N
+concurrent SELECTs of the same mailbox fire only one source query chain. Details in
+[`mailbox-concurrency.md`](mailbox-concurrency.md).
 
 ## Configuration
 

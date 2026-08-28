@@ -194,13 +194,21 @@ IMAP 的 SELECT/STATUS 每次都要 `SELECT COUNT(*)` 查询 MySQL，在高频�
 
 ### 5.2 设计
 
-**stale-while-revalidate 模式**（借鉴 HTTP Cache-Control）：
+**stale-while-revalidate + single-flight**（借鉴 HTTP Cache-Control）：
 
 ```
 缓存命中且 TTL 内 ──→ 立即返回（0.001ms）
-缓存命中但已过期 ──→ 立即返回旧值，后台 worker pool 异步查 DB 更新缓存
-缓存未命中 ──→ 同步查 DB → 写入缓存 → 返回
+缓存 miss/stale ──→ 拿 flight 锁：
+                     已有回源在途 → 挂到等待列表（owner 完成后共享结果）
+                     无在途 → 复查缓存（owner 可能刚写完还没摘 flight）
+                              仍 miss → 当 owner 发异步回源查询链
+owner 完成 ──→ 写缓存 → 摘 flight → 统一通知所有等待者
 ```
+
+关键点：同一 (user,mailbox) 任意时刻**至多一条回源查询链在途**，并发 SELECT
+全部合并到等待列表，防 miss/stale 时 N 个连接各自查库打爆数据库、也防等者挂死。
+锁序 flight→cache、两锁不嵌套；回调在释放 flight 锁后触发（等者会 re-enter）。
+DB 失败也收敛（查询失败回调默认值，owner 照常通知）。
 
 **核心实现**：
 
@@ -352,7 +360,8 @@ void onTaskFinished() {
 
 ### 8.2 如果被问"你的缓存是怎么设计的"
 
-- stale-while-revalidate：先返回旧数据，后台异步刷新
+- stale-while-revalidate + single-flight：miss/stale 只发一条回源查询链，并发 SELECT 合并到等待列表
+- 锁序 flight→cache 不嵌套；回调在释放 flight 锁后触发
 - shared_mutex 优化读多写少场景
 - 只缓存 SELECT 计数，不缓存可变邮件列表（一致性原因）
 - 为什么不用 Redis：用户黏性、延迟更低、零运维

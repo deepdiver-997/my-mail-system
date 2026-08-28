@@ -7,7 +7,7 @@ test/
 ├── unit/                        # C++ 单元测试（零 I/O，MockConnection）
 │   ├── smtps_fsm_test.cpp       # SMTP FSM 状态机测试（串行）
 │   ├── smtps_fsm_concurrency_test.cpp  # SMTP 入站异步并发测试（MockIoContext + TSan）
-│   ├── imaps_fsm_test.cpp       # IMAP FSM 状态机测试
+│   ├── imaps_fsm_test.cpp       # IMAP FSM 状态机测试（async CPS DB + stats single-flight）
 │   ├── pop3_fsm_test.cpp        # POP3 FSM 状态机测试（11 命令 + 锁心跳/sweeper）
 │   ├── test_inbound_verifier.cpp# InboundVerifier 组件测试 (86 tests)
 │   ├── sql_queries_test.cpp     # SQL 查询生成器测试
@@ -111,12 +111,19 @@ fire_*() 触发异步回调（手动/后台线程）                // ★ 必�
 跑并发测试；判定用 `grep -c "WARNING: ThreadSanitizer"`（PASS 文案里的"无 data
 race"会被 `grep "data race"` 误计）。
 
-**写 IMAP 并发测试迁移清单**：
-1. mock 三层已在位，IMAP 串行测试用同步模式即可。
-2. 盘点 IMAP 异步路径（认证 / STORE / FETCH 是否走 async DB/DNS）；若无，重点
-   测 session 生命周期与关闭时序（IDLE/DONE deferred read、LOGOUT、异常关闭）。
-3. 沿用 `run_on_io`（post+wait_idle）+ Manual fire 模式。
-4. 边界用例照抄 `boundary_callback_after_session_release`（shared_ptr 保活）。
+**IMAP 异步路径（2026-08-28 已全量 async CPS）**：
+- DB 访问全部走 `async_query`/`async_execute` 回调链（无 sq/se 同步桥）；
+  helper 的 conn 守卫须判 `!conn || !conn->is_valid()`（空 router 的 invalid
+  ScopedConnection，`(*conn)` 解引用会崩）。
+- **stats single-flight**：`get_mailbox_stats_cached_async` 对同一 (user,mailbox)
+  只发一次回源查询链，其余并发 SELECT 挂到等待列表（`m_statsFlights` waiter-list）。
+  单测剧情：`stats_flight_dedup_concurrent`（并发调用同 key 只发一次查询、两 cb
+  都恢复、缓存写回后命中不再查库）、`stats_flight_concurrent_threads`（两 OS 线程
+  TSan 下验证 flight 锁无竞争 + 只发一次查询）。锁序 flight→cache、回调在释放
+  flight 锁后触发（waiters cb 会 re-enter 触发新 SELECT），详见
+  `docs/mail-system/architecture/mailbox-concurrency.md`。
+- 其余沿用 `run_on_io`（post+wait_idle）+ Manual fire 模式；边界用例照抄
+  `boundary_callback_after_session_release`（shared_ptr 保活）。
 
 ## 运行测试
 

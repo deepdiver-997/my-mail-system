@@ -81,7 +81,50 @@ IMAP 故意允许多会话（RFC 3501），靠两个机制兜一致性：
    UID FETCH 直接查不到（正确行为）。
 
 唯一缓存是 **mailbox stats 缓存**（EXISTS/UNSEEN/uidnext 计数，进程内、带
-stale 标志 + 后台刷新），只缓存计数不缓存列表。STORE/EXPUNGE 会 invalidate。
+stale 标志），只缓存计数不缓存列表。STORE/EXPUNGE 会 invalidate。缓存访问走
+**single-flight 去重**（见下节），防并发 SELECT 打爆数据库。
+
+### mailbox stats 缓存 + single-flight（2026-08-28）
+
+SELECT/STATUS 要报 EXISTS/UNSEEN/UIDNEXT。缓存命中且未过期 → 立即返回；
+miss 或 stale → 需要回源查 DB（count + unseen + uidnext 三条查询链）。
+
+**问题**：N 个客户端并发 SELECT 同一邮箱且缓存 miss/stale 时，如果每个连接都
+自己发起回源查询，就是 N×3 次 DB 查询（真异步 DB 下直接打爆数据库）；如果
+后来的连接看到"已有查询在途"就直接放弃，连接会永久挂起 → 客户端死锁。
+
+**解法：single-flight + 等待回调列表**（`TraditionalImapsFsm::m_statsFlights`，
+key = `user_id:mailbox_id` → `StatsFlight{waiters}`）：
+
+```
+get_mailbox_stats_cached_async(conn, uid, mailbox_id, cb):
+  1. 缓存命中且未过期 → cb(缓存值) 立即返回
+  2. 拿 flight 锁：
+      已有在途 flight → 把 cb 挂到它的 waiters 列表，返回等待
+      无在途 → 先复查一次缓存（owner 可能刚写完还没来得及摘 flight）：
+                 命中 → cb(缓存值) 立即返回
+                 miss/stale → 创建 flight，自己当 owner，cb 也进 waiters
+  3. owner 跑回源链（count → unseen → uidnext），完成后：
+     写缓存 → 摘 flight（取走 waiters）→ 统一通知所有等待者（含自己）
+```
+
+要点：
+
+- **只发一次查询链**：同一 (user,mailbox) 任意时刻至多一个回源链在途，其余
+  连接全部挂到 waiters，owner 完成后共享结果。等者不挂死。
+- **锁序**：flight 锁 → 缓存锁（仅 recheck 短暂取）；owner 完成路径是
+  `cache_put`（取放缓存锁）→ 再取 flight 锁移除条目，两锁**从不嵌套持有**，
+  无锁序反转。
+- **回调在释放 flight 锁之后触发**：waiters 的 cb 会 drain 触发新 SELECT
+  （re-enter 本函数），持锁回调会非递归锁死锁。
+- **recheck 消除竞态**：拿 flight 锁后若发现无在途，先复查一次缓存——消除
+  "刚释放缓存锁、owner 数据才到"的窗口，且不用 cache+flight 二重锁。
+- **DB 失败也收敛**：count/unseen/uidnext 查询失败回调默认值（0/1），owner
+  照常摘 flight 通知全部 waiters，不会留下永不完成的 flight。
+
+> 旧实现（`m_statsRefreshInFlight`，`std::set` + 后台 post 刷新）只挡 stale 的
+> 后台刷新且不含等待列表：miss 的并发连接各自查库、stale 的再叠一次冗余刷新。
+> single-flight + waiter-list 是它的完整替代：既去重又保证等者恢复。
 
 ### 已知症状（不是损坏，是协议层不一致）
 
@@ -89,7 +132,7 @@ stale 标志 + 后台刷新），只缓存计数不缓存列表。STORE/EXPUNGE 
 |------|---------|-----------|
 | A 删邮件，B 用**序列号** FETCH | 列表变短，序列号漂移 → B 可能拉到**另一封** | 客户端按 RFC 3501 需处理 EXPUNGE 通知重编号；UID 规避 |
 | A 删邮件，B 用 **UID** FETCH | 查不到 → 不返回，客户端看到"没了" | 正确行为，无需处理 |
-| B 看 STATUS/EXISTS | 缓存计数短暂不准 | 最终一致，后台刷新收敛 |
+| B 看 STATUS/EXISTS | 缓存计数短暂不准 | 最终一致，single-flight 回源收敛 |
 | 正文文件被清理 job 删 | UID FETCH 读 body 失败 | 需"先摘行、延迟删文件"或引用计数 |
 
 ### 该改的：uidnext 竞态（已修 2026-08-28）
@@ -123,6 +166,7 @@ ON DUPLICATE KEY UPDATE
 
 ### 跨实例部署的注意
 
-邮箱缓存（stats cache）是**进程内**的，跨实例不共享。因为 FETCH 每次查库、
-权威数据在 DB + storage，所以**不共享缓存不会损坏数据**——只是计数短暂不一致
-（最终一致）。真正跨实例要防的是上面 uidnext 竞态和正文文件清理时序。
+邮箱缓存（stats cache）和 single-flight 表都是**进程内**的，跨实例不共享。
+因为 FETCH 每次查库、权威数据在 DB + storage，所以**不共享缓存不会损坏数据**
+——只是计数短暂不一致（最终一致），且各实例各自去重回源（不会跨实例合并，
+但也不会互相放大）。真正跨实例要防的是上面 uidnext 竞态和正文文件清理时序。

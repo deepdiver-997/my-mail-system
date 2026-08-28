@@ -20,6 +20,8 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
+#include <atomic>
 #include <spdlog/common.h>
 
 using namespace mail_system;
@@ -679,8 +681,8 @@ TEST(idle_with_done) {
 // ========== UIDNEXT 高水位（原子推进，防并发撞值/expunge 回退） ==========
 TEST(uidnext_advance_read) {
     // 剧情：SELECT/STATUS 报告 UIDNEXT。新实现 = 原子推进高水位(advance,写)
-    // + 读(advance 后的 mailbox_uidnext 行)。mock 下 advance 是 se（不消耗
-    // 结果），read 是 sq（pop 一个 uidnext 值）。
+    // + 读(advance 后的 mailbox_uidnext 行)。mock 同步模式下 advance 的
+    // async_execute 不消耗结果，read 的 async_query 弹出一个 uidnext 值。
     auto io = std::make_shared<IOThreadPool>(1); io->start();
     auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
     auto db = std::make_shared<test::MockDbPool>();
@@ -698,19 +700,149 @@ TEST(uidnext_advance_read) {
     auto server = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router));
     auto fsm = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router);
 
-    // advance(se) 不消耗结果；read(sq) 消耗一个 {uidnext: 42}
+    // read 的 async_query 弹出一个 {uidnext: 42}；advance 的 async_execute 不消耗
     db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
         std::vector<std::map<std::string, std::string>>{{{"uidnext", "42"}}}));
-    uint64_t v = fsm->get_mailbox_uidnext(5001, 1001);
+    auto conn = std::make_shared<ScopedConnection>(db->acquire_connection());
+    uint64_t v = 0;
+    fsm->get_mailbox_uidnext_async(conn, 5001, 1001, [&v](uint64_t x) { v = x; });
     assert(v == 42);
     std::cout << "  [PASS] uidnext_advance_read (uidnext=" << v << ")" << std::endl;
 }
 
 TEST(uidnext_no_db_default) {
-    // 无 DB（fixture 的空 router）→ 优雅返回 1，不崩溃
-    uint64_t v = fx.fsm->get_mailbox_uidnext(5001, 1001);
+    // 无 DB（fixture 的空 router）→ 优雅回调 1，不崩溃
+    auto conn = std::make_shared<ScopedConnection>(fx.fsm->acquire_connection(0));
+    uint64_t v = 0;
+    fx.fsm->get_mailbox_uidnext_async(conn, 5001, 1001, [&v](uint64_t x) { v = x; });
     assert(v == 1);
     std::cout << "  [PASS] uidnext_no_db_default" << std::endl;
+}
+
+TEST(stats_flight_dedup_concurrent) {
+    // 剧情：两个连接并发 SELECT 同一邮箱，缓存 miss。single-flight 应只让一个
+    // 查询链在途（第二个挂到等待列表，不再发查询），owner 完成后两者都拿到结果
+    // —— 防 N 连接各自查库打爆数据库，也防等待者永久挂起。
+    auto io = std::make_shared<IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto db = std::make_shared<test::MockDbPool>();
+    db->mock_conn()->set_deferred(true);   // 延迟模式：查询挂起，手动触发
+    auto router = std::make_shared<router::StaticShardRouter>(
+        std::vector<std::pair<std::string, int>>{},
+        0,
+        std::vector<std::shared_ptr<DBPool>>{db},
+        std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+    ServerConfig cfg3;
+    cfg3.perf_mode = true; cfg3.apply_perf_mode();
+    cfg3.use_database = false; cfg3.system_domain = "test.local";
+    cfg3.storage.local.mail_path = "/tmp/imaps_flight_test_mail";
+    cfg3.storage.local.attachment_path = "/tmp/imaps_flight_test_att";
+    auto server = std::shared_ptr<TestServer>(new TestServer(cfg3, io, wk, router));
+    auto fsm = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router);
+    fsm->set_mailbox_stats_cache(
+        std::make_shared<TraditionalImapsFsm<MockConnection>::MailboxStatsCache>(16));
+
+    auto conn = std::make_shared<ScopedConnection>(db->acquire_connection());
+
+    // 两个并发调用（同 key），缓存 miss
+    MailboxCacheEntry r1, r2;
+    bool cb1_done = false, cb2_done = false;
+    fsm->get_mailbox_stats_cached_async(conn, 1001, 5001,
+        [&](MailboxCacheEntry e, bool, bool) { r1 = e; cb1_done = true; });
+    fsm->get_mailbox_stats_cached_async(conn, 1001, 5001,
+        [&](MailboxCacheEntry e, bool, bool) { r2 = e; cb2_done = true; });
+
+    // 关键断言：只有 owner 发出了 count 查询；第二个连接没发新查询（dedup）
+    assert(db->mock_conn()->has_pending_query());
+    assert(!cb1_done && !cb2_done);   // 两者都还在等待 owner 完成
+
+    // 逐步触发 owner 链：count → unseen → advance(execute, 不消耗结果) → read
+    db->mock_conn()->fire_query(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"cnt", "5"}}}));
+    assert(!cb1_done && !cb2_done);
+    db->mock_conn()->fire_query(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"cnt", "3"}}}));
+    db->mock_conn()->fire_execute(true);
+    db->mock_conn()->fire_query(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"uidnext", "42"}}}));
+
+    // 完成后 owner + waiter 都拿到同一份结果，无一挂起
+    assert(cb1_done && cb2_done);
+    assert(r1.exists == 5 && r2.exists == 5);
+    assert(r1.unseen == 3 && r2.unseen == 3);
+    assert(r1.uidnext == 42 && r2.uidnext == 42);
+
+    // 缓存已写回：下一次直接命中，不再查库
+    db->mock_conn()->clear_pending();
+    MailboxCacheEntry r3;
+    bool cb3_done = false;
+    fsm->get_mailbox_stats_cached_async(conn, 1001, 5001,
+        [&](MailboxCacheEntry e, bool, bool) { r3 = e; cb3_done = true; });
+    assert(cb3_done && r3.exists == 5 && r3.uidnext == 42);
+    assert(!db->mock_conn()->has_pending_query());   // 缓存命中，未发查询
+
+    std::cout << "  [PASS] stats_flight_dedup_concurrent (1 query, both resumed, cache hit)" << std::endl;
+}
+
+TEST(stats_flight_concurrent_threads) {
+    // 剧情：两个 OS 线程同时 miss 同一邮箱 key（模拟两个连接并发 SELECT）。
+    // single-flight 保证只发一次查询链（谁拿 owner 不定），另一个挂等待列表，
+    // 两个线程都拿到结果。TSan 下验证 flight 锁无数据竞争。
+    auto io = std::make_shared<IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto db = std::make_shared<test::MockDbPool>();
+    db->mock_conn()->set_deferred(true);
+    auto router = std::make_shared<router::StaticShardRouter>(
+        std::vector<std::pair<std::string, int>>{},
+        0,
+        std::vector<std::shared_ptr<DBPool>>{db},
+        std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+    ServerConfig cfg4;
+    cfg4.perf_mode = true; cfg4.apply_perf_mode();
+    cfg4.use_database = false; cfg4.system_domain = "test.local";
+    cfg4.storage.local.mail_path = "/tmp/imaps_flight_test_mail2";
+    cfg4.storage.local.attachment_path = "/tmp/imaps_flight_test_att2";
+    auto server = std::shared_ptr<TestServer>(new TestServer(cfg4, io, wk, router));
+    auto fsm = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router);
+    fsm->set_mailbox_stats_cache(
+        std::make_shared<TraditionalImapsFsm<MockConnection>::MailboxStatsCache>(16));
+    auto conn = std::make_shared<ScopedConnection>(db->acquire_connection());
+
+    MailboxCacheEntry ra, rb;
+    bool a_done = false, b_done = false;
+    std::atomic<bool> go{false};
+    std::thread ta([&] {
+        while (!go.load(std::memory_order_acquire)) {}
+        fsm->get_mailbox_stats_cached_async(conn, 1001, 5001,
+            [&](MailboxCacheEntry e, bool, bool) { ra = e; a_done = true; });
+    });
+    std::thread tb([&] {
+        while (!go.load(std::memory_order_acquire)) {}
+        fsm->get_mailbox_stats_cached_async(conn, 1001, 5001,
+            [&](MailboxCacheEntry e, bool, bool) { rb = e; b_done = true; });
+    });
+    go.store(true, std::memory_order_release);
+    ta.join();
+    tb.join();
+
+    // 两个线程都到达后：只有 owner 发出了 count 查询（去重生效）
+    assert(db->mock_conn()->has_pending_query());
+    assert(!a_done && !b_done);
+
+    // 触发 owner 链 → 两个 waiter 都恢复
+    db->mock_conn()->fire_query(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"cnt", "7"}}}));
+    db->mock_conn()->fire_query(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"cnt", "2"}}}));
+    db->mock_conn()->fire_execute(true);
+    db->mock_conn()->fire_query(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"uidnext", "99"}}}));
+    assert(a_done && b_done);
+    assert(ra.exists == 7 && rb.exists == 7);
+    assert(ra.unseen == 2 && rb.unseen == 2);
+    assert(ra.uidnext == 99 && rb.uidnext == 99);
+
+    std::cout << "  [PASS] stats_flight_concurrent_threads (2 threads, 1 query, no hang)" << std::endl;
 }
 
 int main() {
@@ -739,6 +871,10 @@ int main() {
         // ── UIDNEXT 高水位 ──
         test_uidnext_advance_read(fx);
         test_uidnext_no_db_default(fx);
+
+        // ── 统计 single-flight 去重（并发 SELECT 同邮箱） ──
+        test_stats_flight_dedup_concurrent(fx);
+        test_stats_flight_concurrent_threads(fx);
 
         // ── 命令错误 ──
         test_invalid_command_in_state(fx);
