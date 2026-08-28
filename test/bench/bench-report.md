@@ -685,3 +685,30 @@ size/body 两个异步读共用；完成本封的最后一步走 `fetch_continue
 `fetch_drive` 帧仍在）→ 外层循环 continue；deferred 回调 → 驱动下一封。本地 storage
 保持内联（不加线程投递开销）。回归单测 `fetch_many_mails_no_stack_overflow`（400 封）+
 实测 FETCH 1:2000 正常。
+
+
+
+
+## Profile 热点（2026-08-29 03:03，Darwin，采样 10s，负载: --t 16 --conns 4 --rounds 2000）
+
+> 由 `test/bench/profile.sh` 生成（release 构建，mysql 引擎）。`__psynch_cvwait`/`kevent`
+> 是 asio reactor 的空闲等待（正常）；`stat`=storage 读、`__recvfrom`=网络读、
+> `MySQLResult::get_value`=DB 结果解析是真实应用热点。
+
+  wall=48.4677s  rounds=128000  throughput=2640.93 rounds/s
+
+| 采样计数 | 热点函数 |
+|---------|---------|
+| 33596 | `__psynch_cvwait` |
+| 20189 | `__recvfrom` |
+| 8445 | `kevent` |
+| 8396 | `__sigwait` |
+| 8396 | `__semwait_signal` |
+| 8119 | `stat` |
+| 550 | `_platform_memmove` |
+| 441 | `__sendto` |
+| 291 | `mail_system::MySQLResult::get_value(unsigned long, std::basic_string<char> const&) const` |
+| 258 | `_nanov2_free` |
+| 203 | `_platform_memcmp` |
+| 190 | `__psynch_mutexwait` |
+
