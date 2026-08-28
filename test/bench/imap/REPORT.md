@@ -99,3 +99,21 @@ size/body 两个异步读共用；完成本封的最后一步走 `fetch_continue
 | 258 | `_nanov2_free` |
 | 203 | `_platform_memcmp` |
 | 190 | `__psynch_mutexwait` |
+
+## Phase 3 后（2026-08-29，`achieve=mariadb` + prepared stmt 缓存 + `mysql_ping` 保活）
+
+> 同一 200-mail 邮箱、同一 debug 构建对照。缓存命中直接复用 stmt（跳过 prepare），
+> 每查询往返 2 → 1。
+
+| 并发 | Phase 2（无缓存） | Phase 3（缓存） | P50 (ms, Phase 3) |
+|------|------------------|----------------|-------------------|
+| 1 | 586 | 629 | 1.51 |
+| 4 | 1925 | 1967 | 1.98 |
+| 8 | 1891 | 2003 | 3.94 |
+| 16 | 1968 | 1987 | 7.73 |
+
+**验证往返减半**：`SHOW GLOBAL STATUS` 实测 25,732 次 `Com_stmt_execute` 仅 10 次
+`Com_stmt_prepare`（distinct SQL 数）。localhost 吞吐只涨 ~3%——本地 prepare 本就快、
+轮次被 200 行结果 + storage 读主导；**对远程 DB（部署目标）才是大头**。
+`mysql_ping()` 保活替代 SELECT 1（不污染缓存 stmt 状态）；功能回归
+（LOGIN/SELECT/FETCH 经缓存 stmt 数据正确）、ctest 全绿、TSan 无 race。

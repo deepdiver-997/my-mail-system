@@ -437,11 +437,12 @@ bool MySQLPool::validate_connection(std::shared_ptr<IDBConnection> connection) {
         return false;
     }
 
-    // 执行简单查询来验证连接
+    // 保活/有效性校验：走 IDBConnection::ping()。
+    // 默认实现 SELECT 1（MySQL 引擎，兼容旧行为）；MariaDB 引擎覆写为 mysql_ping
+    // （COM_PING，不污染 prepared stmt 状态——缓存 stmt 后 SELECT 1 不再干净）。
     try {
-        LOG_DATABASE_DEBUG("MySQLPool::validate_connection() - executing SELECT 1 query");
-        auto result = connection->query("SELECT 1");
-        bool is_valid = result != nullptr;
+        LOG_DATABASE_DEBUG("MySQLPool::validate_connection() - executing ping()");
+        bool is_valid = connection->ping();
         LOG_DATABASE_DEBUG("MySQLPool::validate_connection() - connection is {}", (is_valid ? "valid" : "invalid"));
         return is_valid;
     } catch (const std::exception& e) {

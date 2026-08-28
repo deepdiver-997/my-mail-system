@@ -6,6 +6,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 namespace mail_system {
 
@@ -181,6 +182,10 @@ public:
     void async_commit(ExecuteCallback cb) override;
     void async_rollback(ExecuteCallback cb) override;
 
+    // 保活：mysql_ping（COM_PING），不跑查询、不碰 prepared stmt 状态。
+    // 池 checkout 校验走它（替代 SELECT 1）——缓存 stmt 后 SELECT 1 不再干净。
+    bool ping() override;
+
 private:
     MYSQL* m_mysql;
     std::string m_host;
@@ -194,6 +199,18 @@ private:
     // 非阻塞 in-flight 守卫：连接被 FSM 链独占（ScopedConnection 持链），单飞行是
     // 结构性保证；此标志只做防御性检测（误用即记错）。
     std::atomic<bool> m_asyncInFlight{false};
+
+    // ---- prepared stmt 缓存（Phase 3：省 prepare 往返，一趟变一趟） ----
+    // 每连接 SQL→MYSQL_STMT*。首次 prepare 一次，后续 bind + execute 复用。
+    // 复用靠每次用后 mysql_stmt_free_result（结果已全量消费，无需 mysql_stmt_reset
+    // 那趟往返）。stmts 绑定连接，断连/失效时整体清空重建。
+    // 访问约定：以下三个 helper 只在持 m_mutex 时调用（async step / disconnect 都持锁）。
+    std::unordered_map<std::string, MYSQL_STMT*> m_stmtCache;
+    static constexpr size_t kMaxCachedStmts = 128;   // 批量 IN 变长 SQL 会撑大缓存，超限整体清空
+
+    MYSQL_STMT* lookup_stmt(const std::string& sql);     // 缓存命中（持锁调用）
+    void store_stmt(const std::string& sql, MYSQL_STMT* stmt);  // 入缓存（持锁调用，超限清空）
+    void clear_stmt_cache();                             // 关掉全部缓存 stmt（持锁调用）
 
     bool ensure_driver();   // 加载 libmariadb，失败记日志
     void init_mysql();

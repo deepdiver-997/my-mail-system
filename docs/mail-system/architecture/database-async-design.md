@@ -1,7 +1,6 @@
 # 数据库访问真异步化：MariaDB Connector/C 路线（设计）
 
-> 状态：阶段 1、2 已实施（2026-08-29）。阶段 3（stmt 缓存 + mysql_ping 保活）、
-> 阶段 4（异步 checkout）待做。关联：
+> 状态：阶段 1、2、3 已实施（2026-08-29）。阶段 4（异步 checkout）待做。关联：
 > [`mailbox-concurrency.md`](mailbox-concurrency.md)（single-flight 并发）、
 > [`imap-server-design.md`](imap-server-design.md)（DB async CPS 现状）。
 
@@ -168,6 +167,23 @@ validate_connection(conn):
 | 1 | `MariaDBService`/`MariaDBConnection`/`MariaDBPoolFactory` 骨架，**同步**执行路径等价替换 libmysqlclient（`achieve=mariadb` 跑通全部查询/事务/SQL 脚本初始化） | 现有 ctest + e2e 全绿；切换后生产行为一致 |
 | 2 | 非阻塞状态机 + io_context `async_wait` 集成（io 线程不再阻塞）；worker 路径走阻塞 poll | 压测：io 线程在查询期间有 idle；并发在途查询 > io 线程数 |
 | 3 | prepared stmt 缓存（省 prepare 往返）+ 保活改 `mysql_ping()` | 往返次数降一半；保活回归 |
+
+### 阶段 3 实施记录（2026-08-29）
+
+- **prepared stmt 缓存**：`MariaDBConnection::m_stmtCache`（SQL→MYSQL_STMT*，cap 128）。
+  `AsyncStmtOp` 缓存命中直接复用（跳过非阻塞 prepare），未命中新建 prepare 后入缓存。
+  复用靠每次用后 `mysql_stmt_free_result`（结果已全量消费，省掉 `mysql_stmt_reset`
+  那趟往返）；执行/读取出错 → 整体 `clear_stmt_cache()`（连接挂了缓存必然一起失效，
+  宁可重 prepare）。断连时 `disconnect()` 统一关闭缓存 stmt。
+- **保活改 `mysql_ping()`**：`IDBConnection::ping()`（默认 SELECT 1 兼容旧行为）+
+  `MariaDBConnection::ping()` 覆写为 `mysql_ping`（COM_PING，不跑查询、不产生结果集、
+  不碰 stmt 状态——缓存 stmt 后 SELECT 1 不再干净）。`MySQLPool::validate_connection`
+  改走 `ping()`。
+- **验证**：`SHOW GLOBAL STATUS` 实测 25,732 次 `Com_stmt_execute` 只有 **10 次
+  `Com_stmt_prepare`**（distinct SQL 数）——每查询往返从 2 降到 1 ✓。localhost 吞吐
+  提升小（~3%），因本地 prepare 本就快、轮次被 200 行结果 + storage 读主导；**对远程
+  DB（部署目标）才是大头**。功能回归（LOGIN/SELECT/FETCH 经缓存 stmt 数据正确）、
+  ctest 全绿、TSan 无 race。
 | 4 | （可选）异步 checkout + 每连接在途队列 | 池耗尽不再阻塞 io |
 
 每阶段独立可部署、可回滚（`achieve` 切回 `mysql`）。

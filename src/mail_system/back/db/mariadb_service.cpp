@@ -287,6 +287,8 @@ bool MariaDBConnection::connect() {
 
 void MariaDBConnection::disconnect() {
     std::lock_guard<std::mutex> lock(m_mutex);
+    // 先清缓存 stmt：它们绑定连接，连接关了句柄作废，必须关掉防泄漏
+    clear_stmt_cache();
     if (m_mysql && MariaDbDriver::instance().mysql_close) {
         MariaDbDriver::instance().mysql_close(m_mysql);
         m_mysql = nullptr;
@@ -604,6 +606,43 @@ std::string MariaDBConnection::escape_string(const std::string& str) const {
 }
 
 // ====================================================================
+// 保活（Phase 3）：mysql_ping —— COM_PING，不跑查询、不产生结果集、
+// 不碰 prepared stmt 状态。池 checkout 校验走它（替代 SELECT 1）。
+// ====================================================================
+bool MariaDBConnection::ping() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_connected || !m_mysql) return false;
+    return MariaDbDriver::instance().mysql_ping(m_mysql) == 0;
+}
+
+// ====================================================================
+// prepared stmt 缓存（Phase 3）：每连接 SQL→MYSQL_STMT*，省 prepare 往返。
+// 访问约定：以下 helper 只在持 m_mutex 时调用（async step / disconnect 都持锁）。
+// ====================================================================
+
+// 缓存命中。命中返回的 stmt 归缓存所有（析构不 close）。
+MYSQL_STMT* MariaDBConnection::lookup_stmt(const std::string& sql) {
+    auto it = m_stmtCache.find(sql);
+    return it != m_stmtCache.end() ? it->second : nullptr;
+}
+
+// 入缓存。超限整体清空重建（批量 IN 变长 SQL 会撑大 key 集合，宁可偶尔重 prepare
+// 也不让缓存无限涨）。
+void MariaDBConnection::store_stmt(const std::string& sql, MYSQL_STMT* stmt) {
+    if (m_stmtCache.size() >= kMaxCachedStmts) clear_stmt_cache();
+    m_stmtCache[sql] = stmt;
+}
+
+// 关掉全部缓存 stmt 并清空。
+void MariaDBConnection::clear_stmt_cache() {
+    auto& D = MariaDbDriver::instance();
+    for (auto& kv : m_stmtCache) {
+        if (kv.second && D.mysql_stmt_close) D.mysql_stmt_close(kv.second);
+    }
+    m_stmtCache.clear();
+}
+
+// ====================================================================
 // 阶段 2：非阻塞状态机（io 线程 async_wait / worker 阻塞 poll）
 // ====================================================================
 // libmariadb 非阻塞协议是请求-响应：*_start 首次发起，返回 0=已完成（*ret 存阻塞版
@@ -630,6 +669,7 @@ struct MariaDBConnection::AsyncStmtOp : std::enable_shared_from_this<AsyncStmtOp
     std::vector<std::string> params;
 
     MYSQL_STMT* stmt = nullptr;
+    bool stmt_is_cached = false;                // stmt 归连接缓存所有（析构不 close）
     bool prepare_started = false;
     bool prepare_done = false;
     bool bound = false;
@@ -656,6 +696,17 @@ struct MariaDBConnection::AsyncStmtOp : std::enable_shared_from_this<AsyncStmtOp
 
     void complete_fail() { if (done) done(nullptr, false); }
 
+    // 持锁调用：缓存 stmt 执行/读取出错（连接死或 stmt 状态坏）→ 整体清缓存。
+    // 全部缓存 stmt 都依赖同一连接，连接挂了必然一起失效；宁可下次重 prepare。
+    // 清完置 stmt=nullptr，析构不再 close（clear_stmt_cache 已统一关）。
+    void invalidate_cached() {
+        if (stmt_is_cached) {
+            conn->clear_stmt_cache();
+            stmt = nullptr;
+            stmt_is_cached = false;
+        }
+    }
+
     ~AsyncStmtOp();
 
     enum class Step { Wait, Done, Fail };
@@ -669,10 +720,12 @@ struct MariaDBConnection::AsyncStmtOp : std::enable_shared_from_this<AsyncStmtOp
 
 MariaDBConnection::AsyncStmtOp::~AsyncStmtOp() {
     auto& D = MariaDbDriver::instance();
-    if (stmt) {
+    // 缓存命中的 stmt 归连接缓存所有（连接 disconnect/clear_stmt_cache 时统一关），
+    // 这里只关非缓存的临时 stmt（prepare 失败/未入缓存的）。
+    if (stmt && !stmt_is_cached) {
         if (D.mysql_stmt_close) D.mysql_stmt_close(stmt);
-        stmt = nullptr;
     }
+    stmt = nullptr;
 }
 
 // store 完成后逐行读进内存（纯内存，不碰网络）；失败返回 nullptr。
@@ -747,16 +800,23 @@ MariaDBConnection::AsyncStmtOp::StepResult MariaDBConnection::AsyncStmtOp::step(
     auto& D = MariaDbDriver::instance();
     if (!conn->m_mysql) return {Step::Fail, 0};
 
+    // ---- stmt 获取：缓存命中直接复用（跳过 prepare 往返）；未命中新建后缓存 ----
     if (!stmt) {
-        stmt = D.mysql_stmt_init(conn->m_mysql);
-        if (!stmt) {
-            LOG_DB_QUERY_ERROR("MariaDB async: stmt init error: {}",
-                               D.mysql_error(conn->m_mysql));
-            return {Step::Fail, 0};
+        stmt = conn->lookup_stmt(sql);        // 持锁调用
+        if (stmt) {
+            stmt_is_cached = true;
+            prepare_done = true;              // 复用：省 prepare，直接 bind + execute
+        } else {
+            stmt = D.mysql_stmt_init(conn->m_mysql);
+            if (!stmt) {
+                LOG_DB_QUERY_ERROR("MariaDB async: stmt init error: {}",
+                                   D.mysql_error(conn->m_mysql));
+                return {Step::Fail, 0};
+            }
         }
     }
 
-    // ---- prepare（非阻塞） ----
+    // ---- prepare（非阻塞，仅缓存未命中时） ----
     int ret = 0;
     if (!prepare_done) {
         int rc;
@@ -770,8 +830,12 @@ MariaDBConnection::AsyncStmtOp::StepResult MariaDBConnection::AsyncStmtOp::step(
         if (ret != 0) {
             LOG_DB_QUERY_ERROR("MariaDB async: prepare error: {} (sql={})",
                                D.mysql_stmt_error(stmt), sql);
+            if (stmt && !stmt_is_cached) { D.mysql_stmt_close(stmt); stmt = nullptr; }
             return {Step::Fail, 0};
         }
+        // 新 prepare 完成 → 入缓存（缓存所有权，析构不再 close）
+        conn->store_stmt(sql, stmt);
+        stmt_is_cached = true;
         prepare_done = true;
     }
 
@@ -812,6 +876,7 @@ MariaDBConnection::AsyncStmtOp::StepResult MariaDBConnection::AsyncStmtOp::step(
         if (rc) { last_wait = rc; return {Step::Wait, rc}; }
         if (ret != 0) {
             LOG_DB_QUERY_ERROR("MariaDB async: execute error: {}", D.mysql_stmt_error(stmt));
+            invalidate_cached();
             return {Step::Fail, 0};
         }
         execute_done = true;
@@ -837,6 +902,7 @@ MariaDBConnection::AsyncStmtOp::StepResult MariaDBConnection::AsyncStmtOp::step(
         if (ret != 0) {
             LOG_DB_QUERY_ERROR("MariaDB async: store result error: {}",
                                D.mysql_stmt_error(stmt));
+            invalidate_cached();
             return {Step::Fail, 0};
         }
         store_done = true;
@@ -852,7 +918,13 @@ MariaDBConnection::AsyncStmtOp::StepResult MariaDBConnection::AsyncStmtOp::step(
 
     // ---- 读行（store 完成后全在内存） ----
     result = read_stmt_rows(stmt, D);
-    if (!result) return {Step::Fail, 0};
+    if (!result) {
+        invalidate_cached();
+        return {Step::Fail, 0};
+    }
+    // 缓存 stmt 复用：结果已全量消费，free_result 为下次 execute 腾干净状态
+    // （省掉 mysql_stmt_reset 那趟往返）。
+    if (stmt_is_cached) D.mysql_stmt_free_result(stmt);
     return {Step::Done, 0};
 }
 

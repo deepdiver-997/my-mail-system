@@ -47,6 +47,14 @@ public:
     virtual std::string get_last_error() const = 0;
     virtual std::string escape_string(const std::string& str) const = 0;
 
+    // 连接保活/有效性校验（池 checkout 时调用，替代裸 SELECT 1）。
+    // 默认 SELECT 1（与旧行为一致）；MariaDBConnection 覆写为 mysql_ping
+    // （COM_PING，不跑查询、不产生结果集、不碰 prepared stmt 状态——是缓存 stmt
+    // 前提下的必要选择）。
+    virtual bool ping() {
+        return query("SELECT 1") != nullptr;
+    }
+
     // Async wrappers with default sync impl
     virtual void async_query(const std::string& sql, QueryCallback cb) {
         if (cb) cb(query(sql));
