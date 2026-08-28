@@ -32,6 +32,11 @@ inline bool se(class IDBConnection* c, const std::string& sql,
     c->async_execute(sql, params, [&ok](bool r) { ok = r; });
     return ok;
 }
+inline bool se(class IDBConnection* c, const std::string& sql) {
+    bool ok = false;
+    c->async_execute(sql, [&ok](bool r) { ok = r; });
+    return ok;
+}
 } // namespace
 
 template <typename ConnectionType>
@@ -194,15 +199,21 @@ bool TraditionalPop3Fsm<ConnectionType>::acquire_lock(
     class IDBConnection* conn, uint64_t user_id, const std::string& session_id)
 {
     if (!conn) return false;
-    // INSERT ... ON DUPLICATE KEY UPDATE：只在 (session_id 匹配) 时续约；否则保留旧锁
-    // （旧锁持有者会自己 release_lock）
-    const char* sql =
+    // INSERT ... ON DUPLICATE KEY UPDATE：同 session_id 续约，异 session_id 保留旧锁。
+    // async_execute 只返回 bool（无 affected-rows），且 ON DUPLICATE KEY UPDATE
+    // 在冲突时并不报错，所以 upsert 之后再 SELECT 验证所有权。
+    const char* upsert =
         "INSERT INTO pop3_session_lock (user_id, session_id, acquired_at, last_heartbeat) "
         "VALUES (?, ?, NOW(), NOW()) "
         "ON DUPLICATE KEY UPDATE "
         "  session_id = IF(session_id = VALUES(session_id), VALUES(session_id), session_id), "
         "  last_heartbeat = IF(session_id = VALUES(session_id), NOW(), last_heartbeat)";
-    return se(conn, sql, {std::to_string(user_id), session_id});
+    se(conn, upsert, {std::to_string(user_id), session_id});
+
+    auto r = sq(conn, "SELECT COUNT(*) as cnt FROM pop3_session_lock "
+                      "WHERE user_id = ? AND session_id = ?",
+                {std::to_string(user_id), session_id});
+    return r && r->get_row_count() > 0 && safe_stoull(r->get_value(0, "cnt")) > 0;
 }
 
 template <typename ConnectionType>
@@ -220,9 +231,14 @@ bool TraditionalPop3Fsm<ConnectionType>::apply_deletions(
     const std::set<uint64_t>& deleted_mail_ids)
 {
     if (!conn || deleted_mail_ids.empty()) return true;
+    // 全部数值参数直接拼接（仿 IMAP update_mail_deleted），避开 prepared
+    // statement 参数顺序/个数不匹配问题。
     for (auto mid : deleted_mail_ids) {
-        se(conn, db::sql::build_imap_update_mail_flag_deleted(),
-           {std::to_string(mid), std::to_string(user_id), std::to_string(mailbox_id)});
+        std::string sql = "UPDATE mail_mailbox SET is_deleted = 1"
+            " WHERE mail_id = " + std::to_string(mid)
+            + " AND user_id = " + std::to_string(user_id)
+            + " AND mailbox_id = " + std::to_string(mailbox_id);
+        se(conn, sql);
     }
     return se(conn, db::sql::build_imap_expunge_delete_mailbox(),
               {std::to_string(mailbox_id), std::to_string(user_id)});
@@ -245,9 +261,10 @@ void TraditionalPop3Fsm<ConnectionType>::init_transition_table() {
     this->add_transition(Pop3State::TRANSACTION, Pop3Event::RSET, Pop3State::TRANSACTION);
     this->add_transition(Pop3State::TRANSACTION, Pop3Event::CAPA, Pop3State::TRANSACTION);
     this->add_transition(Pop3State::TRANSACTION, Pop3Event::QUIT, Pop3State::UPDATE);
+    // ERROR = 未知命令/空行：回 -ERR 并留在当前状态（不自闭）
     for (int i = 0; i <= static_cast<int>(Pop3State::UPDATE); ++i) {
         auto s = static_cast<Pop3State>(i);
-        this->add_transition(s, Pop3Event::ERROR, Pop3State::CLOSED);
+        this->add_transition(s, Pop3Event::ERROR, s);
     }
 }
 
@@ -652,24 +669,20 @@ void TraditionalPop3Fsm<ConnectionType>::handle_retr(
             return;
         }
         // RFC 1939 §3.3 dot-stuffing：每行以 "." 开头则前缀 "."
+        // 逐行转 CRLF；结尾的 '\n' 不产生额外空行（否则终止符前会多一行）
         std::string out;
         out.reserve(body.size() + 64);
         size_t start = 0;
-        while (start <= body.size()) {
+        while (start < body.size()) {
             size_t eol = body.find('\n', start);
-            std::string line;
-            if (eol == std::string::npos) {
-                line = body.substr(start);
-                start = body.size() + 1;
-            } else {
-                line = body.substr(start, eol - start);
-                start = eol + 1;
-            }
+            size_t line_end = (eol == std::string::npos) ? body.size() : eol;
+            std::string line = body.substr(start, line_end - start);
             if (!line.empty() && line.back() == '\r') line.pop_back();
             if (!line.empty() && line[0] == '.') line.insert(line.begin(), '.');
             out += line;
             out += "\r\n";
             if (eol == std::string::npos) break;
+            start = eol + 1;
         }
         if (!self || self->is_closed()) return;
         send_line(self, "+OK " + std::to_string(target.size) + " octets");
@@ -790,6 +803,15 @@ template <typename ConnectionType>
 void TraditionalPop3Fsm<ConnectionType>::handle_error(
     std::shared_ptr<SessionBase<ConnectionType>> session) {
     if (!session || session->is_closed()) return;
+    // 未知命令/空行 → 回 -ERR，连接保持（用户在 AUTHORIZATION 可重试）
+    send_line(session, "-ERR Unknown command");
+}
+
+template <typename ConnectionType>
+void TraditionalPop3Fsm<ConnectionType>::handle_timeout(
+    std::shared_ptr<SessionBase<ConnectionType>> session) {
+    if (!session || session->is_closed()) return;
+    // 异常结束：释放 mailbox 锁再关（abrupt disconnect 的锁泄漏由 v2 sweeper 兜底）
     auto* ctx = ctx_of(session);
     if (ctx && ctx->is_authenticated && !ctx->session_id.empty() && m_shardRouter) {
         auto pool = m_shardRouter->get_db_pool(
@@ -802,13 +824,6 @@ void TraditionalPop3Fsm<ConnectionType>::handle_error(
         }
     }
     session->close();
-}
-
-template <typename ConnectionType>
-void TraditionalPop3Fsm<ConnectionType>::handle_timeout(
-    std::shared_ptr<SessionBase<ConnectionType>> session) {
-    if (!session || session->is_closed()) return;
-    handle_error(session);
 }
 
 } // namespace mail_system
