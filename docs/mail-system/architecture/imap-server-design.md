@@ -150,8 +150,9 @@ query/execute bridge in the IMAP path.
   (an empty shard router yields an *invalid* ScopedConnection — null `connection_`).
 
 The MySQL `async_*` wrappers currently execute inline (synchronous), but the caller
-structure is already async-ready: when a real async DB lands, callbacks fire on a DB
-thread and only the shared `conn` lifetime matters.
+structure is already async-ready: the plan is to swap the engine to MariaDB
+Connector/C (nonblocking, io_context-driven) so io threads stop blocking on the
+query. See [`database-async-design.md`](database-async-design.md).
 
 Mailbox stats (SELECT/STATUS) additionally use a **single-flight** dedup so N
 concurrent SELECTs of the same mailbox fire only one source query chain. Details in

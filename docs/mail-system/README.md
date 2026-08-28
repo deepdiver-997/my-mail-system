@@ -24,6 +24,7 @@
 | [architecture/pop3-server-design.md](architecture/pop3-server-design.md) | POP3 服务器（RFC 1939）设计 |
 | [architecture/imap-server-design.md](architecture/imap-server-design.md) | IMAP（RFC 3501）服务器设计 |
 | [architecture/imap-protocol-flow.md](architecture/imap-protocol-flow.md) | IMAP 协议流程细节 |
+| [architecture/database-async-design.md](architecture/database-async-design.md) | DB 真异步化设计：MariaDB Connector/C 非阻塞 + prepared stmt 缓存 + mysql_ping 保活 |
 | [architecture/smtp-outbound-client-design.md](architecture/smtp-outbound-client-design.md) | SMTP 发件引擎设计 |
 | [architecture/inbound-verification-flow.md](architecture/inbound-verification-flow.md) | 入站校验（SPF/DKIM/DMARC）流程 |
 | [architecture/vs-postfix.md](architecture/vs-postfix.md) | 与 Postfix 的对比 |
