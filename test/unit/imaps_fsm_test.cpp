@@ -158,6 +158,19 @@ TEST(login_response) {
     std::cout << "  [PASS] login_response" << std::endl;
 }
 
+TEST(login_success_real_auth) {
+    // 剧情：真实 parser 驱动 LOGIN → worker 异步 auth（fixture auth cache 命中
+    // user0@test.local/test123）→ tagged OK。旧测试只断言 !empty，抓不住
+    // "auth 收到空用户名"这类参数在回调构造时被 std::move 走的回归。
+    auto h = fx.make_session();
+    h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
+    h.session->handle_read("A001 LOGIN user0@test.local test123\r\n");
+    h.session->process_read();
+    auto w = wait_for_reply(h);
+    assert(w.find("A001 OK LOGIN completed") != std::string::npos);
+    std::cout << "  [PASS] login_success_real_auth (real parser → async auth)" << std::endl;
+}
+
 TEST(login_wrong_password) {
     auto h = fx.make_session();
     h.session->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
@@ -854,6 +867,7 @@ int main() {
         // ── 基础命令 ──
         test_capability_response(fx);
         test_login_response(fx);
+        test_login_success_real_auth(fx);
         test_login_wrong_password(fx);
         test_login_many_failures_close(fx);
         test_noop_reply(fx);

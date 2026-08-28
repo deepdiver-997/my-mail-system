@@ -818,7 +818,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_login(
             // shared ScopedConnection 保活，调用方结构无需改动。
             TraditionalImapsFsm<ConnectionType>::auth_user_async(
                 router, auth_cache, username, password,
-                [self, tag, username = std::move(username)](
+                [self, tag, username = username](
                     bool ok, uint64_t user_id, int shard) mutable {
                     if (!self || self->is_closed()) return;
                     if (ok) {
@@ -942,7 +942,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
     TraditionalImapsFsm<ConnectionType>::find_mailbox_id_async(
         conn, user_id, mailbox_name,
         [this, self, tag = std::move(tag), conn, user_id,
-         mailbox_name = std::move(mailbox_name)](uint64_t mailbox_id) mutable {
+         mailbox_name = mailbox_name](uint64_t mailbox_id) mutable {
             if (!self || self->is_closed()) return;
             auto* ctx = static_cast<ImapContext*>(self->get_context());
             if (mailbox_id == 0) {
@@ -1026,7 +1026,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_examine(
     TraditionalImapsFsm<ConnectionType>::find_mailbox_id_async(
         conn, user_id, mailbox_name,
         [this, self, tag = std::move(tag), conn, user_id,
-         mailbox_name = std::move(mailbox_name)](uint64_t mailbox_id) mutable {
+         mailbox_name = mailbox_name](uint64_t mailbox_id) mutable {
             if (!self || self->is_closed()) return;
             auto* ctx = static_cast<ImapContext*>(self->get_context());
             if (mailbox_id == 0) {
@@ -1225,7 +1225,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_status(
     TraditionalImapsFsm<ConnectionType>::find_mailbox_id_async(
         conn, user_id, mailbox_name,
         [this, self, tag = std::move(tag), conn, user_id,
-         mailbox_name = std::move(mailbox_name),
+         mailbox_name = mailbox_name,
          status_attrs = std::move(status_attrs)](uint64_t mailbox_id) mutable {
             if (!self || self->is_closed()) return;
             if (mailbox_id == 0) {
@@ -2336,7 +2336,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
         conn, user_id, mailbox_name,
         [this, self, conn, tag = std::move(tag), subject = std::move(subject),
          body_content = std::move(body_content), init_status,
-         mailbox_name = std::move(mailbox_name), user_id](
+         mailbox_name = mailbox_name, user_id](
             uint64_t target_mbox_id) mutable {
             if (!self || self->is_closed()) return;
             if (target_mbox_id == 0) {
