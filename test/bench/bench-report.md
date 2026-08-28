@@ -652,6 +652,28 @@ SELECT 的 stats 查询走缓存后接近零成本 → **瓶颈不在 SELECT，�
 ## 预期：Phase 2（DB 真异步）应把吞吐天花板从 ~4×单线程速率抬到连接池上限（128），
 且 io 线程不再被查询期间卡死。用本表做 before/after 对照。
 
+## Phase 2 后（2026-08-29，`achieve=mariadb` 非阻塞 async）
+
+> 同一 200-mail 邮箱，同日同期复测。对照 `achieve=mysql`（sync）与 mariadb（async）。
+
+| 并发 | mysql sync (rounds/s) | mariadb async (rounds/s) | P50 (ms, async) |
+|------|----------------------|--------------------------|-----------------|
+| 1 | 609 | 586 | 1.56 |
+| 4 | 1816 | 1925 | 2.02 |
+| 8 | 1910 | 1891 | 4.19 |
+| 16 | 1975 | 1968 | 7.99 |
+
+**结论**：两引擎吞吐持平、都封顶 ~1950 rps。瓶颈是每轮**非 DB 的 io 线程工作**
+（200 次 storage 读 + 200 行响应组装/写回），不是 DB 阻塞；本地 DB socket 立即可读，
+非阻塞查询也走内联完成（rc=0 无 wait），io 线程 CPU 并不因 async 降低。**async 的收益
+在远程/慢 DB 上才显现**——socket 不就绪时 io 线程在 `async_wait` 期间真正让出。
+SELECT-only（缓存命中近零 DB）两引擎均 ~40k rps。
+
+**顺带修掉的真 bug：async op 连接泄漏**（Phase 2 实施时发现）：`done` 捕获 op 自身构成
+shared_ptr 循环 → 每个 async 查询泄漏一条连接 → 池耗尽 → io 线程卡 5s。压测复现
+89 acquire / 1 release。修后 acquire=release。回归单测 `mariadb_async_test`
+（50 查询后池 available 恢复基线）。
+
 ## ⚠ 顺带发现的生产 bug：FETCH 续作链栈溢出
 
 FETCH 大邮箱（>~200 封）会 **SIGSEGV**：`fetch_complete_mail_with_body` 栈溢出。

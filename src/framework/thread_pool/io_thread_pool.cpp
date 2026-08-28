@@ -1,4 +1,5 @@
 #include "framework/thread_pool/io_thread_pool.h"
+#include "framework/thread_pool/io_context_registry.h"
 #include "mail_system/back/common/logger.h"
 
 namespace mail_system {
@@ -27,6 +28,9 @@ void IOThreadPool::start() {
     m_threads.reserve(m_thread_count);
     for (size_t i = 0; i < m_thread_count; ++i) {
         m_threads.emplace_back([this, i]() {
+            // 注册 thread_local io_context：DB 非阻塞等待（mariadb async）据此
+            // 决定用 io_context.async_wait（io 线程不阻塞）还是阻塞 poll。
+            set_current_io_context(m_io_contexts[i].get());
             try {
                 m_io_contexts[i]->run();
             } catch (const std::exception& e) {
@@ -34,6 +38,7 @@ void IOThreadPool::start() {
             } catch (...) {
                 LOG_THREAD_POOL_ERROR("Unknown exception in IO thread");
             }
+            set_current_io_context(nullptr);
         });
     }
 }

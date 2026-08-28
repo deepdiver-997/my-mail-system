@@ -1,6 +1,7 @@
 # 数据库访问真异步化：MariaDB Connector/C 路线（设计）
 
-> 状态：方案待评审。2026-08-29 起草。关联：
+> 状态：阶段 1、2 已实施（2026-08-29）。阶段 3（stmt 缓存 + mysql_ping 保活）、
+> 阶段 4（异步 checkout）待做。关联：
 > [`mailbox-concurrency.md`](mailbox-concurrency.md)（single-flight 并发）、
 > [`imap-server-design.md`](imap-server-design.md)（DB async CPS 现状）。
 
@@ -170,6 +171,46 @@ validate_connection(conn):
 | 4 | （可选）异步 checkout + 每连接在途队列 | 池耗尽不再阻塞 io |
 
 每阶段独立可部署、可回滚（`achieve` 切回 `mysql`）。
+
+### 阶段 2 实施记录（2026-08-29）
+
+**已实现**（`mariadb_service.{h,cpp}` + `io_context_registry.{h,cpp}`）：
+
+- `AsyncStmtOp` 非阻塞状态机：prepare → bind → execute → store_result → read，
+  全部走 `mysql_stmt_*_start/cont`；`_start`/`_cont` 返回 0=完成（`*ret` 存阻塞版
+  返回值）或 `MYSQL_WAIT_READ/WRITE/EXCEPT/TIMEOUT` 掩码。
+- 两种 wait 策略（一套状态机）：`current_io_context()`（IOThreadPool 线程 thread_local
+  注册）非空 → io 线程 → `io_context.async_wait`（posix::stream_descriptor assign/release
+  托管 mariadb socket，首个触发者续作，其余忽略）；空（worker）→ 阻塞 poll，迭代不递归。
+- 前置 `MYSQL_OPT_NONBLOCK`；缺非阻塞符号（老 libmariadb）→ `has_nonblocking()=false`
+  → async_* 回退同步执行（旧行为）。
+- `MariaDBConnection` 改 `enable_shared_from_this`；async op 持有连接 shared_ptr 保活。
+- 单飞行守卫 `m_asyncInFlight`：FSM 链独占连接是结构性保证，flag 只做防御检测。
+
+**压测结论（`achieve=mariadb`，localhost 200-mail 邮箱，imap_client SELECT+FETCH 1:200）**：
+
+| 并发 | mariadb async (rounds/s) | mysql sync 同期 (rounds/s) |
+|------|--------------------------|---------------------------|
+| 1 | 586 | 609 |
+| 4 | 1925 | 1816 |
+| 8 | 1891 | 1910 |
+| 16 | 1968 | 1975 |
+
+两引擎在该 bench 上吞吐持平、同时封顶 ~1950 rps——**瓶颈是每轮非 DB 的 io 线程工作
+（200 次 storage 读 + 200 行响应组装/写回），不是 DB 阻塞**；本地 DB socket 立即可读，
+非阻塞查询也走内联完成（rc=0 无 wait），io 线程 CPU 并不因 async 降低。async 的收益在
+远程/慢 DB 上才显现（socket 不就绪 → io 线程在 async_wait 期间真正让出）。SELECT-only
+（缓存命中近零 DB）两引擎均 ~40k rps，mariadb 略低 5-13%（非阻塞状态机每次查询
+init+prepare+execute+store+close 的开销，阶段 3 缓存 stmt 可消）。
+
+**⚠ 实施中发现并修复的真 bug：async op 连接泄漏**。`done` 回调最初捕获了 `op`
+自身（shared_ptr）→ `op`↔`done` 构成循环 → op（连同捕获了 ScopedConnection 的用户
+回调）永不释放 → 每个 async 查询泄漏一条连接 → 池耗尽 → io 线程卡 connection_timeout
+（5s）。压测复现：89 次 acquire 仅 1 次 release。修法：`done` 只捕获连接 + 用户 cb，
+result/ok 以参数传入，绝不捕获 op。回归单测 `mariadb_async_test`：50 个 async 查询后
+池 available 恢复基线（32→32）。**此 bug 同样影响 sync 之外的任何持链 CPS 异步化代码**。
+
+**回归**：ctest 23/23（`-j4` 稳定）；TSan（imaps_fsm_test + mariadb_async_test）无 race。
 
 ## 9. 风险与回滚
 

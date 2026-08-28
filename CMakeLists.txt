@@ -281,6 +281,7 @@ set(COMMON_SRCS
     src/framework/server_base.cpp
     src/framework/thread_pool/boost_thread_pool.cpp
     src/framework/thread_pool/io_thread_pool.cpp
+    src/framework/thread_pool/io_context_registry.cpp
     src/mail_system/back/algorithm/snow.cpp
     src/mail_system/back/storage/distributed_file_storage_provider.cpp
     src/mail_system/back/storage/local_file_storage_provider.cpp
@@ -484,11 +485,20 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
 
     add_executable(thread_pool_test
         src/framework/thread_pool/io_thread_pool.cpp
+        src/framework/thread_pool/io_context_registry.cpp
         src/framework/thread_pool/boost_thread_pool.cpp
         test/unit/thread_pool_test.cpp
     )
     target_include_directories(thread_pool_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(thread_pool_test)
+
+    # MariaDB 非阻塞 async 回归（阶段 2）：连接池 available 在批量 async 查询后回基线
+    if(HAVE_MARIADB)
+        add_executable(mariadb_async_test ${COMMON_SRCS} test/unit/mariadb_async_test.cpp)
+        target_include_directories(mariadb_async_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+        setup_mail_target(mariadb_async_test)
+        add_test(NAME mariadb_async_test COMMAND mariadb_async_test)
+    endif()
 
     # 会话/FSM/服务基座：TestSession::close() 引用 ServerBase 成员符号
     # （server_base.cpp），须链 COMMON_SRCS（同 smtps/imaps_fsm_test 模式）

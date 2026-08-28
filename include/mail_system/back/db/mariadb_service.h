@@ -3,6 +3,7 @@
 
 #include "mail_system/back/db/db_service.h"
 #include <mariadb/mysql.h>   // libmariadb（MariaDB Connector/C）类型与常量
+#include <atomic>
 #include <mutex>
 #include <string>
 
@@ -63,16 +64,35 @@ public:
     int (*mysql_stmt_fetch)(MYSQL_STMT*) = nullptr;
     int (*mysql_stmt_fetch_column)(MYSQL_STMT*, MYSQL_BIND*, unsigned int, unsigned long) = nullptr;
     my_bool (*mysql_stmt_close)(MYSQL_STMT*) = nullptr;
+    my_bool (*mysql_stmt_free_result)(MYSQL_STMT*) = nullptr;
     const char* (*mysql_stmt_error)(MYSQL_STMT*) = nullptr;
     unsigned long long (*mysql_stmt_affected_rows)(MYSQL_STMT*) = nullptr;
 
     // ---- 工具 ----
     unsigned long (*mysql_real_escape_string)(MYSQL*, char*, const char*, unsigned long) = nullptr;
 
-    // ---- 阶段 2 预留：非阻塞 API（可选符号，缺则不启用 async） ----
+    // ---- 非阻塞 API（阶段 2：非阻塞状态机 + io_context async_wait 集成） ----
+    // libmariadb 对每个可能阻塞的调用提供 *_start / *_cont 对：
+    //   *_start 首次发起；返回 0 = 已完成（*ret 存阻塞版返回值），
+    //   非 0 = MYSQL_WAIT_READ/WRITE/EXCEPT/TIMEOUT 位掩码（等待 socket）。
+    //   *_cont(stmt, 上次返回的 wait 掩码) 在 socket 就绪后续；返回语义同 *_start。
+    // 全部可选符号：缺则 has_nonblocking()=false，async_* 回退同步执行。
+    int (*mysql_stmt_prepare_start)(int*, MYSQL_STMT*, const char*, unsigned long) = nullptr;
+    int (*mysql_stmt_prepare_cont)(int*, MYSQL_STMT*, int) = nullptr;
     int (*mysql_stmt_execute_start)(int*, MYSQL_STMT*) = nullptr;
     int (*mysql_stmt_execute_cont)(int*, MYSQL_STMT*, int) = nullptr;
+    int (*mysql_stmt_store_result_start)(int*, MYSQL_STMT*) = nullptr;
+    int (*mysql_stmt_store_result_cont)(int*, MYSQL_STMT*, int) = nullptr;
     my_socket (*mysql_get_socket)(MYSQL*) = nullptr;
+    unsigned int (*mysql_get_timeout_value_ms)(const MYSQL*) = nullptr;
+
+    // 非阻塞路径是否可用（全部必需符号已绑定）
+    bool has_nonblocking() const {
+        return mysql_stmt_prepare_start && mysql_stmt_prepare_cont &&
+               mysql_stmt_execute_start && mysql_stmt_execute_cont &&
+               mysql_stmt_store_result_start && mysql_stmt_store_result_cont &&
+               mysql_get_socket;
+    }
 
 private:
     MariaDbDriver() = default;
@@ -115,9 +135,13 @@ private:
 };
 
 // ====================================================================
-// MariaDBConnection —— IDBConnection 实现（同步路径，镜像 MySQLConnection）
+// MariaDBConnection —— IDBConnection 实现（同步 + 非阻塞 async 双路径）
 // ====================================================================
-class MariaDBConnection : public IDBConnection {
+// enable_shared_from_this：非阻塞 async 在 io_context.async_wait 挂起期间持有
+// shared_ptr 保活连接（池里释放/销毁也不会悬垂，续作回调安全）。连接始终由池的
+// shared_ptr 拥有（MariaDBService::create_connection 用 make_shared）。
+class MariaDBConnection : public IDBConnection,
+                          public std::enable_shared_from_this<MariaDBConnection> {
 public:
     enum class ParamType { String, Int };
     MariaDBConnection();
@@ -144,6 +168,19 @@ public:
     std::string get_last_error() const override;
     std::string escape_string(const std::string& str) const override;
 
+    // ---- 非阻塞 async（阶段 2 override） ----
+    // libmariadb 非阻塞路径可用时走真异步状态机（io 线程 async_wait 不阻塞，
+    // worker 线程阻塞 poll）；不可用（缺符号）回退同步执行后内联回调（旧行为）。
+    void async_query(const std::string& sql, QueryCallback cb) override;
+    void async_query(const std::string& sql, const std::vector<std::string>& params,
+                     QueryCallback cb) override;
+    void async_execute(const std::string& sql, ExecuteCallback cb) override;
+    void async_execute(const std::string& sql, const std::vector<std::string>& params,
+                       ExecuteCallback cb) override;
+    void async_begin_transaction(ExecuteCallback cb) override;
+    void async_commit(ExecuteCallback cb) override;
+    void async_rollback(ExecuteCallback cb) override;
+
 private:
     MYSQL* m_mysql;
     std::string m_host;
@@ -154,8 +191,16 @@ private:
     bool m_connected;
     mutable std::mutex m_mutex;
 
+    // 非阻塞 in-flight 守卫：连接被 FSM 链独占（ScopedConnection 持链），单飞行是
+    // 结构性保证；此标志只做防御性检测（误用即记错）。
+    std::atomic<bool> m_asyncInFlight{false};
+
     bool ensure_driver();   // 加载 libmariadb，失败记日志
     void init_mysql();
+
+    // 非阻塞状态机：op 结构体 + 驱动逻辑定义在 .cpp（不暴露到头文件）。
+    struct AsyncStmtOp;
+    void start_async_op(const std::shared_ptr<AsyncStmtOp>& op);
 };
 
 // ====================================================================
