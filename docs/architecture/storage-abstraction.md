@@ -4,7 +4,7 @@
 
 `IStorageProvider` 屏蔽本地文件、分布式副本、S3、WebHDFS 的差异。早期它只有一个 `append_binary(key, data, size, error)`——无状态、按 key 追加、位置由后端当前末尾决定。这带来两个后果：
 
-1. **写入位置不可表达**：调用方无法说出"这块数据属于第 N 字节"，因此落盘顺序 = 调用到达顺序。一旦写入经过线程池（执行顺序 ≠ 发起顺序），就会把文件写错位（见 [正文错位修复](../bugfixes/2026-08-21-mail-body-rotation-fix.md)）。
+1. **写入位置不可表达**：调用方无法说出"这块数据属于第 N 字节"，因此落盘顺序 = 调用到达顺序。一旦写入经过线程池（执行顺序 ≠ 发起顺序），就会把文件写错位（见 [正文错位修复](../mail-system/bugfixes/2026-08-21-mail-body-rotation-fix.md)）。
 2. **读侧完全缺失**：FSM 直接对 `body_path` 做 `std::ifstream`。而 `body_path` 对远程后端是 key 不是本地路径，远程后端的读路径因此一直是坏的。
 
 ## 写侧：显式 offset，顺序无关

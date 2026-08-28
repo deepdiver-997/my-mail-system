@@ -66,7 +66,7 @@ v1 只有 acquire/release：会话硬崩溃（SIGKILL/断电）不跑 QUIT/超�
 POP3 是**排他互斥**（一个用户一个写者），outbound 是**分活**（多 worker 并发
 claim 不同行）。
 
-细节见 `docs/architecture/pop3-server-design.md` 的「锁 → 租约」节。
+细节见 `pop3-server-design.md` 的「锁 → 租约」节。
 
 ## IMAP 要怎么做（现状 + 该改的）
 

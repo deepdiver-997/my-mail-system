@@ -12,7 +12,7 @@
 
 **症状:** 客户端显示邮件为空。
 
-**根因:** [traditional_imaps_fsm.tpp](../../include/mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.tpp) `build_bodystructure_tree` 把 multipart 输出成单 part 布局:
+**根因:** [traditional_imaps_fsm.tpp](../../../include/mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.tpp) `build_bodystructure_tree` 把 multipart 输出成单 part 布局:
 ```
 ("multipart" "alternative" ("BOUNDARY" "...") NIL NIL NIL (sub1)(sub2))
 ```
@@ -60,14 +60,14 @@ RFC 要求**子 part 在前、subtype 在后**:
 
 **症状:** 客户端标记已读后邮件仍是未读,反复重拉。
 
-**根因 A:** [mysql_service.cpp](../../src/mail_system/back/db/mysql_service.cpp) prepared statement 与连接池 `SELECT 1` 验证不兼容,绑定参数丢失(见 [prepared-statement-connection-pool-issue.md](prepared-statement-connection-pool-issue.md))。`update_mail_seen` 改用直接 SQL + escape_string。
+**根因 A:** [mysql_service.cpp](../../../src/mail_system/back/db/mysql_service.cpp) prepared statement 与连接池 `SELECT 1` 验证不兼容,绑定参数丢失(见 [prepared-statement-connection-pool-issue.md](../../bugfixes/prepared-statement-connection-pool-issue.md))。`update_mail_seen` 改用直接 SQL + escape_string。
 **根因 B:** STORE 的 flag 解析大小写敏感,客户端发 `\SEEN`(大写)不匹配 `\Seen` → flag_seen=false → **update_mail_seen 从未被调用**。改成大小写不敏感,并修正 `-FLAGS.SILENT` 被 `find("FLAGS")` 先匹配丢负号的顺序 bug。
 
 ### 7. SMTP 25 端口 530 拒绝外部投递
 
 **症状:** OpenAI/GPT 验证码邮件收不到。
 
-**根因:** [traditional_smtps_fsm.tpp](../../include/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.tpp) 用 listener 的 `auth_policy`(AUTO)决定 `require_auth = !is_trusted_server`,而该值从未被置真 → 所有外部发件人被 530。配置里 `inbound_auth_policy: off` 未生效。
+**根因:** [traditional_smtps_fsm.tpp](../../../include/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.tpp) 用 listener 的 `auth_policy`(AUTO)决定 `require_auth = !is_trusted_server`,而该值从未被置真 → 所有外部发件人被 530。配置里 `inbound_auth_policy: off` 未生效。
 
 **修复:** AUTO 端口的认证要求改由 `cfg->inbound_auth_policy` 决定;465/587(ON)仍强制认证。
 
@@ -101,7 +101,7 @@ RFC 要求**子 part 在前、subtype 在后**:
 
 ## 测试
 
-新增 [mime_parser_test.cpp](../../test/unit/mime_parser_test.cpp),构造合法 MIME(单 part、multipart/alternative、multipart/mixed、嵌套、folded header、DKIM h= 干扰、带引号/不带引号 charset、不带引号 boundary)验证 `parse_mime_tree` / `build_bodystructure_tree` / `extract_part_content`。
+新增 [mime_parser_test.cpp](../../../test/unit/mime_parser_test.cpp),构造合法 MIME(单 part、multipart/alternative、multipart/mixed、嵌套、folded header、DKIM h= 干扰、带引号/不带引号 charset、不带引号 boundary)验证 `parse_mime_tree` / `build_bodystructure_tree` / `extract_part_content`。
 
 ```bash
 ctest -R mime_parser_test   # native

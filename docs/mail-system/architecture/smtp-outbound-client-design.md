@@ -4,7 +4,8 @@
 > - `OutboundOrchestrator` → `OutboundServer`（事件驱动，消除常驻轮询线程）
 > - 轮询 + 通知混合 → 纯事件驱动（completion_cb + submit + 退避定时器）
 > - 水位预占 + CAS 单拉取周期替代定时轮询
-> - 详见 `ARCHITECTURE.md` §4.2 和 `architecture-evolution.md` §阶段H
+> - 详见 [`ARCHITECTURE.md`](../../architecture/ARCHITECTURE.md) §4.2 和
+>   [`architecture-evolution.md`](../../architecture/architecture-evolution.md) §阶段H
 
 ## 1. 设计范围
 

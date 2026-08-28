@@ -15,14 +15,14 @@
 **根因：** CMakeLists.txt 中 Release 模式硬编码 `-march=native`。macOS 上的 x86_64 交叉编译器不支持此标志（host 是 aarch64）。
 
 **修复：**
-- [CMakeLists.txt](../../CMakeLists.txt#L74)：`CMAKE_CXX_FLAGS_RELEASE` 改用 `if(NOT DEFINED)` 保护，允许命令行覆盖
-- [build.sh](../../build.sh)：cross-x64 模式追加 `-DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=x86-64-v3"`（对应服务器 Intel Xeon Platinum 的 AVX512 能力）
+- [CMakeLists.txt](../../../CMakeLists.txt#L74)：`CMAKE_CXX_FLAGS_RELEASE` 改用 `if(NOT DEFINED)` 保护，允许命令行覆盖
+- [build.sh](../../../build.sh)：cross-x64 模式追加 `-DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -march=x86-64-v3"`（对应服务器 Intel Xeon Platinum 的 AVX512 能力）
 
 ### 2. `drain_buffered_commands()` 不恢复异步读
 
 **症状：** SMTP 465 端口 AUTH 成功后 MAIL FROM 无响应，连接超时断开。IMAP 也有潜在风险。
 
-**根因：** [session_base.tpp](../../include/framework/session_base.tpp#L191) 的 `drain_buffered_commands()` 在 while 循环中处理完缓冲命令后，如果缓冲区为空，直接 return 了，没有调用 `do_async_read()` 恢复网络读取。
+**根因：** [session_base.tpp](../../../include/framework/session_base.tpp#L191) 的 `drain_buffered_commands()` 在 while 循环中处理完缓冲命令后，如果缓冲区为空，直接 return 了，没有调用 `do_async_read()` 恢复网络读取。
 
 SMTP AUTH 成功回调：
 ```cpp
@@ -51,7 +51,7 @@ if (!s->has_buffered_input() && !s->is_closed()) s->do_async_read();
 
 **症状：** 网易邮件大师发送 `UID FETCH ... BODY.PEEK[HEADER.FIELDS (to from subject date message-id)]` 只取特定邮件头，但服务端只认得 `BODY.PEEK[HEADER]`，无法识别 `.FIELDS` 后缀。导致邮件列表的主题/发件人信息无法显示。
 
-**根因：** [traditional_imaps_fsm.tpp](../../include/mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.tpp) 中 header 匹配检查只做简单子串匹配：
+**根因：** [traditional_imaps_fsm.tpp](../../../include/mail_system/back/mailServer/fsm/imaps/traditional_imaps_fsm.tpp) 中 header 匹配检查只做简单子串匹配：
 ```cpp
 bool want_body_header = attrs.find("BODY.PEEK[HEADER]") != std::string::npos;
 ```
@@ -81,7 +81,7 @@ bool want_body_header = attrs.find("BODY.PEEK[HEADER]") != std::string::npos;
 
 **症状：** 交叉编译只用 4 线程，CPU 利用率低。
 
-**修复：** [deploy.sh](../../deploy.sh) 从 `JOBS="4"` 改为 `JOBS="$(sysctl -n hw.ncpu)"`，自动检测 CPU 核心数。
+**修复：** [deploy.sh](../../../deploy.sh) 从 `JOBS="4"` 改为 `JOBS="$(sysctl -n hw.ncpu)"`，自动检测 CPU 核心数。
 
 ---
 

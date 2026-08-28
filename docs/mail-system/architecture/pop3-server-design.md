@@ -85,7 +85,7 @@ CREATE TABLE pop3_session_lock (
 
 v1 只有 acquire/release，无时间语义：会话被 SIGKILL/断电硬崩溃时不走
 QUIT/超时，锁永远占着 → 该用户从此无法登录 POP3。本次补上租约的两环
-（与 outbound 投递租约同构，见 `docs/architecture/mailbox-concurrency.md`）。
+（与 outbound 投递租约同构，见 `mailbox-concurrency.md`）。
 
 ### 抢锁（acquire）— upsert + verify
 

@@ -249,7 +249,7 @@ using ExecuteCallback = std::function<void(bool success)>;
 
 Built on spdlog with module-oriented loggers (15 modules × 6 levels = 90 macros).
 
-**Log compression toolchain** (see [log-transform-toolchain.md](log-transform-toolchain.md)):
+**Log compression toolchain** (see [log-transform-toolchain.md](../build-deploy/log-transform-toolchain.md)):
 build-time transformation replaces `LOG_*` macros with `LOG_PURE(hash, args, ts)`,
 outputting compressed `hash|arg|ts` lines. A post-processing restore tool reconstructs
 readable logs from an incremental mapping table.
@@ -476,6 +476,6 @@ Expected extension directions:
 - `test/bench/bench-report.md`
 - `docs/framework-refactor.md` — framework extraction history (2026-07)
 - `docs/sharding-refactor.md`
-- `docs/smtp-outbound-client-design.md`
-- `docs/vs-postfix.md`
+- `docs/mail-system/architecture/smtp-outbound-client-design.md` — SMTP 发件引擎
+- `docs/mail-system/architecture/vs-postfix.md` — 与 Postfix 对比
 - `BUILD_GUIDE.md`

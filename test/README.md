@@ -208,7 +208,7 @@ python3 test/e2e/test_dual_server.py
 **故事**：2026-08-27 修了一个 counter 语义 bug —— `ServerBase::increment_*` 三个 helper
 把 `fetch_add` 返回的累计值 `v`（1,2,3,...）传给 `inc_counter` 当 delta，导致
 counter map 累加成 `1+2+...+N = N*(N+1)/2`（三角形数），`/metrics` 渲染出错的数字。
-详见 [counter 三角形 bug 复盘](../docs/bugfixes/2026-08-27-counter-triangle-bug.md)。
+详见 [counter 三角形 bug 复盘](../docs/mail-system/bugfixes/2026-08-27-counter-triangle-bug.md)。
 
 **测试策略**（不依赖 database，`use_database=False`，避免 DB 启动成本）：
 - 起一个真 `smtpsServer`（`metrics_enabled=True`，`metrics_port=19090`）
@@ -246,7 +246,7 @@ python3 test/e2e/test_pop3_flow.py
 
 **故事**：POP3 FSM 零 I/O 状态机测试（仿 `imaps_fsm_test` 夹具）。除 11 命令 /
 状态错 / dot-stuffing / 3 次失败关闭外，重点覆盖 **锁租约**（见
-[mailbox-concurrency 文档](../docs/architecture/mailbox-concurrency.md)）：
+[mailbox-concurrency 文档](../docs/mail-system/architecture/mailbox-concurrency.md)）：
 
 - `heartbeat_timer_armed` — PASS 后定时器装配
 - `heartbeat_renew_keeps_lock` / `heartbeat_renew_lock_lost` — 条件 UPDATE+verify 续约

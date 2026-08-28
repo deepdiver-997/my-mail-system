@@ -81,7 +81,7 @@ FSM 状态机函数（io_context 线程）发起异步校验前先 `session->set
 
 ### 结论：值得加，但缓存**永远带 TTL**，不永久缓存
 
-三重校验针对 MTA（发件服务器 IP/域名），复用率高。已实现 **DNS TXT 记录缓存**，复用通用线程安全 `LruCache`（[lru_cache.h](../../include/mail_system/back/common/lru_cache.h)，shared_mutex+mutex 双锁 + LRU 淘汰），value 携带自定义 TTL。
+三重校验针对 MTA（发件服务器 IP/域名），复用率高。已实现 **DNS TXT 记录缓存**，复用通用线程安全 `LruCache`（[lru_cache.h](../../../include/mail_system/back/common/lru_cache.h)，shared_mutex+mutex 双锁 + LRU 淘汰），value 携带自定义 TTL。
 
 | 缓存对象 | key | TTL（固定） |
 |---|---|---|

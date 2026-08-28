@@ -54,15 +54,15 @@ Gmail 退信显示的是**最终/代表性失败**。`timed out` 不是服务器
 
 ## 已部署修复（本次提交）
 
-1. **`enable_tls1_3` 配置开关**（[server_config_base.h](../../include/framework/server_config_base.h#L55)）
+1. **`enable_tls1_3` 配置开关**（[server_config_base.h](../../../include/framework/server_config_base.h#L55)）
    - 默认启用 TLS1.3，替代硬编码 `no_tlsv1_3`。
-   - [tcp_server_base.h](../../include/framework/tcp_server_base.h#L271) `load_certificates` 按配置条件设置。
-2. **`helo_hostname` 配置**（[server_config.h](../../include/framework/server_config.h#L174)）
+   - [tcp_server_base.h](../../../include/framework/tcp_server_base.h#L271) `load_certificates` 按配置条件设置。
+2. **`helo_hostname` 配置**（[server_config.h](../../../include/framework/server_config.h#L174)）
    - 入站 EHLO 响应首行主机名，默认空则回退 `system_domain`。
-3. **EHLO 响应合规**（[traditional_smtps_fsm.tpp](../../include/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.tpp#L262)）
+3. **EHLO 响应合规**（[traditional_smtps_fsm.tpp](../../../include/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.tpp#L262)）
    - 首行用服务器域名，不再回显客户端。
-4. **配置**（[smtpsConfig.json](../../config/smtpsConfig.json)）：`enable_tls1_3: true`、`helo_hostname: <MX_HOSTNAME>`。
-5. **测试断言更新**（[smtps_fsm_test.cpp](../../test/unit/smtps_fsm_test.cpp)）：4 处 `250-* Hello` → `250-test.local Hello`。
+4. **配置**（[smtpsConfig.json](../../../config/smtpsConfig.json)）：`enable_tls1_3: true`、`helo_hostname: <MX_HOSTNAME>`。
+5. **测试断言更新**（[smtps_fsm_test.cpp](../../../test/unit/smtps_fsm_test.cpp)）：4 处 `250-* Hello` → `250-test.local Hello`。
 
 smtpsServer + imapsServer 均已交叉编译部署（二进制备份 `smtpsServer.bak-tls13-*`）。
 
