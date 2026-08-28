@@ -8,6 +8,7 @@ test/
 │   ├── smtps_fsm_test.cpp       # SMTP FSM 状态机测试（串行）
 │   ├── smtps_fsm_concurrency_test.cpp  # SMTP 入站异步并发测试（MockIoContext + TSan）
 │   ├── imaps_fsm_test.cpp       # IMAP FSM 状态机测试
+│   ├── pop3_fsm_test.cpp        # POP3 FSM 状态机测试（11 命令 + 锁心跳/sweeper）
 │   ├── test_inbound_verifier.cpp# InboundVerifier 组件测试 (86 tests)
 │   ├── sql_queries_test.cpp     # SQL 查询生成器测试
 │   ├── outbound_smoke.cpp       # 出站类型/FSM 烟雾测试
@@ -44,6 +45,7 @@ test/
 │   ├── test_dual_server.py      # 双服务器互通测试 (带 static route)
 │   ├── test_outbound.py         # 出站投递
 │   ├── test_metrics_exposure.py # 验 /metrics 端点 + counter 语义修复（不依赖 DB）
+│   ├── test_pop3_flow.py        # POP3 流程 + metrics 端点（TCP-only 不依赖 DB）
 │   ├── test_pipeline.py         # SMTP 流水线
 │   └── test_tcp_sticky.py       # TCP 粘包/截断/延迟
 ├── server/                      # 服务器入口（main）
@@ -136,6 +138,7 @@ bash test/scripts/integration_test.sh
 python3 test/e2e/test_outbound.py    # 出站投递测试
 python3 test/e2e/test_pipeline.py    # 流水线测试
 python3 test/e2e/test_tcp_sticky.py  # TCP 粘包截断测试
+python3 test/e2e/test_pop3_flow.py   # POP3 流程 + metrics
 ```
 
 ### 仅运行单元测试
@@ -143,6 +146,7 @@ python3 test/e2e/test_tcp_sticky.py  # TCP 粘包截断测试
 ./build.sh Release
 ./build/smtps_fsm_test
 ./build/imaps_fsm_test
+./build/pop3_fsm_test
 ./build/test_inbound_verifier
 ./build/outbound_smoke
 ./build/sql_queries_test
@@ -218,6 +222,45 @@ counter map 累加成 `1+2+...+N = N*(N+1)/2`（三角形数），`/metrics` 渲
 python3 test/e2e/test_metrics_exposure.py
 # 保留临时文件:
 python3 test/e2e/test_metrics_exposure.py --keep-temp
+```
+
+### test_pop3_flow.py — POP3 流程 + metrics 端点（TCP-only）
+
+**故事**：POP3 服务器（RFC 1939）落地后的端到端验收，同时验证 `protorelay_pop3_*`
+metrics 随真实流量递增。
+
+**测试策略**（不依赖 database，`use_database=False`）：
+- 起真 `pop3Server`（metrics 19090），验证协议流程：greeting 格式
+  `+OK ProtoRelay POP3 server ready <ts@pop3>`、CAPA 多行列表、USER、
+  PASS（无 DB → 预期 `-ERR`）、QUIT。
+- 一条异常断连会话（收 greeting 后直接断开）→ `sessions_total{result=err}`。
+- 拉 `/metrics` 断言 `sessions_total{result=ok/err}` 与 `auth_total` 递增。
+- `retr/dele/lock_conflict` 三个指标需 TRANSACTION+DB（e2e 不依赖 DB），
+  由 `pop3_fsm_test` 单测覆盖代码路径。
+
+```bash
+python3 test/e2e/test_pop3_flow.py
+```
+
+### pop3_fsm_test — 11 命令 + 锁心跳/sweeper（33 case）
+
+**故事**：POP3 FSM 零 I/O 状态机测试（仿 `imaps_fsm_test` 夹具）。除 11 命令 /
+状态错 / dot-stuffing / 3 次失败关闭外，重点覆盖 **锁租约**（见
+[mailbox-concurrency 文档](../docs/architecture/mailbox-concurrency.md)）：
+
+- `heartbeat_timer_armed` — PASS 后定时器装配
+- `heartbeat_renew_keeps_lock` / `heartbeat_renew_lock_lost` — 条件 UPDATE+verify 续约
+- `heartbeat_lock_lost_closes` — **剧情测试**：锁被外部回收后，续约 verify 得 0
+  → 会话必须关闭而非带着失效锁继续（防死锁）
+- `heartbeat_stops_after_close` — close 幂等取消
+- `sweep_expired_locks_ok` — sweeper SQL 执行
+
+**Mock 技巧**：POP3 greeting 由 CONNECT 事件主动发出，写完成后的 `do_async_read`
+在 Mock 空缓冲下会 EOF 提前关闭会话 → `make_session` 里 `set_deferred_read(true)`
+让读挂起；`Handle` 析构幂等 `close()` 防 deferred-read 引用环（LSan 泄漏）。
+
+```bash
+./build/pop3_fsm_test
 ```
 
 ### 真实 DB 测试后清理
