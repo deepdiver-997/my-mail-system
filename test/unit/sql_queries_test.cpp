@@ -258,6 +258,19 @@ void test_build_imap_mailbox_unseen_count() {
     check_contains("imap_unseen_status", sql, "mr.status = 1");
 }
 
+void test_build_imap_uidnext() {
+    std::string adv = mail_system::db::sql::build_imap_uidnext_advance();
+    check_contains("uidnext_advance_into", adv, "INSERT INTO mailbox_uidnext");
+    check_contains("uidnext_advance_greatest", adv, "GREATEST(uidnext");
+    check_contains("uidnext_advance_max", adv, "MAX(mm.mail_id)");
+    check_contains("uidnext_advance_dup", adv, "ON DUPLICATE KEY UPDATE");
+    std::string rd = mail_system::db::sql::build_imap_uidnext_read();
+    check_contains("uidnext_read_select", rd, "SELECT uidnext FROM mailbox_uidnext");
+    // 高水位语义：推进必须含 GREATEST（防 expunge 最大 mail_id 后回退）
+    check("uidnext_no_plain_max", adv.find("MAX(mm.mail_id)") < adv.find("GREATEST"),
+          "advance SQL 应先用 MAX 播种再 GREATEST 兜高水位");
+}
+
 void test_build_imap_append_queries() {
     std::string meta = mail_system::db::sql::build_imap_append_mail_metadata();
     check_contains("imap_append_meta", meta, "INSERT INTO mails");
@@ -355,6 +368,7 @@ int main() {
     test_build_imap_list_mailboxes();
     test_build_imap_get_mailbox_mails();
     test_build_imap_mailbox_unseen_count();
+    test_build_imap_uidnext();
     test_build_imap_append_queries();
     test_build_imap_expunge();
     test_build_imap_copy();

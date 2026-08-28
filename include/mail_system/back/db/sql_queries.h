@@ -165,7 +165,8 @@ std::string build_imap_get_inbox_id();
 std::string build_imap_get_mailbox_mails();
 std::string build_imap_mailbox_exists_count();
 std::string build_imap_mailbox_unseen_count();
-std::string build_imap_mailbox_uidnext();
+std::string build_imap_uidnext_advance();   // 原子推进 per-mailbox UIDNEXT 高水位
+std::string build_imap_uidnext_read();      // 读推进后的 UIDNEXT
 std::string build_imap_update_mail_flag_deleted();
 std::string build_imap_update_mail_flag_starred();
 std::string build_imap_append_mail_metadata();

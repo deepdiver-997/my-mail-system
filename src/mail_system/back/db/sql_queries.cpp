@@ -371,9 +371,21 @@ std::string build_imap_mailbox_unseen_count() {
            "WHERE mm.mailbox_id = ? AND mm.user_id = ? AND mr.status = 1";
 }
 
-std::string build_imap_mailbox_uidnext() {
-    return "SELECT COALESCE(MAX(mm.mail_id), 0) + 1 as uidnext "
-           "FROM mail_mailbox mm WHERE mm.mailbox_id = ? AND mm.user_id = ?";
+std::string build_imap_uidnext_advance() {
+    // 原子推进 per-mailbox UIDNEXT 高水位（RFC 3501 §2.3.1.1）：
+    //   - 行锁串行化并发读者 → 跨实例安全，不再各自 MAX+1 撞值
+    //   - GREATEST 保证 expunge 掉最大 mail_id 后不回退
+    // 空邮箱时聚合查询仍返回一行 uidnext=1（INSERT...SELECT 兜底建行）。
+    return "INSERT INTO mailbox_uidnext (mailbox_id, uidnext) "
+           "SELECT ?, COALESCE(MAX(mm.mail_id), 0) + 1 "
+           "FROM mail_mailbox mm WHERE mm.mailbox_id = ? "
+           "ON DUPLICATE KEY UPDATE "
+           "  uidnext = GREATEST(uidnext, "
+           "    (SELECT COALESCE(MAX(mm.mail_id), 0) + 1 FROM mail_mailbox mm WHERE mm.mailbox_id = ?))";
+}
+
+std::string build_imap_uidnext_read() {
+    return "SELECT uidnext FROM mailbox_uidnext WHERE mailbox_id = ?";
 }
 
 std::string build_imap_update_mail_flag_deleted() {

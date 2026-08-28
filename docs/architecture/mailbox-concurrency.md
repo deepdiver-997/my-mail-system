@@ -92,18 +92,34 @@ stale 标志 + 后台刷新），只缓存计数不缓存列表。STORE/EXPUNGE 
 | B 看 STATUS/EXISTS | 缓存计数短暂不准 | 最终一致，后台刷新收敛 |
 | 正文文件被清理 job 删 | UID FETCH 读 body 失败 | 需"先摘行、延迟删文件"或引用计数 |
 
-### 该改的：uidnext 竞态（本次修复）
+### 该改的：uidnext 竞态（已修 2026-08-28）
 
-`get_mailbox_uidnext` 用 `SELECT COALESCE(MAX(mail_id),0)+1 FROM mail_mailbox
-WHERE mailbox_id=? AND user_id=?`（`sql_queries.cpp:375`）生成 UIDNEXT。
+`get_mailbox_uidnext` 原实现 `SELECT COALESCE(MAX(mail_id),0)+1`（`sql_queries.cpp:374`）
+生成 UIDNEXT。两个真实缺陷：
 
-**这是唯一真正的数据一致性隐患**：两个会话/两个实例并发时算出同一个 next
-UID → UID 冲突。因为 IMAP 无锁 + 跨实例部署时更可能触发。
+1. **expunge 掉最大 mail_id 后 UIDNEXT 回落**——违反 RFC 3501 §2.3.1.1
+   （UIDNEXT 必须永不小于已用过的 UID）。
+2. **并发/跨实例读者各自 MAX+1**——非原子，读到同一值。
 
-修法（见本次 `imap uidnext` 修复 commit）：
-- 用 DB 保证唯一的自增序列（AUTO_INCREMENT 列 / 原子 `UPDATE ... LAST_INSERT_ID`），
-  或
-- UIDNEXT = 单调不减的序列，不依赖 `MAX(mail_id)`。
+（注：实际 UID = snowflake mail_id，永不冲突，所以不是"算出重复 UID"的机制；
+问题在**报告的 UIDNEXT**。）
+
+**修法**：新增 per-mailbox 高水位表 `mailbox_uidnext(mailbox_id PK, uidnext)`，
+`get_mailbox_uidnext` 改为原子推进 + 读取：
+
+```sql
+INSERT INTO mailbox_uidnext (mailbox_id, uidnext)
+SELECT ?, COALESCE(MAX(mm.mail_id),0)+1 FROM mail_mailbox mm WHERE mm.mailbox_id = ?
+ON DUPLICATE KEY UPDATE
+  uidnext = GREATEST(uidnext,
+    (SELECT COALESCE(MAX(mm.mail_id),0)+1 FROM mail_mailbox mm WHERE mm.mailbox_id = ?));
+-- 再 SELECT uidnext FROM mailbox_uidnext WHERE mailbox_id = ?
+```
+
+- 行锁串行化并发/跨实例读者 → 原子。
+- `GREATEST` 保证单调不回退（含 expunge 最大 mail_id 后）。
+- 空邮箱聚合查询仍返回一行 uidnext=1。
+- migration：`config/sql/migration_imap_uidnext.sql`。
 
 ### 跨实例部署的注意
 

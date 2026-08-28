@@ -3062,13 +3062,17 @@ template <typename ConnectionType>
 uint64_t TraditionalImapsFsm<ConnectionType>::get_mailbox_uidnext(
     uint64_t mailbox_id, uint64_t user_id)
 {
+    (void)user_id;   // mailbox_id 是 mailboxes 主键，全局唯一，无需 user_id 过滤
     auto conn = acquire_connection(0);
     if (!conn.is_valid()) {
         return 1;
     }
-    auto result = sq(conn.operator->(),
-        db::sql::build_imap_mailbox_uidnext(),
-        {std::to_string(mailbox_id), std::to_string(user_id)});
+    // 原子推进高水位：行锁串行化并发/跨实例读者，GREATEST 防 expunge 后回退；
+    // 推进后再读取（advance 是写，read 才是值）
+    se(conn.operator->(), db::sql::build_imap_uidnext_advance(),
+       {std::to_string(mailbox_id), std::to_string(mailbox_id), std::to_string(mailbox_id)});
+    auto result = sq(conn.operator->(), db::sql::build_imap_uidnext_read(),
+                     {std::to_string(mailbox_id)});
     if (result && result->get_row_count() > 0) {
         return safe_stoull(result->get_value(0, "uidnext"));
     }

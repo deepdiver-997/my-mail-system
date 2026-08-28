@@ -676,6 +676,43 @@ TEST(idle_with_done) {
     std::cout << "  [PASS] idle_with_done (response: " << w.substr(0, 60) << ")" << std::endl;
 }
 
+// ========== UIDNEXT 高水位（原子推进，防并发撞值/expunge 回退） ==========
+TEST(uidnext_advance_read) {
+    // 剧情：SELECT/STATUS 报告 UIDNEXT。新实现 = 原子推进高水位(advance,写)
+    // + 读(advance 后的 mailbox_uidnext 行)。mock 下 advance 是 se（不消耗
+    // 结果），read 是 sq（pop 一个 uidnext 值）。
+    auto io = std::make_shared<IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto db = std::make_shared<test::MockDbPool>();
+    db->mock_conn()->set_deferred(false);   // 同步模式
+    auto router = std::make_shared<router::StaticShardRouter>(
+        std::vector<std::pair<std::string, int>>{},
+        0,
+        std::vector<std::shared_ptr<DBPool>>{db},
+        std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+    ServerConfig cfg2;
+    cfg2.perf_mode = true; cfg2.apply_perf_mode();
+    cfg2.use_database = false; cfg2.system_domain = "test.local";
+    cfg2.storage.local.mail_path = "/tmp/imaps_uidnext_test_mail";
+    cfg2.storage.local.attachment_path = "/tmp/imaps_uidnext_test_att";
+    auto server = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router));
+    auto fsm = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router);
+
+    // advance(se) 不消耗结果；read(sq) 消耗一个 {uidnext: 42}
+    db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"uidnext", "42"}}}));
+    uint64_t v = fsm->get_mailbox_uidnext(5001, 1001);
+    assert(v == 42);
+    std::cout << "  [PASS] uidnext_advance_read (uidnext=" << v << ")" << std::endl;
+}
+
+TEST(uidnext_no_db_default) {
+    // 无 DB（fixture 的空 router）→ 优雅返回 1，不崩溃
+    uint64_t v = fx.fsm->get_mailbox_uidnext(5001, 1001);
+    assert(v == 1);
+    std::cout << "  [PASS] uidnext_no_db_default" << std::endl;
+}
+
 int main() {
     std::cout << "IMAP FSM Test Suite\n==================\n";
 
@@ -698,6 +735,10 @@ int main() {
         test_uid_fetch_no_db(fx);
         test_fetch_full_path_with_storage(fx);
         test_literal_too_large_rejected(fx);
+
+        // ── UIDNEXT 高水位 ──
+        test_uidnext_advance_read(fx);
+        test_uidnext_no_db_default(fx);
 
         // ── 命令错误 ──
         test_invalid_command_in_state(fx);
