@@ -9,12 +9,17 @@ test/bench/
   smtp/
     smtp_client.cpp          SMTP 压测客户端（raw socket，线程×连接）
     bench.sh                 SMTP 压测启动器（ramp 并发找峰值）
+    profile.sh               高负载采样找热点（写路径，跑完按需清理）
     REPORT.md                SMTP 吞吐基准报告（历史全量）
   imap/
     imap_client.cpp          IMAP 读路径压测客户端（SELECT+FETCH 循环）
-    seed_imap_data.py        灌测试邮件（INSERT IGNORE 幂等）
+    seed_imap_data.py        灌测试邮件（INSERT IGNORE 幂等；POP3 也共用此数据）
     profile.sh               高负载采样找热点（macOS sample / Linux perf）
-    REPORT.md                IMAP 吞吐基准 + Phase 2 对照 + 热点报告
+    REPORT.md                IMAP 吞吐基准 + Phase 2/3 对照 + 热点报告
+  pop3/
+    pop3_client.cpp          POP3 读路径压测客户端（STAT+LIST+RETR 循环）
+    profile.sh               高负载采样找热点
+    REPORT.md                POP3 吞吐基准 + 热点报告
   fsm/
     fsm_bench.cpp            纯 FSM 基准（MockConnection 零 I/O）
     dispatch_bench.cpp       分发器基准

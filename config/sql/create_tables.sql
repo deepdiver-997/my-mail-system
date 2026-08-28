@@ -125,6 +125,15 @@ CREATE TABLE IF NOT EXISTS user_shards (
     INDEX idx_email (email)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户-分片映射表';
 
+-- POP3 单会话锁（每用户一把锁，防多客户端同时收同一邮箱）
+-- user_id 主键即 ON DUPLICATE KEY UPDATE 的冲突键；异 session 尝试获取时保持旧锁。
+CREATE TABLE IF NOT EXISTS pop3_session_lock (
+    user_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+    session_id VARCHAR(64) NOT NULL,
+    acquired_at DATETIME NOT NULL,
+    last_heartbeat DATETIME NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='POP3 会话锁';
+
 -- 创建系统默认邮箱的存储过程
 DROP PROCEDURE IF EXISTS create_default_mailboxes;
 DELIMITER //

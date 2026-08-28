@@ -580,6 +580,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_compile_features(smtp_client PRIVATE cxx_std_17)
     add_executable(imap_client test/bench/imap/imap_client.cpp)
     target_compile_features(imap_client PRIVATE cxx_std_17)
+    add_executable(pop3_client test/bench/pop3/pop3_client.cpp)
+    target_compile_features(pop3_client PRIVATE cxx_std_17)
 
     add_executable(dispatch_bench test/bench/fsm/dispatch_bench.cpp)
     target_compile_features(dispatch_bench PRIVATE cxx_std_17)
