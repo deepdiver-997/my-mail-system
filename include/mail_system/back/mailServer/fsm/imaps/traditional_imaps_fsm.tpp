@@ -10,29 +10,24 @@
 
 namespace mail_system {
 
-// sync-bridge: 通过 async API 同步获取结果（默认同步实现，回调在返回前触发）
+// 同步 DB 访问 helper。直接用 IDBConnection::query/execute（同步接口），
+// 不再绕 async_query/async_execute：MySQL 的 async_* 是默认同步包装
+// （回调同步触发），"假异步"无意义还误导读者。DB 层没有真异步，
+// 这些调用本来就同步阻塞（POP3 在 worker 线程 + session 已暂停，安全）。
 namespace {
 inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql,
                                       const std::vector<std::string>& params) {
-    std::shared_ptr<IDBResult> r;
-    c->async_query(sql, params, [&r](auto res) { r = std::move(res); });
-    return r;
+    return c->query(sql, params);
 }
 inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql) {
-    std::shared_ptr<IDBResult> r;
-    c->async_query(sql, [&r](auto res) { r = std::move(res); });
-    return r;
+    return c->query(sql);
 }
 inline bool se(class IDBConnection* c, const std::string& sql,
                 const std::vector<std::string>& params) {
-    bool ok = false;
-    c->async_execute(sql, params, [&ok](bool r) { ok = r; });
-    return ok;
+    return c->execute(sql, params);
 }
 inline bool se(class IDBConnection* c, const std::string& sql) {
-    bool ok = false;
-    c->async_execute(sql, [&ok](bool r) { ok = r; });
-    return ok;
+    return c->execute(sql);
 }
 // 展开逗号分隔的序列号集（支持 "1" / "1:*" / "1,3,5" / "1:3,5" / "*"）
 // 输出到 ranges（(start,end) 闭区间列表，已 clamp 到 [1,total]）

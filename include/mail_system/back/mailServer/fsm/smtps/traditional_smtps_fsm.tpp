@@ -32,25 +32,19 @@ inline bool verify_password(const std::string& input, const std::string& stored)
 }
 inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql,
                                       const std::vector<std::string>& params) {
-    std::shared_ptr<IDBResult> r;
-    c->async_query(sql, params, [&r](auto res) { r = std::move(res); });
-    return r;
+    // 同步 DB 访问：直接用 query()，不再绕 async_query（MySQL 的 async_* 是
+    // 默认同步包装，回调同步触发，"假异步"误导读者）。DB 层无真异步。
+    return c->query(sql, params);
 }
 inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql) {
-    std::shared_ptr<IDBResult> r;
-    c->async_query(sql, [&r](auto res) { r = std::move(res); });
-    return r;
+    return c->query(sql);
 }
 inline bool se(class IDBConnection* c, const std::string& sql,
                 const std::vector<std::string>& params) {
-    bool ok = false;
-    c->async_execute(sql, params, [&ok](bool r) { ok = r; });
-    return ok;
+    return c->execute(sql, params);
 }
 inline bool se(class IDBConnection* c, const std::string& sql) {
-    bool ok = false;
-    c->async_execute(sql, [&ok](bool r) { ok = r; });
-    return ok;
+    return c->execute(sql);
 }
 } // namespace
 

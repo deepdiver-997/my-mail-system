@@ -465,11 +465,13 @@ TEST(heartbeat_timer_armed) {
 TEST(heartbeat_renew_keeps_lock) {
     auto h = fx.login();
     auto* ctx = static_cast<Pop3Context*>(h.session->get_context());
-    // 续约 verify 得 cnt=1 → 锁还在
+    // 续约 verify 得 cnt=1 → 锁还在（async CPS 版：mock 同步触发回调）
     fx.db_conn->push_sync_result(std::make_shared<test::MockDbResult>(
         std::vector<std::map<std::string, std::string>>{{{"cnt", "1"}}}));
-    bool ok = TraditionalPop3Fsm<MockConnection>::renew_lock_heartbeat(
-        fx.router, ctx->user_id, ctx->session_id, ctx->shard_index);
+    bool ok = false;
+    TraditionalPop3Fsm<MockConnection>::renew_lock_heartbeat_async(
+        fx.router, ctx->user_id, ctx->session_id, ctx->shard_index,
+        [&ok](bool v) { ok = v; });
     assert(ok);
     assert(!h.session->is_closed());
     std::cout << "  [PASS] heartbeat_renew_keeps_lock" << std::endl;
@@ -480,8 +482,10 @@ TEST(heartbeat_renew_lock_lost) {
     auto* ctx = static_cast<Pop3Context*>(h.session->get_context());
     // 行已不存在（被 sweeper 回收）→ verify 得 0 → 续约失败
     fx.db_conn->push_sync_result(std::make_shared<test::MockDbResult>());
-    bool ok = TraditionalPop3Fsm<MockConnection>::renew_lock_heartbeat(
-        fx.router, ctx->user_id, ctx->session_id, ctx->shard_index);
+    bool ok = true;
+    TraditionalPop3Fsm<MockConnection>::renew_lock_heartbeat_async(
+        fx.router, ctx->user_id, ctx->session_id, ctx->shard_index,
+        [&ok](bool v) { ok = v; });
     assert(!ok);
     std::cout << "  [PASS] heartbeat_renew_lock_lost" << std::endl;
 }

@@ -51,50 +51,58 @@ public:
     void auto_process_event(
         std::shared_ptr<SessionBase<ConnectionType>> session);
 
-    // 静态：USER/PASS 走 worker 线程做 bcrypt + DB 查
-    // 仿 IMAP auth_user (imaps_fsm.tpp:2547-2619)
-    static bool auth_user(const std::shared_ptr<router::IShardRouter>& shard_router,
-                          const std::shared_ptr<AuthCache>& auth_cache,
-                          const std::string& mail_address,
-                          const std::string& password,
-                          uint64_t& out_user_id,
-                          int& out_shard);
+    // ── DB 访问（CPS：async_query/async_execute 链，结果经 cb 返回） ──
+    // 仿 SMTP auth 的异步链写法。底层 MySQL async_* 目前是默认同步包装
+    // （回调同步触发），但调用方结构已异步就绪；将来接真异步 DB 时这些
+    // 调用方无需改动。conn 由调用方持有的 shared ScopedConnection 保活，
+    // 链中每个回调都捕获它避免悬垂。
+    static void auth_user_async(const std::shared_ptr<router::IShardRouter>& shard_router,
+                                const std::shared_ptr<AuthCache>& auth_cache,
+                                const std::string& mail_address,
+                                const std::string& password,
+                                std::function<void(bool ok, uint64_t user_id, int shard)> cb);
 
-    // 取 INBOX id（box_type=1）。失败返回 0。
-    static uint64_t get_inbox_id(class IDBConnection* conn, uint64_t user_id);
+    // 取 INBOX id（box_type=1）。失败 cb(0)。
+    static void get_inbox_id_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
+                                   std::function<void(uint64_t)> cb);
 
     // 取 INBOX 全部未删邮件的 (mail_id, body_path) 列表。
     // 排除 mm.is_deleted = 1（POP3 视角是"已 DELE 但未 QUIT"的仍可见，
     // 真正的"已 DELE 后 QUIT 提交"由 DELE 走 UPDATE 时直接 SQL 删除）。
-    static bool get_inbox_mails(class IDBConnection* conn, uint64_t mailbox_id, uint64_t user_id,
-                                std::vector<Pop3Message>& out);
+    static void get_inbox_mails_async(std::shared_ptr<ScopedConnection> conn,
+                                      uint64_t mailbox_id, uint64_t user_id,
+                                      std::function<void(std::vector<Pop3Message>)> cb);
 
     // 取 shard 的 storage provider（仿 imaps_fsm.tpp get_storage）
     std::shared_ptr<storage::IStorageProvider> get_storage(int shard) {
         return m_shardRouter ? m_shardRouter->get_storage(static_cast<size_t>(shard)) : nullptr;
     }
 
-    // 申请 mailbox 锁。true = 成功；false = 已被他人持有。
-    static bool acquire_lock(class IDBConnection* conn,
-                             uint64_t user_id, const std::string& session_id);
+    // 申请 mailbox 锁。cb(true) = 成功；cb(false) = 已被他人持有。
+    static void acquire_lock_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
+                                   const std::string& session_id,
+                                   std::function<void(bool)> cb);
 
-    // 释放 mailbox 锁。幂等。
-    static void release_lock(class IDBConnection* conn,
-                             uint64_t user_id, const std::string& session_id);
+    // 释放 mailbox 锁。幂等。cb() 在完成后触发。
+    static void release_lock_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
+                                   const std::string& session_id, std::function<void()> cb);
 
     // 续约锁心跳（v2）：条件 UPDATE last_heartbeat + verify 所有权。
-    // 返回 false = 锁已被回收/转交（行不存在），调用方应关闭会话。
-    static bool renew_lock_heartbeat(const std::shared_ptr<router::IShardRouter>& router,
-                                     uint64_t user_id, const std::string& session_id, int shard);
+    // cb(false) = 锁已被回收/转交（行不存在），调用方应关闭会话。
+    static void renew_lock_heartbeat_async(const std::shared_ptr<router::IShardRouter>& router,
+                                           uint64_t user_id, const std::string& session_id,
+                                           int shard, std::function<void(bool)> cb);
 
     // 清扫过期锁（v2 sweeper 周期调用）：删除心跳超过 5min 的锁。
+    // fire-and-forget 无续作，直接同步 execute。
     static bool sweep_expired_locks(const std::shared_ptr<router::IShardRouter>& router);
 
     // 提交 DELE 标记：把 deleted 里所有 mail_id 对应行 is_deleted=1
     // 然后 expunge（DELETE FROM mail_mailbox）。
-    static bool apply_deletions(class IDBConnection* conn,
-                                uint64_t user_id, uint64_t mailbox_id,
-                                const std::set<uint64_t>& deleted_mail_ids);
+    static void apply_deletions_async(std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
+                                      uint64_t mailbox_id,
+                                      const std::set<uint64_t>& deleted_mail_ids,
+                                      std::function<void(bool)> cb);
 
     // 写一行（带 CRLF）到 session，跨线程安全（通过 session->do_async_write）。
     // 协议规范：`+OK text\r\n` / `-ERR text\r\n`。

@@ -15,30 +15,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <functional>
 #include <sstream>
 #include <utility>
 
 namespace mail_system {
-
-namespace {
-inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql,
-                                      const std::vector<std::string>& params) {
-    std::shared_ptr<IDBResult> r;
-    c->async_query(sql, params, [&r](auto res) { r = std::move(res); });
-    return r;
-}
-inline bool se(class IDBConnection* c, const std::string& sql,
-                const std::vector<std::string>& params) {
-    bool ok = false;
-    c->async_execute(sql, params, [&ok](bool r) { ok = r; });
-    return ok;
-}
-inline bool se(class IDBConnection* c, const std::string& sql) {
-    bool ok = false;
-    c->async_execute(sql, [&ok](bool r) { ok = r; });
-    return ok;
-}
-} // namespace
 
 template <typename ConnectionType>
 Pop3Context* TraditionalPop3Fsm<ConnectionType>::ctx_of(
@@ -94,14 +75,14 @@ std::string TraditionalPop3Fsm<ConnectionType>::get_event_name(Pop3Event e) {
 // ====================================================================
 
 template <typename ConnectionType>
-bool TraditionalPop3Fsm<ConnectionType>::auth_user(
+void TraditionalPop3Fsm<ConnectionType>::auth_user_async(
     const std::shared_ptr<router::IShardRouter>& shard_router,
     const std::shared_ptr<AuthCache>& auth_cache,
     const std::string& mail_address,
     const std::string& password,
-    uint64_t& out_user_id,
-    int& out_shard)
+    std::function<void(bool, uint64_t, int)> cb)
 {
+    if (!cb) return;
     LOG_AUTH_INFO("POP3 AUTH attempt: mail_address=[{}]", mail_address);
 
     int shard = 0;
@@ -109,97 +90,109 @@ bool TraditionalPop3Fsm<ConnectionType>::auth_user(
         int r = shard_router->route(mail_address);
         if (r >= 0) shard = r;
     }
-    out_shard = shard;
 
+    // 快路径：缓存命中（含 status!=1 的负缓存）同步回调
     AuthCacheEntry ce;
     if (auth_cache && auth_cache->lookup(mail_address, ce)) {
-        if (ce.status != 1) return false;
-        out_shard = ce.shard;
-        out_user_id = ce.user_id;
-        if (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
-            return bcrypt_verify(password, ce.password_hash);
-        return ce.password_hash == password;
+        if (ce.status != 1) { cb(false, 0, shard); return; }
+        bool ok = (ce.password_hash.size() >= 2 && ce.password_hash[0] == '$' && ce.password_hash[1] == '2')
+                    ? bcrypt_verify(password, ce.password_hash)
+                    : (ce.password_hash == password);
+        cb(ok, ce.user_id, ce.shard);
+        return;
     }
 
     auto db_pool = shard_router ? shard_router->get_db_pool(static_cast<size_t>(shard)) : nullptr;
     if (!db_pool) {
         LOG_AUTH_ERROR("No database pool for shard {}", shard);
-        return false;
+        cb(false, 0, shard);
+        return;
     }
-    auto conn = db_pool->acquire_connection();
-    if (!conn.is_valid()) {
+    // conn 用 shared 保活：真异步接入后回调在 DB 线程触发，链中捕获不悬垂
+    auto conn = std::make_shared<ScopedConnection>(db_pool->acquire_connection());
+    if (!conn->is_valid()) {
         LOG_AUTH_ERROR("Failed to get database connection for shard {}", shard);
-        return false;
+        cb(false, 0, shard);
+        return;
     }
 
-    auto result = sq(conn.operator->(), db::sql::build_auth_user_query(), {mail_address});
-    if (!result || result->get_row_count() == 0) {
-        LOG_AUTH_WARN("User not found: {}", mail_address);
-        return false;
-    }
-
-    int status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
-    if (status != 1) {
-        LOG_AUTH_WARN("User account disabled: {}", mail_address);
-        return false;
-    }
-
-    std::string stored = result->get_value(0, "password");
-    uint64_t user_id = safe_stoull(result->get_value(0, "id"));
-    if (auth_cache) {
-        auth_cache->store(mail_address, {stored, status, user_id, shard});
-    }
-
-    bool ok = false;
-    if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2') {
-        ok = bcrypt_verify(password, stored);
-    } else {
-        ok = (stored == password);
-        if (ok) LOG_AUTH_WARN("User {} still using plaintext password", mail_address);
-    }
-
-    if (ok) {
-        out_user_id = user_id;
-        se(conn.operator->(), db::sql::build_update_last_login(), {mail_address});
-    }
-    return ok;
+    // DB 慢路径：async_query 链（默认同步包装 → 回调内联执行；结构异步就绪）
+    (*conn)->async_query(db::sql::build_auth_user_query(), {mail_address},
+        [auth_cache, mail_address, password, shard, conn,
+         cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
+            if (!result || result->get_row_count() == 0) {
+                LOG_AUTH_WARN("User not found: {}", mail_address);
+                cb(false, 0, shard);
+                return;
+            }
+            int status = static_cast<int>(safe_stoull(result->get_value(0, "status")));
+            if (status != 1) {
+                LOG_AUTH_WARN("User account disabled: {}", mail_address);
+                cb(false, 0, shard);
+                return;
+            }
+            std::string stored = result->get_value(0, "password");
+            uint64_t user_id = safe_stoull(result->get_value(0, "id"));
+            if (auth_cache) {
+                auth_cache->store(mail_address, {stored, status, user_id, shard});
+            }
+            bool ok = false;
+            if (stored.size() >= 2 && stored[0] == '$' && stored[1] == '2') {
+                ok = bcrypt_verify(password, stored);
+            } else {
+                ok = (stored == password);
+                if (ok) LOG_AUTH_WARN("User {} still using plaintext password", mail_address);
+            }
+            if (ok) {
+                (*conn)->async_execute(db::sql::build_update_last_login(), {mail_address},
+                    [cb = std::move(cb), user_id, shard](bool) { cb(true, user_id, shard); });
+            } else {
+                cb(false, 0, shard);
+            }
+        });
 }
 
 template <typename ConnectionType>
-uint64_t TraditionalPop3Fsm<ConnectionType>::get_inbox_id(
-    class IDBConnection* conn, uint64_t user_id)
+void TraditionalPop3Fsm<ConnectionType>::get_inbox_id_async(
+    std::shared_ptr<ScopedConnection> conn, uint64_t user_id,
+    std::function<void(uint64_t)> cb)
 {
-    if (!conn) return 0;
-    auto result = sq(conn, db::sql::build_imap_get_inbox_id(), {std::to_string(user_id)});
-    if (!result || result->get_row_count() == 0) return 0;
-    return safe_stoull(result->get_value(0, "id"));
+    if (!conn) { if (cb) cb(0); return; }
+    (*conn)->async_query(db::sql::build_imap_get_inbox_id(), {std::to_string(user_id)},
+        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
+            if (!result || result->get_row_count() == 0) { cb(0); return; }
+            cb(safe_stoull(result->get_value(0, "id")));
+        });
 }
 
 template <typename ConnectionType>
-bool TraditionalPop3Fsm<ConnectionType>::get_inbox_mails(
-    class IDBConnection* conn, uint64_t mailbox_id, uint64_t user_id,
-    std::vector<Pop3Message>& out)
+void TraditionalPop3Fsm<ConnectionType>::get_inbox_mails_async(
+    std::shared_ptr<ScopedConnection> conn, uint64_t mailbox_id, uint64_t user_id,
+    std::function<void(std::vector<Pop3Message>)> cb)
 {
-    out.clear();
-    if (!conn) return false;
-    auto result = sq(conn, db::sql::build_imap_get_mailbox_mails(),
-                     {std::to_string(mailbox_id), std::to_string(user_id)});
-    if (!result) return false;
-    for (size_t i = 0; i < result->get_row_count(); ++i) {
-        Pop3Message m;
-        m.mail_id = safe_stoull(result->get_value(i, "id"));
-        m.body_path = result->get_value(i, "body_path");
-        if (m.mail_id == 0) continue;
-        out.push_back(std::move(m));
-    }
-    return true;
+    if (!conn) { if (cb) cb({}); return; }
+    (*conn)->async_query(db::sql::build_imap_get_mailbox_mails(),
+        {std::to_string(mailbox_id), std::to_string(user_id)},
+        [conn, cb = std::move(cb)](std::shared_ptr<IDBResult> result) mutable {
+            std::vector<Pop3Message> mails;
+            if (!result) { cb(std::move(mails)); return; }
+            for (size_t i = 0; i < result->get_row_count(); ++i) {
+                Pop3Message m;
+                m.mail_id = safe_stoull(result->get_value(i, "id"));
+                m.body_path = result->get_value(i, "body_path");
+                if (m.mail_id == 0) continue;
+                mails.push_back(std::move(m));
+            }
+            cb(std::move(mails));
+        });
 }
 
 template <typename ConnectionType>
-bool TraditionalPop3Fsm<ConnectionType>::acquire_lock(
-    class IDBConnection* conn, uint64_t user_id, const std::string& session_id)
+void TraditionalPop3Fsm<ConnectionType>::acquire_lock_async(
+    std::shared_ptr<ScopedConnection> conn, uint64_t user_id, const std::string& session_id,
+    std::function<void(bool)> cb)
 {
-    if (!conn) return false;
+    if (!conn) { if (cb) cb(false); return; }
     // INSERT ... ON DUPLICATE KEY UPDATE：同 session_id 续约，异 session_id 保留旧锁。
     // async_execute 只返回 bool（无 affected-rows），且 ON DUPLICATE KEY UPDATE
     // 在冲突时并不报错，所以 upsert 之后再 SELECT 验证所有权。
@@ -209,46 +202,59 @@ bool TraditionalPop3Fsm<ConnectionType>::acquire_lock(
         "ON DUPLICATE KEY UPDATE "
         "  session_id = IF(session_id = VALUES(session_id), VALUES(session_id), session_id), "
         "  last_heartbeat = IF(session_id = VALUES(session_id), NOW(), last_heartbeat)";
-    se(conn, upsert, {std::to_string(user_id), session_id});
-
-    auto r = sq(conn, "SELECT COUNT(*) as cnt FROM pop3_session_lock "
-                      "WHERE user_id = ? AND session_id = ?",
-                {std::to_string(user_id), session_id});
-    return r && r->get_row_count() > 0 && safe_stoull(r->get_value(0, "cnt")) > 0;
+    (*conn)->async_execute(upsert, {std::to_string(user_id), session_id},
+        [conn, user_id, session_id, cb = std::move(cb)](bool) mutable {
+            (*conn)->async_query(
+                "SELECT COUNT(*) as cnt FROM pop3_session_lock "
+                "WHERE user_id = ? AND session_id = ?",
+                {std::to_string(user_id), session_id},
+                [cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
+                    cb(r && r->get_row_count() > 0 && safe_stoull(r->get_value(0, "cnt")) > 0);
+                });
+        });
 }
 
 template <typename ConnectionType>
-void TraditionalPop3Fsm<ConnectionType>::release_lock(
-    class IDBConnection* conn, uint64_t user_id, const std::string& session_id)
+void TraditionalPop3Fsm<ConnectionType>::release_lock_async(
+    std::shared_ptr<ScopedConnection> conn, uint64_t user_id, const std::string& session_id,
+    std::function<void()> cb)
 {
-    if (!conn) return;
-    se(conn, "DELETE FROM pop3_session_lock WHERE user_id = ? AND session_id = ?",
-       {std::to_string(user_id), session_id});
+    if (!conn) { if (cb) cb(); return; }
+    (*conn)->async_execute(
+        "DELETE FROM pop3_session_lock WHERE user_id = ? AND session_id = ?",
+        {std::to_string(user_id), session_id},
+        [cb = std::move(cb)](bool) mutable { if (cb) cb(); });
 }
 
 template <typename ConnectionType>
-bool TraditionalPop3Fsm<ConnectionType>::renew_lock_heartbeat(
+void TraditionalPop3Fsm<ConnectionType>::renew_lock_heartbeat_async(
     const std::shared_ptr<router::IShardRouter>& router,
-    uint64_t user_id, const std::string& session_id, int shard)
+    uint64_t user_id, const std::string& session_id, int shard,
+    std::function<void(bool)> cb)
 {
-    if (!router) return false;
+    if (!cb) return;
+    if (!router) { cb(false); return; }
     auto pool = router->get_db_pool(static_cast<size_t>(shard));
-    if (!pool) return false;
-    auto conn = pool->acquire_connection();
-    if (!conn.is_valid()) return false;
+    if (!pool) { cb(false); return; }
+    auto conn = std::make_shared<ScopedConnection>(pool->acquire_connection());
+    if (!conn->is_valid()) { cb(false); return; }
 
     // 条件续约（区别于抢锁的 upsert）：只在"仍持有这行锁"时刷新心跳。
     // 若行已被 sweeper 回收（心跳断太久）并可能转交新会话，这里不会
-    // 反插抢占 —— 用 verify 确认所有权，false = 锁丢了，会话应关闭。
-    se(conn.operator->(),
-       "UPDATE pop3_session_lock SET last_heartbeat = NOW() "
-       "WHERE user_id = ? AND session_id = ?",
-       {std::to_string(user_id), session_id});
-    auto r = sq(conn.operator->(),
-        "SELECT COUNT(*) as cnt FROM pop3_session_lock "
+    // 反插抢占 —— 用 verify 确认所有权，cb(false) = 锁丢了，会话应关闭。
+    (*conn)->async_execute(
+        "UPDATE pop3_session_lock SET last_heartbeat = NOW() "
         "WHERE user_id = ? AND session_id = ?",
-        {std::to_string(user_id), session_id});
-    return r && r->get_row_count() > 0 && safe_stoull(r->get_value(0, "cnt")) > 0;
+        {std::to_string(user_id), session_id},
+        [conn, user_id, session_id, cb = std::move(cb)](bool) mutable {
+            (*conn)->async_query(
+                "SELECT COUNT(*) as cnt FROM pop3_session_lock "
+                "WHERE user_id = ? AND session_id = ?",
+                {std::to_string(user_id), session_id},
+                [cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
+                    cb(r && r->get_row_count() > 0 && safe_stoull(r->get_value(0, "cnt")) > 0);
+                });
+        });
 }
 
 template <typename ConnectionType>
@@ -264,7 +270,8 @@ bool TraditionalPop3Fsm<ConnectionType>::sweep_expired_locks(
         if (!conn.is_valid()) { all_ok = false; continue; }
         // 心跳断 >5min 视为死锁（硬崩溃的会话不再续约），回收。
         // 与续约周期（60s）之间留足余量，正常 idle 会话不会被误杀。
-        if (!se(conn.operator->(),
+        // fire-and-forget 无续作：直接用同步 execute()
+        if (!conn.operator->()->execute(
                 "DELETE FROM pop3_session_lock WHERE last_heartbeat < NOW() - INTERVAL 5 MINUTE"))
             all_ok = false;
     }
@@ -314,23 +321,27 @@ void TraditionalPop3Fsm<ConnectionType>::start_heartbeat(
                       user_id, sid, shard, interval]() {
             auto self = weak_self.lock();
             if (!self || self->is_closed()) return;
-            bool ok = TraditionalPop3Fsm<ConnectionType>::renew_lock_heartbeat(
-                router, user_id, sid, shard);
-            self = weak_self.lock();
-            if (!self || self->is_closed()) return;
-            if (!ok) {
-                // 锁已被回收/转交：本会话失去排他性，异常关闭。
-                // 无需 release_lock（WHERE 含 session_id，别人拿的锁删不掉）。
-                LOG_SESSION_WARN("POP3 heartbeat lost lock for user={}, closing session", user_id);
-                self->close();
-                return;
-            }
-            // 续约成功 → 重新排下一次
-            auto t = weak_timer.lock();
-            auto next = weak_tick.lock();
-            if (!t || !next) return;
-            t->expires_after(interval);
-            t->async_wait(*next);
+            // 续约走 async CPS 链（默认同步触发，回调在 worker 上内联执行；
+            // 真异步接入后回调在 DB 线程，conn 由链内 shared 保活）
+            TraditionalPop3Fsm<ConnectionType>::renew_lock_heartbeat_async(
+                router, user_id, sid, shard,
+                [weak_self, weak_timer, weak_tick, user_id, interval](bool ok) mutable {
+                    auto self = weak_self.lock();
+                    if (!self || self->is_closed()) return;
+                    if (!ok) {
+                        // 锁已被回收/转交：本会话失去排他性，异常关闭。
+                        // 无需 release_lock（WHERE 含 session_id，别人拿的锁删不掉）。
+                        LOG_SESSION_WARN("POP3 heartbeat lost lock for user={}, closing session", user_id);
+                        self->close();
+                        return;
+                    }
+                    // 续约成功 → 重新排下一次
+                    auto t = weak_timer.lock();
+                    auto next = weak_tick.lock();
+                    if (!t || !next) return;
+                    t->expires_after(interval);
+                    t->async_wait(*next);
+                });
         });
     };
 
@@ -340,22 +351,31 @@ void TraditionalPop3Fsm<ConnectionType>::start_heartbeat(
 }
 
 template <typename ConnectionType>
-bool TraditionalPop3Fsm<ConnectionType>::apply_deletions(
-    class IDBConnection* conn, uint64_t user_id, uint64_t mailbox_id,
-    const std::set<uint64_t>& deleted_mail_ids)
+void TraditionalPop3Fsm<ConnectionType>::apply_deletions_async(
+    std::shared_ptr<ScopedConnection> conn, uint64_t user_id, uint64_t mailbox_id,
+    const std::set<uint64_t>& deleted_mail_ids, std::function<void(bool)> cb)
 {
-    if (!conn || deleted_mail_ids.empty()) return true;
-    // 全部数值参数直接拼接（仿 IMAP update_mail_deleted），避开 prepared
-    // statement 参数顺序/个数不匹配问题。
+    if (!conn) { if (cb) cb(false); return; }
+    if (deleted_mail_ids.empty()) { if (cb) cb(true); return; }
+    // 数值直接拼 IN 列表：单条 UPDATE 代替 N 条（原逐 mid 循环是为避开
+    // prepared 参数问题，IN 拼接同样规避且更省语句）。
+    std::string in_list;
+    bool first = true;
     for (auto mid : deleted_mail_ids) {
-        std::string sql = "UPDATE mail_mailbox SET is_deleted = 1"
-            " WHERE mail_id = " + std::to_string(mid)
-            + " AND user_id = " + std::to_string(user_id)
-            + " AND mailbox_id = " + std::to_string(mailbox_id);
-        se(conn, sql);
+        if (!first) in_list += ",";
+        in_list += std::to_string(mid);
+        first = false;
     }
-    return se(conn, db::sql::build_imap_expunge_delete_mailbox(),
-              {std::to_string(mailbox_id), std::to_string(user_id)});
+    std::string sql = "UPDATE mail_mailbox SET is_deleted = 1"
+        " WHERE mail_id IN (" + in_list + ")"
+        + " AND user_id = " + std::to_string(user_id)
+        + " AND mailbox_id = " + std::to_string(mailbox_id);
+    (*conn)->async_execute(sql,
+        [conn, mailbox_id, user_id, cb = std::move(cb)](bool) mutable {
+            (*conn)->async_execute(db::sql::build_imap_expunge_delete_mailbox(),
+                {std::to_string(mailbox_id), std::to_string(user_id)},
+                [cb = std::move(cb)](bool ok) mutable { if (cb) cb(ok); });
+        });
 }
 
 template <typename ConnectionType>
@@ -542,107 +562,116 @@ void TraditionalPop3Fsm<ConnectionType>::handle_pass(
         return;
     }
 
+    // async CPS 链（仿 SMTP auth）：每步 async_query/async_execute + 回调续作。
+    // 底层 MySQL async_* 是默认同步包装（回调内联执行），链在 worker 线程跑完；
+    // 将来接真异步 DB，回调在 DB 线程触发，conn 由 shared ScopedConnection 保活，
+    // 调用方结构无需改动。
     worker->post([self, router, auth_cache, email, pwd = std::move(pwd),
                   new_session_id = std::move(new_session_id),
-                  srv, finish_fail = std::move(finish_fail),
-                  worker, interval = this->heartbeat_interval_]() mutable {
-        uint64_t uid = 0;
-        int shard = 0;
-        bool ok = TraditionalPop3Fsm<ConnectionType>::auth_user(
-            router, auth_cache, email, pwd, uid, shard);
-        if (!ok) {
-            // 失败计数只在"真正鉴权失败"时计数（与 SMTP/IMAP 一致）
-            if (self && !self->is_closed() && self->record_auth_failure_and_check()) {
-                self->set_paused(false);
-                send_line(self, "-ERR Too many auth failures, closing connection");
-                if (srv) {
-                    if (auto m = srv->get_metrics().lock()) {
-                        m->inc_counter("protorelay_pop3_auth_total",
-                                       {{"result", "fail_too_many"}}, 1);
+                  srv, finish_fail, worker, interval = this->heartbeat_interval_]() mutable {
+        // 1. 鉴权：缓存快路径同步回调；DB 慢路径 async_query 链
+        TraditionalPop3Fsm<ConnectionType>::auth_user_async(
+            router, auth_cache, email, pwd,
+            [self, router, new_session_id, srv, finish_fail, worker, interval](
+                bool ok, uint64_t uid, int shard) mutable {
+                if (!ok) {
+                    // 失败计数只在"真正鉴权失败"时计数（与 SMTP/IMAP 一致）
+                    if (self && !self->is_closed() && self->record_auth_failure_and_check()) {
+                        self->set_paused(false);
+                        send_line(self, "-ERR Too many auth failures, closing connection");
+                        if (srv) {
+                            if (auto m = srv->get_metrics().lock()) {
+                                m->inc_counter("protorelay_pop3_auth_total",
+                                               {{"result", "fail_too_many"}}, 1);
+                            }
+                        }
+                        self->close();
+                        return;
                     }
+                    finish_fail("-ERR Authentication failed", "wrong_pass");
+                    return;
                 }
-                self->close();
-                return;
-            }
-            finish_fail("-ERR Authentication failed", "wrong_pass");
-            return;
-        }
 
-        auto pool = router ? router->get_db_pool(static_cast<size_t>(shard)) : nullptr;
-        if (!pool) {
-            finish_fail("-ERR Server configuration error", "no_pool");
-            return;
-        }
-        auto conn = pool->acquire_connection();
-        if (!conn.is_valid()) {
-            finish_fail("-ERR Server database unavailable", "no_conn");
-            return;
-        }
-        uint64_t inbox_id = TraditionalPop3Fsm<ConnectionType>::get_inbox_id(
-            conn.operator->(), uid);
-        if (inbox_id == 0) {
-            finish_fail("-ERR No INBOX for user", "no_inbox");
-            return;
-        }
+                // 2. 拿 DB 连接（shared 保活，贯穿整条链）
+                auto pool = router ? router->get_db_pool(static_cast<size_t>(shard)) : nullptr;
+                if (!pool) { finish_fail("-ERR Server configuration error", "no_pool"); return; }
+                auto conn = std::make_shared<ScopedConnection>(pool->acquire_connection());
+                if (!conn->is_valid()) { finish_fail("-ERR Server database unavailable", "no_conn"); return; }
 
-        if (!TraditionalPop3Fsm<ConnectionType>::acquire_lock(
-                conn.operator->(), uid, new_session_id)) {
-            if (srv) {
-                if (auto m = srv->get_metrics().lock()) {
-                    m->inc_counter("protorelay_pop3_lock_conflict_total", {}, 1);
-                }
-            }
-            finish_fail("-ERR [IN-USE] Mailbox lock busy, try later", "lock_conflict");
-            return;
-        }
+                // 3. INBOX id
+                TraditionalPop3Fsm<ConnectionType>::get_inbox_id_async(
+                    conn, uid,
+                    [self, router, conn, uid, shard, new_session_id, srv, finish_fail, worker, interval](
+                        uint64_t inbox_id) mutable {
+                        if (inbox_id == 0) { finish_fail("-ERR No INBOX for user", "no_inbox"); return; }
 
-        // 拉邮件列表 + 每封 size（用 storage provider）
-        std::vector<Pop3Message> mails;
-        TraditionalPop3Fsm<ConnectionType>::get_inbox_mails(
-            conn.operator->(), inbox_id, uid, mails);
+                        // 4. 抢锁
+                        TraditionalPop3Fsm<ConnectionType>::acquire_lock_async(
+                            conn, uid, new_session_id,
+                            [self, router, conn, uid, shard, inbox_id, new_session_id, srv, finish_fail, worker, interval](
+                                bool locked) mutable {
+                                if (!locked) {
+                                    if (srv) {
+                                        if (auto m = srv->get_metrics().lock()) {
+                                            m->inc_counter("protorelay_pop3_lock_conflict_total", {}, 1);
+                                        }
+                                    }
+                                    finish_fail("-ERR [IN-USE] Mailbox lock busy, try later", "lock_conflict");
+                                    return;
+                                }
 
-        std::shared_ptr<storage::IStorageProvider> provider;
-        if (router) provider = router->get_storage(static_cast<size_t>(shard));
-        if (provider) {
-            for (auto& mm : mails) {
-                storage::IoError err;
-                uint64_t sz = 0;
-                if (provider->object_size(mm.body_path, sz, err)) {
-                    mm.size = sz;
-                }
-            }
-        }
+                                // 5. 邮件列表
+                                TraditionalPop3Fsm<ConnectionType>::get_inbox_mails_async(
+                                    conn, inbox_id, uid,
+                                    [self, router, uid, shard, inbox_id, new_session_id, srv, worker, interval](
+                                        std::vector<Pop3Message> mails) mutable {
+                                        // 每封 size（storage provider，同步读文件大小）
+                                        std::shared_ptr<storage::IStorageProvider> provider;
+                                        if (router) provider = router->get_storage(static_cast<size_t>(shard));
+                                        if (provider) {
+                                            for (auto& mm : mails) {
+                                                storage::IoError err;
+                                                uint64_t sz = 0;
+                                                if (provider->object_size(mm.body_path, sz, err)) {
+                                                    mm.size = sz;
+                                                }
+                                            }
+                                        }
 
-        // 写回 ctx
-        if (!self || self->is_closed()) return;
-        auto* c = static_cast<Pop3Context*>(self->get_context());
-        if (c) {
-            c->is_authenticated = true;
-            c->user_id = uid;
-            c->mailbox_id = inbox_id;
-            c->shard_index = shard;
-            c->messages = std::move(mails);
-            c->deleted.clear();
-            c->session_id = new_session_id;
-        }
+                                        // 写回 ctx
+                                        if (!self || self->is_closed()) return;
+                                        auto* c = static_cast<Pop3Context*>(self->get_context());
+                                        if (c) {
+                                            c->is_authenticated = true;
+                                            c->user_id = uid;
+                                            c->mailbox_id = inbox_id;
+                                            c->shard_index = shard;
+                                            c->messages = std::move(mails);
+                                            c->deleted.clear();
+                                            c->session_id = new_session_id;
+                                        }
 
-        // 锁拿到后启动心跳续约（v2）：防会话硬崩溃后锁泄漏死锁
-        start_heartbeat(self, router, worker, interval);
+                                        // 锁拿到后启动心跳续约（v2）：防会话硬崩溃后锁泄漏死锁
+                                        start_heartbeat(self, router, worker, interval);
 
-        self->set_paused(false);
-        size_t n = c ? c->messages.size() : 0;
-        uint64_t total = 0;
-        if (c) for (auto& mm : c->messages) total += mm.size;
-        send_line(self, "+OK Mailbox locked and loaded, " + std::to_string(n) +
-                        " messages (" + std::to_string(total) + " octets)");
-        self->set_current_state(static_cast<int>(Pop3State::TRANSACTION));
-        if (srv) {
-            if (auto m = srv->get_metrics().lock()) {
-                m->inc_counter("protorelay_pop3_auth_total",
-                               {{"result", "ok"}}, 1);
-            }
-        }
-        self->drain_buffered_commands();
+                                        self->set_paused(false);
+                                        size_t n = c ? c->messages.size() : 0;
+                                        uint64_t total = 0;
+                                        if (c) for (auto& mm : c->messages) total += mm.size;
+                                        send_line(self, "+OK Mailbox locked and loaded, " + std::to_string(n) +
+                                                        " messages (" + std::to_string(total) + " octets)");
+                                        self->set_current_state(static_cast<int>(Pop3State::TRANSACTION));
+                                        if (srv) {
+                                            if (auto m = srv->get_metrics().lock()) {
+                                                m->inc_counter("protorelay_pop3_auth_total",
+                                                               {{"result", "ok"}}, 1);
+                                            }
+                                        }
+                                        self->drain_buffered_commands();
+                                    });
+                            });
+                    });
+            });
     });
 }
 
@@ -900,15 +929,28 @@ void TraditionalPop3Fsm<ConnectionType>::handle_quit(
         if (router) {
             auto pool = router->get_db_pool(static_cast<size_t>(shard));
             if (pool) {
-                auto conn = pool->acquire_connection();
-                if (conn.is_valid()) {
-                    TraditionalPop3Fsm<ConnectionType>::apply_deletions(
-                        conn.operator->(), user_id, mailbox_id, del);
-                    TraditionalPop3Fsm<ConnectionType>::release_lock(
-                        conn.operator->(), user_id, sid);
+                auto conn = std::make_shared<ScopedConnection>(pool->acquire_connection());
+                if (conn->is_valid()) {
+                    // async CPS 链：apply_deletions → release_lock → Bye + close
+                    // （conn 由 shared 保活；默认同步触发，将来真异步回调在 DB 线程）
+                    TraditionalPop3Fsm<ConnectionType>::apply_deletions_async(
+                        conn, user_id, mailbox_id, del,
+                        [self, conn, user_id, sid](bool) {
+                            TraditionalPop3Fsm<ConnectionType>::release_lock_async(
+                                conn, user_id, sid,
+                                [self]() {
+                                    if (!self || self->is_closed()) return;
+                                    self->set_paused(false);
+                                    send_line(self, "+OK Bye");
+                                    self->set_current_state(static_cast<int>(Pop3State::UPDATE));
+                                    self->close();
+                                });
+                        });
+                    return;
                 }
             }
         }
+        // 无 router/pool/conn → 直接 Bye
         if (!self || self->is_closed()) return;
         self->set_paused(false);
         send_line(self, "+OK Bye");
@@ -935,9 +977,13 @@ void TraditionalPop3Fsm<ConnectionType>::handle_timeout(
         auto pool = m_shardRouter->get_db_pool(
             static_cast<size_t>(ctx->shard_index));
         if (pool) {
-            auto conn = pool->acquire_connection();
-            if (conn.is_valid()) {
-                release_lock(conn.operator->(), ctx->user_id, ctx->session_id);
+            auto conn = std::make_shared<ScopedConnection>(pool->acquire_connection());
+            if (conn->is_valid()) {
+                // async CPS：释放锁后关闭（conn 保活；默认同步触发）
+                uint64_t user_id = ctx->user_id;
+                std::string sid = ctx->session_id;
+                release_lock_async(conn, user_id, sid, [session]() { session->close(); });
+                return;
             }
         }
     }
