@@ -658,5 +658,8 @@ FETCH 大邮箱（>~200 封）会 **SIGSEGV**：`fetch_complete_mail_with_body` 
 本地 storage 的 `async_object_size/read` 回调**内联**触发 → `fetch_drive` 被逐封重入（真递归），
 500 封即爆栈（lldb 确认 EXC_BAD_ACCESS code=2，栈指针落在 guard 页，无法 unwind）。
 `server_base.cpp:137` 的设计注释说"本地内联 µs 级"，`fetch_drive` 注释称"万封不爆栈"——两者
-在内联回调下矛盾。**修复**：让续作链对 inline 回调迭代化（共享 atomic 标记区分 inline/deferred，
-inline 时外层循环续，deferred 时回调驱动），或本地 storage 也套 AsyncStorageProvider 装饰器。
+在内联回调下矛盾。**已修复（2026-08-29，`fetch_drive` 续作链迭代化）**：每封共享一个 `std::atomic<bool> alive`，
+size/body 两个异步读共用；完成本封的最后一步走 `fetch_continue`——inline 回调（外层
+`fetch_drive` 帧仍在）→ 外层循环 continue；deferred 回调 → 驱动下一封。本地 storage
+保持内联（不加线程投递开销）。回归单测 `fetch_many_mails_no_stack_overflow`（400 封）+
+实测 FETCH 1:2000 正常。

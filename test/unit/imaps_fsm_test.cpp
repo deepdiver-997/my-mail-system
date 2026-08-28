@@ -323,6 +323,64 @@ TEST(fetch_full_path_with_storage) {
     std::cout << "  [PASS] fetch_full_path_with_storage" << std::endl;
 }
 
+// FETCH 续作链迭代化回归：400 封。本地 storage 的 async_* 回调内联触发，
+// 旧实现 fetch_drive 逐封真递归 → 大邮箱 >~200 封栈溢出 SIGSEGV。
+// 修复后应循环展开（inline 回调外层 continue），400 封正常完成。
+TEST(fetch_many_mails_no_stack_overflow) {
+    auto io = std::make_shared<IOThreadPool>(1); io->start();
+    auto wk = std::make_shared<BoostThreadPool>(2); wk->start();
+    auto db = std::make_shared<test::MockDbPool>();
+    db->mock_conn()->set_deferred(false);
+    namespace st = mail_system::storage;
+    std::filesystem::create_directories("/tmp/imaps_fetch_many");
+    auto storage = std::make_shared<st::LocalFileStorageProvider>(
+        "/tmp/imaps_fetch_many/", "/tmp/imaps_fetch_many/");
+    auto router2 = std::make_shared<router::StaticShardRouter>(
+        std::vector<std::pair<std::string, int>>{},
+        0,
+        std::vector<std::shared_ptr<DBPool>>{db},
+        std::vector<std::shared_ptr<st::IStorageProvider>>{storage});
+
+    ServerConfig cfg2;
+    cfg2.perf_mode = true; cfg2.apply_perf_mode();
+    cfg2.use_database = false; cfg2.system_domain = "test.local";
+    cfg2.storage.local.mail_path = "/tmp/imaps_fetch_many";
+    cfg2.storage.local.attachment_path = "/tmp/imaps_fetch_many";
+    auto server2 = std::shared_ptr<TestServer>(new TestServer(cfg2, io, wk, router2));
+    auto fsm2 = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router2);
+
+    const int N = 400;   // 旧实现 >~200 就爆栈
+    std::vector<std::map<std::string, std::string>> rows;
+    rows.reserve(N);
+    for (int i = 1; i <= N; ++i) {
+        std::string bp = "/tmp/imaps_fetch_many/mail_" + std::to_string(i);
+        { std::ofstream f(bp, std::ios::binary); f << "Subject: m" << i << "\r\n\r\nbody" << i; }
+        rows.push_back({{"id", std::to_string(1000 + i)}, {"sender", "a@t.local"},
+            {"recipient", "b@t.local"}, {"subject", "m"}, {"body_path", bp},
+            {"is_starred", "0"}, {"is_deleted", "0"}, {"is_important", "0"},
+            {"status", "1"}, {"send_time", "1700000000"}});
+    }
+    db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(std::move(rows)));
+
+    auto conn_u = std::make_unique<MockConnection>();
+    auto* conn_ptr = conn_u.get();
+    auto session = std::make_shared<ImapsSession<MockConnection>>(server2.get(), std::move(conn_u), fsm2);
+    auto* c = static_cast<ImapContext*>(session->get_context());
+    c->is_authenticated = true; c->user_id = 1; c->mailbox_selected = true;
+    c->selected_mailbox_id = 1; c->current_tag = "A001";
+    session->set_current_state(static_cast<int>(ImapState::SELECTED));
+
+    session->handle_read("A001 FETCH 1:" + std::to_string(N) + " (FLAGS RFC822.SIZE)\r\n");
+    session->process_read();
+
+    auto w = conn_ptr->written();
+    assert(w.find("A001 OK FETCH completed") != std::string::npos);
+    assert(w.find("RFC822.SIZE") != std::string::npos);
+    std::filesystem::remove_all("/tmp/imaps_fetch_many");
+    io->stop(); wk->stop();
+    std::cout << "  [PASS] fetch_many_mails_no_stack_overflow (" << N << " mails, iterative chain)" << std::endl;
+}
+
 // literal 声明大小超限 → BAD + 断开（OOM 防线）
 TEST(literal_too_large_rejected) {
     auto h = fx.make_session();
@@ -880,6 +938,7 @@ int main() {
         // ── UID FETCH crash repro ──
         test_uid_fetch_no_db(fx);
         test_fetch_full_path_with_storage(fx);
+        test_fetch_many_mails_no_stack_overflow(fx);
         test_literal_too_large_rejected(fx);
 
         // ── UIDNEXT 高水位 ──

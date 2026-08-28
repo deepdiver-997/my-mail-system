@@ -1534,11 +1534,13 @@ void TraditionalImapsFsm<ConnectionType>::fetch_complete_mail_with_body(
 }
 
 // size 之后的阶段：envelope（内存）→ 决定是否读正文 → 完成本封。
-// 返回 true 表示已发起异步读取（调用方应立即返回，链在回调里续）。
+// 返回 true 表示已发起异步正文读取（回调里 fetch_continue）；false 表示正文已
+// 同步就绪并完成本封。
 template <typename ConnectionType>
 bool TraditionalImapsFsm<ConnectionType>::fetch_after_size(
     std::shared_ptr<SessionBase<ConnectionType>> session,
-    std::shared_ptr<FetchContext> ctx)
+    std::shared_ptr<FetchContext> ctx,
+    std::shared_ptr<std::atomic<bool>> alive)
 {
     const auto& mail_info = ctx->mails[ctx->cur_seq - 1];
 
@@ -1583,14 +1585,14 @@ bool TraditionalImapsFsm<ConnectionType>::fetch_after_size(
         ctx->cur_body_path = mail_info.body_path;
         auto provider = ctx->provider;
         provider->async_read_all(mail_info.body_path,
-            [session, ctx](bool ok, std::string data, const storage::IoError& error) {
+            [session, ctx, alive](bool ok, std::string data, const storage::IoError& error) mutable {
                 if (!ok) {
                     LOG_FILE_IO_ERROR("Failed to read mail body {}: {}",
                                       ctx->cur_body_path, error.message);
                     data.clear();
                 }
                 fetch_complete_mail_with_body(*ctx, std::move(data));
-                fetch_drive(session, ctx);   // 异步链续入下一封
+                fetch_continue(session, ctx, alive);   // inline→外层循环续；deferred→驱动下一封
             });
         return true;
     }
@@ -1599,8 +1601,23 @@ bool TraditionalImapsFsm<ConnectionType>::fetch_after_size(
     return false;
 }
 
-// 驱动器：同步路径在循环里逐封完成（不递归，万封 FETCH 也不爆栈），
-// 异步路径发起后返回，链在回调里续入。
+// 完成本封剩余 item 后的续作：inline 回调（外层 fetch_drive 帧仍在）→ 外层循环继续；
+// deferred 回调（外层已返回）→ 由这里驱动下一封。alive 每封一个，size 与 body 两个
+// 异步读共享，保证"最后完成本封的回调"恰好驱动/续作一次。
+template <typename ConnectionType>
+void TraditionalImapsFsm<ConnectionType>::fetch_continue(
+    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<FetchContext> ctx,
+    std::shared_ptr<std::atomic<bool>> alive)
+{
+    if (alive->exchange(false)) return;   // inline：外层 fetch_drive 会 continue
+    fetch_drive(session, ctx);            // deferred：驱动下一封
+}
+
+// 驱动器：迭代化续作链（不递归）。同步路径在 for 循环里逐封完成；需要异步
+// size/正文读取时发起后：若回调 inline（外层帧仍在）→ 循环 continue；若回调
+// deferred（外层已返回）→ 由回调里的 fetch_continue 驱动下一封。
+// alive 每封一个共享标记，size 与 body 两个异步读共用，保证续作恰好一次。
 template <typename ConnectionType>
 void TraditionalImapsFsm<ConnectionType>::fetch_drive(
     std::shared_ptr<SessionBase<ConnectionType>> session,
@@ -1626,23 +1643,29 @@ void TraditionalImapsFsm<ConnectionType>::fetch_drive(
         if (ctx->want_internaldate) {
             ctx->cur += "INTERNALDATE \"" + imap_timestamp(mail_info.send_time) + "\" ";
         }
+
+        // 本封的续作标记：size / body 两个异步读共享
+        auto alive = std::make_shared<std::atomic<bool>>(true);
+
         if (ctx->want_rfc822_size) {
             if (!mail_info.body_path.empty() && ctx->provider) {
                 session->set_paused(true);
                 ctx->cur_body_path = mail_info.body_path;
                 auto provider = ctx->provider;
                 provider->async_object_size(mail_info.body_path,
-                    [session, ctx](bool ok, std::uint64_t sz, const storage::IoError& error) {
+                    [session, ctx, alive](bool ok, std::uint64_t sz, const storage::IoError& error) mutable {
                         if (!ok) {
                             LOG_FILE_IO_ERROR("RFC822.SIZE lookup failed for {}: {}",
                                               ctx->cur_body_path, error.message);
                             sz = 0;
                         }
                         ctx->cur += "RFC822.SIZE " + std::to_string(sz) + " ";
-                        if (fetch_after_size(session, ctx)) return;
-                        fetch_drive(session, ctx);   // size 异步但正文不需要/本地兜底
+                        // 正文可能再异步读；只有最后完成本封的一步才续作
+                        if (fetch_after_size(session, ctx, alive)) return;
+                        fetch_continue(session, ctx, alive);
                     });
-                return;
+                if (alive->exchange(false)) return;   // deferred：回调会 fetch_continue 驱动
+                continue;                             // inline：本封已完成，下一封
             }
             std::uint64_t sz = 0;
             if (!mail_info.body_path.empty()) {
@@ -1652,7 +1675,10 @@ void TraditionalImapsFsm<ConnectionType>::fetch_drive(
             }
             ctx->cur += "RFC822.SIZE " + std::to_string(sz) + " ";
         }
-        if (fetch_after_size(session, ctx)) return;   // 正文读取异步中
+        if (fetch_after_size(session, ctx, alive)) {
+            if (alive->exchange(false)) return;   // deferred：正文回调驱动
+            continue;                             // inline：本封已完成
+        }
         // 同步完成本封 → 循环处理下一封
     }
 }

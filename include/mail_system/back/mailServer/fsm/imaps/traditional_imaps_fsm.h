@@ -326,12 +326,22 @@ private:
     // FETCH 的续作链状态与驱动器（定义在 .tpp）。读取走 provider 的
     // async 接口：本地内联，远程后端由装饰器投递到 worker —— 逐封
     // size/正文读取不再阻塞 io 线程。static：回调里无 this。
+    // 续作链迭代化（不递归）：每封一个 shared atomic alive，size/body 两个异步读
+    // 共享。完成本封的最后一步走 fetch_continue——inline 回调（外层 fetch_drive
+    // 帧仍在）→ 外层循环 continue；deferred 回调（外层已返回）→ 由回调驱动下一封。
+    // 避免本地 storage 内联回调导致的逐封栈递归（大邮箱 >~200 封爆栈）。
     struct FetchContext;
     static void fetch_drive(std::shared_ptr<SessionBase<ConnectionType>> session,
                             std::shared_ptr<FetchContext> ctx);
-    // 返回 true = 已发起异步读取，链在回调里续入
+    // 完成本封剩余 item 后的续作：inline 时外层循环续，deferred 时驱动下一封
+    static void fetch_continue(std::shared_ptr<SessionBase<ConnectionType>> session,
+                               std::shared_ptr<FetchContext> ctx,
+                               std::shared_ptr<std::atomic<bool>> alive);
+    // 本封的 envelope + 正文阶段。返回 true = 已发起异步正文读取（回调里 fetch_continue）；
+    // false = 正文已同步就绪并完成本封。
     static bool fetch_after_size(std::shared_ptr<SessionBase<ConnectionType>> session,
-                                 std::shared_ptr<FetchContext> ctx);
+                                 std::shared_ptr<FetchContext> ctx,
+                                 std::shared_ptr<std::atomic<bool>> alive);
     // 用已就绪的正文完成当前邮件剩余 item（纯数据推进，不触碰 session）
     static void fetch_complete_mail_with_body(FetchContext& ctx,
                                               std::string body_content);
