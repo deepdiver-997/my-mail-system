@@ -7,6 +7,7 @@
 #include "mail_system/back/entities/mail.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/db/distributed_mysql_pool.h"
+#include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/storage/async_storage_provider.h"
 #include "mail_system/back/storage/distributed_file_storage_provider.h"
 #if PROTORELAY_ENABLE_HDFS_WEB_STORAGE
@@ -18,6 +19,9 @@
 #include "mail_system/back/storage/s3_storage_provider.h"
 #endif
 #include "mail_system/back/db/null_db_pool.h"
+#ifdef HAVE_MARIADB
+#include "mail_system/back/db/mariadb_pool.h"
+#endif
 #include <iostream>
 #include <fstream>
 
@@ -55,6 +59,21 @@ ServerBase::ServerBase(const ServerConfig& config,
                     LOG_SERVER_ERROR("Failed to create MySQL pool: {}", e.what());
                 }
             }
+#ifdef HAVE_MARIADB
+            else if (config.db_pool_config.achieve == "mariadb") {
+                try {
+                    // db_service 传 nullptr：工厂内部创建 MariaDBService
+                    main_db_pool = MariaDBPoolFactory::get_instance().create_pool(
+                        config.db_pool_config, nullptr);
+                } catch (const std::exception& e) {
+                    LOG_SERVER_ERROR("Failed to create MariaDB pool: {}", e.what());
+                }
+            }
+#else
+            else if (config.db_pool_config.achieve == "mariadb") {
+                LOG_SERVER_ERROR("achieve=mariadb 但本构建未启用 MariaDB 引擎（缺 mariadb-connector-c 头文件）");
+            }
+#endif
         }
         if (!main_db_pool) {
             main_db_pool = std::make_shared<NullDBPool>();

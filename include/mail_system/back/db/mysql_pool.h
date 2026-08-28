@@ -2,7 +2,7 @@
 #define MAIL_SYSTEM_MYSQL_POOL_H
 
 #include "mail_system/back/db/db_pool.h"
-#include "mail_system/back/db/mysql_service.h"
+#include "mail_system/back/db/db_service.h"
 #include <queue>
 #include <chrono>
 #include <thread>

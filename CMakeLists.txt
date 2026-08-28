@@ -234,6 +234,18 @@ if(NOT MYSQL_LIBRARIES)
     endif()
 endif()
 
+# ---- MariaDB Connector/C（可选引擎，dlopen 运行时加载 libmariadb，仅需头文件编译） ----
+# 找包含 mariadb/mysql.h 的根目录（include/），使 #include <mariadb/mysql.h> 可解析
+find_path(MARIADB_INCLUDE_DIR "mariadb/mysql.h"
+          HINTS /opt/homebrew/opt/mariadb-connector-c /usr/local/opt/mariadb-connector-c /usr
+          PATH_SUFFIXES include)
+if(MARIADB_INCLUDE_DIR)
+    set(HAVE_MARIADB 1)
+    message(STATUS "MariaDB Connector/C headers found: ${MARIADB_INCLUDE_DIR}")
+elseif(NOT BUILD_OBJECT_ONLY)
+    message(STATUS "mariadb-connector-c headers not found — MariaDB 引擎不编译（achieve=mariadb 不可用）")
+endif()
+
 # ===== 链接库列表 =====
 set(LINK_LIBRARIES Threads::Threads ${MYSQL_LIBRARIES} ${CARES_LIBRARIES} spdlog::spdlog)
 
@@ -300,6 +312,11 @@ if(ENABLE_S3_STORAGE)
     add_compile_definitions(ENABLE_S3_STORAGE=1)
     list(APPEND COMMON_SRCS src/mail_system/back/storage/s3_storage_provider.cpp)
 endif()
+if(HAVE_MARIADB)
+    list(APPEND COMMON_SRCS
+        src/mail_system/back/db/mariadb_service.cpp
+        src/mail_system/back/db/mariadb_pool.cpp)
+endif()
 
 # ===== 输出目录 =====
 set(TEST_OUTPUT_DIR "${CMAKE_BINARY_DIR}")
@@ -324,6 +341,10 @@ function(setup_mail_target NAME)
     endif()
     if(MYSQL_INCLUDE_DIRS)
         target_include_directories(${NAME} PRIVATE SYSTEM ${MYSQL_INCLUDE_DIRS})
+    endif()
+    if(MARIADB_INCLUDE_DIR)
+        target_include_directories(${NAME} PRIVATE SYSTEM ${MARIADB_INCLUDE_DIR})
+        target_compile_definitions(${NAME} PRIVATE HAVE_MARIADB=1)
     endif()
     if(CARES_INCLUDE_DIRS)
         target_include_directories(${NAME} PRIVATE SYSTEM ${CARES_INCLUDE_DIRS})
