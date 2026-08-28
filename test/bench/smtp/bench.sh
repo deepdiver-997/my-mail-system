@@ -57,7 +57,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── helpers ────────────────────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")/../../../scripts" && pwd)"
 CL="$SCRIPT_DIR/cl.py"
 
 auth_flags() {

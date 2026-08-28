@@ -531,7 +531,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_executable(fsm_bench
         ${COMMON_SRCS}
         src/mail_system/back/mailServer/smtps/smtps_server.cpp
-        test/bench/fsm_bench.cpp
+        test/bench/fsm/fsm_bench.cpp
     )
     target_include_directories(fsm_bench PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(fsm_bench)
@@ -576,12 +576,12 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(pop3_fsm_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(pop3_fsm_test)
 
-    add_executable(smtp_client test/bench/smtp_client.cpp)
+    add_executable(smtp_client test/bench/smtp/smtp_client.cpp)
     target_compile_features(smtp_client PRIVATE cxx_std_17)
-    add_executable(imap_client test/bench/imap_client.cpp)
+    add_executable(imap_client test/bench/imap/imap_client.cpp)
     target_compile_features(imap_client PRIVATE cxx_std_17)
 
-    add_executable(dispatch_bench test/bench/dispatch_bench.cpp)
+    add_executable(dispatch_bench test/bench/fsm/dispatch_bench.cpp)
     target_compile_features(dispatch_bench PRIVATE cxx_std_17)
 
     add_executable(outbound_smoke test/unit/outbound_smoke.cpp)

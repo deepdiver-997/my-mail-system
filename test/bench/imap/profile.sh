@@ -21,9 +21,9 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"   # imap/ → bench/ → test/ → 根
 BENCH_DIR="$ROOT/test/bench"
-REPORT="$BENCH_DIR/bench-report.md"
+REPORT="$BENCH_DIR/imap/REPORT.md"
 
 # ── 默认 ───────────────────────────────────────────────────────────────────
 SERVER="$ROOT/build-release/imapsServer"
