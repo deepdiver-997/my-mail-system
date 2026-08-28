@@ -13,7 +13,6 @@
 
 namespace mail_system {
 
-// sync-bridge: 通过 async API 同步获取结果（默认同步实现，回调在返回前触发）
 namespace {
 
 // 密码验证：自动检测 bcrypt / MD5 / 明文
@@ -29,22 +28,6 @@ inline bool verify_password(const std::string& input, const std::string& stored)
         return stored == std::string(hex, 32);
     }
     return stored == input;
-}
-inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql,
-                                      const std::vector<std::string>& params) {
-    // 同步 DB 访问：直接用 query()，不再绕 async_query（MySQL 的 async_* 是
-    // 默认同步包装，回调同步触发，"假异步"误导读者）。DB 层无真异步。
-    return c->query(sql, params);
-}
-inline std::shared_ptr<IDBResult> sq(class IDBConnection* c, const std::string& sql) {
-    return c->query(sql);
-}
-inline bool se(class IDBConnection* c, const std::string& sql,
-                const std::vector<std::string>& params) {
-    return c->execute(sql, params);
-}
-inline bool se(class IDBConnection* c, const std::string& sql) {
-    return c->execute(sql);
 }
 } // namespace
 
@@ -1216,7 +1199,7 @@ std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_mail_metadata_async(
             mail_data.id, mail_data.subject, body_path,
             mail_data.status, conn_ptr);
         LOG_DATABASE_DEBUG("Executing SQL: {}", mail_sql);
-        if (!se(conn_ptr,mail_sql)) {
+        if (!conn_ptr->execute(mail_sql)) {
             LOG_DATABASE_ERROR("Failed to insert mail metadata. Error: {}", conn_ptr->get_last_error());
             return false;
         }
@@ -1225,10 +1208,10 @@ std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_mail_metadata_async(
         std::string recipient_sql = db::sql::build_insert_recipients_simple(
             mail_data, conn_ptr);
         LOG_DATABASE_DEBUG("Executing SQL: {}", recipient_sql);
-        if (!recipient_sql.empty() && !se(conn_ptr,recipient_sql)) {
+        if (!recipient_sql.empty() && !conn_ptr->execute(recipient_sql)) {
             LOG_DATABASE_ERROR("Failed to insert mail recipients. Error: {}", conn_ptr->get_last_error());
             // 如果插入收件人失败，删除已插入的邮件元数据
-            se(conn_ptr,db::sql::build_delete_mail_by_id(mail_data.id));
+            conn_ptr->execute(db::sql::build_delete_mail_by_id(mail_data.id));
             return false;
         }
 
@@ -1237,7 +1220,7 @@ std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_mail_metadata_async(
             std::string att_sql = db::sql::build_insert_attachments(
                 mail_data.id, mail_data.attachments, conn_ptr);
             LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
-            if (!se(conn_ptr,att_sql)) {
+            if (!conn_ptr->execute(att_sql)) {
                 LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", conn_ptr->get_last_error());
                 success = false;
             }
@@ -1276,7 +1259,7 @@ std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_attachment_metadata_
         std::string att_sql = db::sql::build_insert_attachment_single(
             mail_id, att, conn_ptr);
         LOG_DATABASE_DEBUG("Executing SQL: {}", att_sql);
-        if (!se(conn_ptr,att_sql)) {
+        if (!conn_ptr->execute(att_sql)) {
             LOG_DATABASE_ERROR("Failed to insert attachment metadata. Error: {}", conn_ptr->get_last_error());
             return false;
         }
@@ -1299,7 +1282,7 @@ void TraditionalSmtpsFsm<ConnectionType>::remove_metadata_by_file_path(
     // 注意：数据库中 body_path 字段存储的是文件路径
     std::string sql = "DELETE FROM mails WHERE body_path = ?";
     for (const auto& file_path : file_paths) {
-        if (!se(conn.operator->(), sql, {file_path})) {
+        if (!conn.operator->()->execute(sql, {file_path})) {
             LOG_DATABASE_ERROR("Failed to delete mail metadata for file path: {}", file_path);
         }
     }
