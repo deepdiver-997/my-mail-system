@@ -233,3 +233,4 @@ test/sql_queries_test
 
 # Build artifacts
 artifacts/
+/build-release/
