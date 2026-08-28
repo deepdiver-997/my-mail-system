@@ -568,6 +568,8 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
 
     add_executable(smtp_client test/bench/smtp_client.cpp)
     target_compile_features(smtp_client PRIVATE cxx_std_17)
+    add_executable(imap_client test/bench/imap_client.cpp)
+    target_compile_features(imap_client PRIVATE cxx_std_17)
 
     add_executable(dispatch_bench test/bench/dispatch_bench.cpp)
     target_compile_features(dispatch_bench PRIVATE cxx_std_17)

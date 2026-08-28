@@ -607,3 +607,56 @@ sudo ifconfig lo0 alias 127.0.0.2 up
 > 72K → 18K 的下降**不是重构造成**，是 null storage (零 I/O) vs local storage (真实 SSD 写) 的差异。
 > 同一 local storage 条件下，重构后 +46% (12502 → 18278)。
 > FSM 纯 CPU 更是 +3.4× (4127 → 14136)。重构是正向优化。
+
+---
+
+# IMAP 读路径基线（2026-08-29）
+
+> **目的**：DB 真异步（Phase 2，database-async-design.md）的 **before** 基线。验证"io 线程
+> 同步死等 MySQL/storage"这一热点假设，并为异步改造提供对照值。
+>
+> **工具**：`test/bench/imap_client.cpp`（C++ raw socket 多连接并发；LOGIN→SELECT→FETCH 循环）。
+> `test/bench/seed_imap_data.py`（灌 200 封测试邮件）。
+> **环境**：macOS ARM64, localhost, 4 io + 4 worker, `achieve=mysql`（当前同步 DB 路径）,
+> local storage, mailbox 200 封（每封 2KB body）。
+> **每轮** = SELECT INBOX + FETCH 1:200 (FLAGS RFC822.SIZE)。读场景不产生新数据，无需清理。
+
+## 结论：热点确认 —— io 线程同步阻塞是吞吐天花板
+
+| 并发连接 | 吞吐 (rounds/s) | P50 延迟 (ms) | P95 (ms) | P99 (ms) |
+|---------|----------------|--------------|---------|---------|
+| 1 | ~300–540 | 1.8–3.3 | 2.4–3.6 | 3.1–5.3 |
+| 4 | ~740–1390 | 2.8–5.1 | 4.0–7.8 | 4.6–8.4 |
+| 16 | ~770–1470 | 10.8–20.8 | 13.1–24.9 | 14.1–27.6 |
+| 64 | ~760–1460 | 43.8–84.0 | 47.1–92.5 | 49.2–98.5 |
+
+（两次采样因本机负载波动区间不同，但形态一致。）
+
+**形态**：并发 > 4（= io 线程数）后吞吐**封顶**，延迟随排队线性上涨。原因：
+
+- 每轮 FETCH 的 `get_mailbox_mails`（1 次 DB 查询）+ 200 次 `object_size`（storage 读）都在
+  io 线程上**同步内联**执行——查询期间该 io 线程无法服务任何其他连接。
+- 并发在途查询上限 = io 线程数（4）；超出就排队（延迟涨、吞吐平）。
+- 压测中 4 个 io 线程各 ~40% CPU，但大部分时间**阻塞在 DB/storage 系统调用上**（非计算忙），
+  证实是 I/O 等待而非 CPU 瓶颈。
+
+## 对照：SELECT-only（stats 缓存命中，近零 DB）
+
+| 并发 | 吞吐 (rounds/s) | P50 (ms) |
+|-----|----------------|---------|
+| 4 | 44,663 | 0.067 |
+| 16 | 91,072 | 0.127 |
+
+SELECT 的 stats 查询走缓存后接近零成本 → **瓶颈不在 SELECT，在 FETCH 的 DB 列表查询 + storage 读**。
+
+## 预期：Phase 2（DB 真异步）应把吞吐天花板从 ~4×单线程速率抬到连接池上限（128），
+且 io 线程不再被查询期间卡死。用本表做 before/after 对照。
+
+## ⚠ 顺带发现的生产 bug：FETCH 续作链栈溢出
+
+FETCH 大邮箱（>~200 封）会 **SIGSEGV**：`fetch_complete_mail_with_body` 栈溢出。
+本地 storage 的 `async_object_size/read` 回调**内联**触发 → `fetch_drive` 被逐封重入（真递归），
+500 封即爆栈（lldb 确认 EXC_BAD_ACCESS code=2，栈指针落在 guard 页，无法 unwind）。
+`server_base.cpp:137` 的设计注释说"本地内联 µs 级"，`fetch_drive` 注释称"万封不爆栈"——两者
+在内联回调下矛盾。**修复**：让续作链对 inline 回调迭代化（共享 atomic 标记区分 inline/deferred，
+inline 时外层循环续，deferred 时回调驱动），或本地 storage 也套 AsyncStorageProvider 装饰器。
