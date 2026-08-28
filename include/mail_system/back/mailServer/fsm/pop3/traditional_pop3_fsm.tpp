@@ -9,6 +9,7 @@
 #include "framework/connection/tcp_connection.h"
 #include "framework/connection/ssl_connection.h"
 #include "framework/db/db_pool.h"
+#include "framework/thread_pool/io_thread_pool.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -226,6 +227,119 @@ void TraditionalPop3Fsm<ConnectionType>::release_lock(
 }
 
 template <typename ConnectionType>
+bool TraditionalPop3Fsm<ConnectionType>::renew_lock_heartbeat(
+    const std::shared_ptr<router::IShardRouter>& router,
+    uint64_t user_id, const std::string& session_id, int shard)
+{
+    if (!router) return false;
+    auto pool = router->get_db_pool(static_cast<size_t>(shard));
+    if (!pool) return false;
+    auto conn = pool->acquire_connection();
+    if (!conn.is_valid()) return false;
+
+    // 条件续约（区别于抢锁的 upsert）：只在"仍持有这行锁"时刷新心跳。
+    // 若行已被 sweeper 回收（心跳断太久）并可能转交新会话，这里不会
+    // 反插抢占 —— 用 verify 确认所有权，false = 锁丢了，会话应关闭。
+    se(conn.operator->(),
+       "UPDATE pop3_session_lock SET last_heartbeat = NOW() "
+       "WHERE user_id = ? AND session_id = ?",
+       {std::to_string(user_id), session_id});
+    auto r = sq(conn.operator->(),
+        "SELECT COUNT(*) as cnt FROM pop3_session_lock "
+        "WHERE user_id = ? AND session_id = ?",
+        {std::to_string(user_id), session_id});
+    return r && r->get_row_count() > 0 && safe_stoull(r->get_value(0, "cnt")) > 0;
+}
+
+template <typename ConnectionType>
+bool TraditionalPop3Fsm<ConnectionType>::sweep_expired_locks(
+    const std::shared_ptr<router::IShardRouter>& router)
+{
+    if (!router) return false;
+    bool all_ok = true;
+    for (size_t shard = 0; shard < router->shard_count(); ++shard) {
+        auto pool = router->get_db_pool(shard);
+        if (!pool) continue;
+        auto conn = pool->acquire_connection();
+        if (!conn.is_valid()) { all_ok = false; continue; }
+        // 心跳断 >5min 视为死锁（硬崩溃的会话不再续约），回收。
+        // 与续约周期（60s）之间留足余量，正常 idle 会话不会被误杀。
+        if (!se(conn.operator->(),
+                "DELETE FROM pop3_session_lock WHERE last_heartbeat < NOW() - INTERVAL 5 MINUTE"))
+            all_ok = false;
+    }
+    return all_ok;
+}
+
+template <typename ConnectionType>
+void TraditionalPop3Fsm<ConnectionType>::start_heartbeat(
+    std::shared_ptr<SessionBase<ConnectionType>> session,
+    std::shared_ptr<router::IShardRouter> router,
+    std::shared_ptr<ThreadPoolBase> worker,
+    std::chrono::milliseconds interval)
+{
+    if (!session || !router || !worker) return;
+    auto* ctx = ctx_of(session);
+    if (!ctx || !ctx->is_authenticated || ctx->session_id.empty()) return;
+    if (ctx->heartbeat_timer) return;   // 幂等：已有心跳
+
+    auto* srv = session->get_server();
+    auto io_pool = srv ? std::dynamic_pointer_cast<IOThreadPool>(srv->m_ioThreadPool) : nullptr;
+    if (!io_pool) return;
+    boost::asio::io_context& io_ctx = io_pool->get_io_context();
+
+    auto timer = std::make_shared<boost::asio::steady_timer>(io_ctx);
+    ctx->heartbeat_timer = timer;
+
+    uint64_t user_id = ctx->user_id;
+    std::string sid = ctx->session_id;
+    int shard = ctx->shard_index;
+
+    // 递归续约任务。session/timer/tick 全部只持 weak 引用，避免
+    // session ↔ timer ↔ handler 形成强引用环：session 持 timer/tick（强），
+    // handler 只持 weak_self/weak_timer/weak_tick（弱）→ 无环，session 析构
+    // 即释放定时器与回调。tick 本体由 session 持有（heartbeat_handler），
+    // 每次 re-arm 通过 weak_tick 重新锁定。
+    auto weak_self = std::weak_ptr<SessionBase<ConnectionType>>(session);
+    auto weak_timer = std::weak_ptr<boost::asio::steady_timer>(timer);
+    auto tick = std::make_shared<std::function<void(const boost::system::error_code&)>>();
+    ctx->heartbeat_handler = tick;
+    auto weak_tick = std::weak_ptr<std::function<void(const boost::system::error_code&)>>(tick);
+
+    *tick = [weak_self, weak_timer, weak_tick, router, worker,
+             user_id, sid, shard, interval](const boost::system::error_code& ec) {
+        if (ec) return;   // 取消（operation_aborted）或 io 错误 → 停止续约
+        // 续约放 worker 线程（DB I/O），不阻塞 io 线程
+        worker->post([weak_self, weak_timer, weak_tick, router,
+                      user_id, sid, shard, interval]() {
+            auto self = weak_self.lock();
+            if (!self || self->is_closed()) return;
+            bool ok = TraditionalPop3Fsm<ConnectionType>::renew_lock_heartbeat(
+                router, user_id, sid, shard);
+            self = weak_self.lock();
+            if (!self || self->is_closed()) return;
+            if (!ok) {
+                // 锁已被回收/转交：本会话失去排他性，异常关闭。
+                // 无需 release_lock（WHERE 含 session_id，别人拿的锁删不掉）。
+                LOG_SESSION_WARN("POP3 heartbeat lost lock for user={}, closing session", user_id);
+                self->close();
+                return;
+            }
+            // 续约成功 → 重新排下一次
+            auto t = weak_timer.lock();
+            auto next = weak_tick.lock();
+            if (!t || !next) return;
+            t->expires_after(interval);
+            t->async_wait(*next);
+        });
+    };
+
+    timer->expires_after(interval);
+    timer->async_wait(*tick);
+    LOG_SESSION_INFO("POP3 heartbeat started for user={} ({}ms)", user_id, interval.count());
+}
+
+template <typename ConnectionType>
 bool TraditionalPop3Fsm<ConnectionType>::apply_deletions(
     class IDBConnection* conn, uint64_t user_id, uint64_t mailbox_id,
     const std::set<uint64_t>& deleted_mail_ids)
@@ -430,7 +544,8 @@ void TraditionalPop3Fsm<ConnectionType>::handle_pass(
 
     worker->post([self, router, auth_cache, email, pwd = std::move(pwd),
                   new_session_id = std::move(new_session_id),
-                  srv, finish_fail = std::move(finish_fail)]() mutable {
+                  srv, finish_fail = std::move(finish_fail),
+                  worker, interval = this->heartbeat_interval_]() mutable {
         uint64_t uid = 0;
         int shard = 0;
         bool ok = TraditionalPop3Fsm<ConnectionType>::auth_user(
@@ -510,6 +625,9 @@ void TraditionalPop3Fsm<ConnectionType>::handle_pass(
             c->deleted.clear();
             c->session_id = new_session_id;
         }
+
+        // 锁拿到后启动心跳续约（v2）：防会话硬崩溃后锁泄漏死锁
+        start_heartbeat(self, router, worker, interval);
 
         self->set_paused(false);
         size_t n = c ? c->messages.size() : 0;

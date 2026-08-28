@@ -1,10 +1,17 @@
 #include "mail_system/back/mailServer/pop3_server.h"
 #include "framework/connection/ssl_connection.h"
 #include "framework/connection/tcp_connection.h"
+#include "framework/thread_pool/io_thread_pool.h"
 #include "mail_system/back/common/logger.h"
+#include <chrono>
 #include <memory>
 
 namespace mail_system {
+
+namespace {
+// 锁清扫周期：每 5min 回收心跳过期(>5min)的锁。与续约周期(60s)留足余量。
+constexpr int kLockSweepIntervalSeconds = 300;
+} // namespace
 
 Pop3Server::Pop3Server(const ServerConfig& config,
      std::shared_ptr<ThreadPoolBase> ioThreadPool,
@@ -22,6 +29,49 @@ Pop3Server::Pop3Server(const ServerConfig& config,
 
 Pop3Server::~Pop3Server() {
     stop();
+}
+
+void Pop3Server::start() {
+    TcpServerBase<Pop3Session<TcpConnection>, Pop3Session<SslConnection>>::start();
+    start_lock_sweeper();
+}
+
+void Pop3Server::stop(ServerState state) {
+    // 先取消 sweeper 定时器再停 io/worker 池（TcpServerBase::stop 会停池）
+    if (m_sweep_timer) {
+        m_sweep_timer->cancel();
+        m_sweep_timer.reset();
+    }
+    m_sweep_tick = {};
+    TcpServerBase<Pop3Session<TcpConnection>, Pop3Session<SslConnection>>::stop(state);
+}
+
+void Pop3Server::start_lock_sweeper() {
+    if (m_sweep_timer) return;
+    auto io_pool = std::dynamic_pointer_cast<IOThreadPool>(m_ioThreadPool);
+    if (!io_pool) return;
+    boost::asio::io_context& io_ctx = io_pool->get_io_context();
+    m_sweep_timer = std::make_shared<boost::asio::steady_timer>(io_ctx);
+
+    // 递归重排：m_sweep_tick 是成员（生命周期=server），handler 引用成员而非
+    // 局部变量，避免悬垂。this 裸指针安全：定时器是成员，server 析构即释放。
+    m_sweep_tick = [this](const boost::system::error_code& ec) {
+        if (ec) return;
+        if (!m_sweep_timer) return;
+        // 先重排下一次，再清扫（清扫放 worker，不阻塞 io 线程）
+        m_sweep_timer->expires_after(std::chrono::seconds(kLockSweepIntervalSeconds));
+        m_sweep_timer->async_wait(m_sweep_tick);
+        auto router = m_shardRouter;
+        if (router && m_workerThreadPool) {
+            m_workerThreadPool->post([router]() {
+                TraditionalPop3Fsm<TcpConnection>::sweep_expired_locks(router);
+            });
+        }
+    };
+
+    m_sweep_timer->expires_after(std::chrono::seconds(kLockSweepIntervalSeconds));
+    m_sweep_timer->async_wait(m_sweep_tick);
+    LOG_SERVER_INFO("POP3 lock sweeper started (every {}s)", kLockSweepIntervalSeconds);
 }
 
 std::shared_ptr<Pop3Session<TcpConnection>> Pop3Server::make_tcp_session(

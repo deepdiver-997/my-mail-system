@@ -186,6 +186,15 @@ struct FsmTestFixture {
         }
         return h.conn->written().find(needle) != std::string::npos;
     }
+
+    template <typename H>
+    static bool wait_closed(H& h, int timeout_ms = 3000) {
+        for (int waited = 0; waited < timeout_ms; waited += 5) {
+            if (h.session->is_closed()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return h.session->is_closed();
+    }
 };
 
 #define TEST(name) void test_##name(FsmTestFixture& fx)
@@ -442,6 +451,72 @@ TEST(extra_args_ignored) {
     std::cout << "  [PASS] extra_args_ignored" << std::endl;
 }
 
+// ========== 锁心跳（v2） ==========
+
+TEST(heartbeat_timer_armed) {
+    auto h = fx.login();
+    auto* ctx = static_cast<Pop3Context*>(h.session->get_context());
+    assert(ctx->heartbeat_timer != nullptr);
+    assert(ctx->heartbeat_handler != nullptr);
+    assert(!ctx->session_id.empty());
+    std::cout << "  [PASS] heartbeat_timer_armed" << std::endl;
+}
+
+TEST(heartbeat_renew_keeps_lock) {
+    auto h = fx.login();
+    auto* ctx = static_cast<Pop3Context*>(h.session->get_context());
+    // 续约 verify 得 cnt=1 → 锁还在
+    fx.db_conn->push_sync_result(std::make_shared<test::MockDbResult>(
+        std::vector<std::map<std::string, std::string>>{{{"cnt", "1"}}}));
+    bool ok = TraditionalPop3Fsm<MockConnection>::renew_lock_heartbeat(
+        fx.router, ctx->user_id, ctx->session_id, ctx->shard_index);
+    assert(ok);
+    assert(!h.session->is_closed());
+    std::cout << "  [PASS] heartbeat_renew_keeps_lock" << std::endl;
+}
+
+TEST(heartbeat_renew_lock_lost) {
+    auto h = fx.login();
+    auto* ctx = static_cast<Pop3Context*>(h.session->get_context());
+    // 行已不存在（被 sweeper 回收）→ verify 得 0 → 续约失败
+    fx.db_conn->push_sync_result(std::make_shared<test::MockDbResult>());
+    bool ok = TraditionalPop3Fsm<MockConnection>::renew_lock_heartbeat(
+        fx.router, ctx->user_id, ctx->session_id, ctx->shard_index);
+    assert(!ok);
+    std::cout << "  [PASS] heartbeat_renew_lock_lost" << std::endl;
+}
+
+TEST(heartbeat_lock_lost_closes) {
+    // 剧情：会话拿到锁后，锁被外部回收（如 sweeper 清掉死锁后他人接管）。
+    // 心跳续约 verify 得 0 → 本会话失去排他 → 必须关闭，而不是带着失效的锁继续。
+    fx.fsm->heartbeat_interval_ = std::chrono::milliseconds(50);
+    auto h = fx.login();
+    // 显式推空结果：保证首次续约 verify 得 0（不依赖队列残留状态）
+    fx.db_conn->push_sync_result(std::make_shared<test::MockDbResult>());
+    assert(FsmTestFixture::wait_closed(h));
+    auto* ctx = static_cast<Pop3Context*>(h.session->get_context());
+    assert(!ctx->heartbeat_timer);   // close() 已取消并复位定时器
+    fx.fsm->heartbeat_interval_ = std::chrono::seconds(60);   // 复位，防影响后续测试
+    std::cout << "  [PASS] heartbeat_lock_lost_closes" << std::endl;
+}
+
+TEST(heartbeat_stops_after_close) {
+    auto h = fx.login();
+    fx.cmd(h, "QUIT");
+    assert(FsmTestFixture::wait_for(h, "+OK Bye"));
+    assert(FsmTestFixture::wait_closed(h));
+    auto* ctx = static_cast<Pop3Context*>(h.session->get_context());
+    assert(!ctx->heartbeat_timer);   // QUIT 关闭会话时取消心跳
+    std::cout << "  [PASS] heartbeat_stops_after_close" << std::endl;
+}
+
+TEST(sweep_expired_locks_ok) {
+    // sweeper：对所有 shard 删除过期锁（mock execute 返回 true）
+    bool ok = TraditionalPop3Fsm<MockConnection>::sweep_expired_locks(fx.router);
+    assert(ok);
+    std::cout << "  [PASS] sweep_expired_locks_ok" << std::endl;
+}
+
 // ========== main ==========
 
 int main() {
@@ -487,6 +562,12 @@ int main() {
     run("command_case_insensitive",  test_command_case_insensitive);
     run("unknown_command",           test_unknown_command);
     run("extra_args_ignored",        test_extra_args_ignored);
+    run("heartbeat_timer_armed",     test_heartbeat_timer_armed);
+    run("heartbeat_renew_keeps_lock",test_heartbeat_renew_keeps_lock);
+    run("heartbeat_renew_lock_lost", test_heartbeat_renew_lock_lost);
+    run("heartbeat_lock_lost_closes",test_heartbeat_lock_lost_closes);
+    run("heartbeat_stops_after_close",test_heartbeat_stops_after_close);
+    run("sweep_expired_locks_ok",    test_sweep_expired_locks_ok);
 
     std::cout << "pop3_fsm_test: " << passed << " passed, " << failed << " failed" << std::endl;
     return failed == 0 ? 0 : 1;

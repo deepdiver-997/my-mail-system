@@ -1,8 +1,10 @@
 #ifndef POP3_TYPES_HPP
 #define POP3_TYPES_HPP
 
+#include <boost/asio/steady_timer.hpp>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <set>
 #include <string>
 #include <vector>
@@ -78,6 +80,13 @@ struct Pop3Context {
     bool dropped = false;                // QUIT 已发出，等 close
     std::string session_id;              // 全局唯一（snowflake 字符串）
 
+    // 锁心跳（v2）：会话持有的 shared ticket。
+    // 拿到锁后启动递归续约定时器，close() 时取消 → 破环。
+    // heartbeat_handler 存递归回调本体（weak_tick 重新锁定用），
+    // 两者都由 session 拥有，session 析构 → 定时器/回调一并释放，无泄漏。
+    std::shared_ptr<boost::asio::steady_timer> heartbeat_timer;
+    std::shared_ptr<std::function<void(const boost::system::error_code&)>> heartbeat_handler;
+
     // 命令 args（parse 后由 session 写入，handler 读）
     std::string last_command_args;
 
@@ -91,6 +100,8 @@ struct Pop3Context {
         deleted.clear();
         dropped = false;
         session_id.clear();
+        heartbeat_timer.reset();
+        heartbeat_handler.reset();
         last_command_args.clear();
     }
 };

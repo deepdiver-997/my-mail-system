@@ -38,6 +38,15 @@ void Pop3Session<ConnectionType>::close() {
     // result=ok 表示干净 QUIT（handle_quit 已 set_trace_clean_close），
     // 否则视为异常结束（客户端断连 / 超时 / 错误）。
     if (!this->is_closed()) {
+        // 取消锁心跳定时器：会话结束立即停续约（否则 pending handler 会
+        // 继续在 worker 上 renew，且与 session 形成引用环延迟析构）。
+        if (auto* ctx = static_cast<Pop3Context*>(this->get_context())) {
+            if (ctx->heartbeat_timer) {
+                ctx->heartbeat_timer->cancel();
+                ctx->heartbeat_timer.reset();
+            }
+            ctx->heartbeat_handler.reset();
+        }
         const std::string label = this->m_trace_clean_close ? "ok" : "err";
         if (auto* srv = this->get_server()) {
             srv->push_metric_counter("protorelay_pop3_sessions_total",

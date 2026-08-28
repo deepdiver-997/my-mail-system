@@ -7,6 +7,7 @@
 #include "mail_system/back/router/i_shard_router.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/mailServer/fsm/pop3/pop3_types.hpp"
+#include <chrono>
 #include <memory>
 #include <string>
 
@@ -16,6 +17,8 @@ template <typename ConnectionType>
 class TraditionalPop3Fsm : public FsmBase<ConnectionType, Pop3State, Pop3Event> {
 public:
     std::shared_ptr<AuthCache> m_authCache = std::make_shared<AuthCache>();
+    // 锁心跳续约周期（默认 60s）。测试可改短以在有限时间内观察续约/失锁。
+    std::chrono::milliseconds heartbeat_interval_{std::chrono::seconds(60)};
 
 protected:
     std::shared_ptr<ThreadPoolBase> m_ioThreadPool;
@@ -79,6 +82,14 @@ public:
     static void release_lock(class IDBConnection* conn,
                              uint64_t user_id, const std::string& session_id);
 
+    // 续约锁心跳（v2）：条件 UPDATE last_heartbeat + verify 所有权。
+    // 返回 false = 锁已被回收/转交（行不存在），调用方应关闭会话。
+    static bool renew_lock_heartbeat(const std::shared_ptr<router::IShardRouter>& router,
+                                     uint64_t user_id, const std::string& session_id, int shard);
+
+    // 清扫过期锁（v2 sweeper 周期调用）：删除心跳超过 5min 的锁。
+    static bool sweep_expired_locks(const std::shared_ptr<router::IShardRouter>& router);
+
     // 提交 DELE 标记：把 deleted 里所有 mail_id 对应行 is_deleted=1
     // 然后 expunge（DELETE FROM mail_mailbox）。
     static bool apply_deletions(class IDBConnection* conn,
@@ -111,6 +122,14 @@ private:
         std::shared_ptr<SessionBase<ConnectionType>> session) override;
     void on_handler_not_found(Pop3State s, Pop3Event e,
         std::shared_ptr<SessionBase<ConnectionType>> session) override;
+
+    // ========== 锁心跳（v2） ==========
+    // 在 io_context 上启动递归续约定时器；handler 只捕获 weak 引用打破自环，
+    // 会话 close() 时取消。静态：不依赖 FSM 实例（router/worker/interval 显式传入）。
+    static void start_heartbeat(std::shared_ptr<SessionBase<ConnectionType>> session,
+                                std::shared_ptr<router::IShardRouter> router,
+                                std::shared_ptr<ThreadPoolBase> worker,
+                                std::chrono::milliseconds interval);
 
     // ========== 状态处理器 ==========
     void handle_init_connect(std::shared_ptr<SessionBase<ConnectionType>> session);
