@@ -298,6 +298,7 @@ set(COMMON_SRCS
     src/mail_system/back/router/table_shard_router.cpp
     # 显式模板实例化（避免每个翻译单元重复编译 ~4300 行模板代码）
     src/mail_system/back/mailServer/session/session_base_inst.cpp
+    src/mail_system/back/mailServer/fsm/imaps/imap_utils.cpp
     src/mail_system/back/mailServer/session/smtps_session_inst.cpp
     src/mail_system/back/mailServer/session/imaps_session_inst.cpp
     src/mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm_inst.cpp
@@ -439,6 +440,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
 
     add_executable(mime_parser_test
         test/unit/mime_parser_test.cpp
+        src/mail_system/back/mailServer/fsm/imaps/imap_utils.cpp
     )
     target_include_directories(mime_parser_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(mime_parser_test)

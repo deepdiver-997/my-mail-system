@@ -66,9 +66,9 @@ static void test_single_text_plain() {
     expect_num(root.body_size, 13, "body_size (Hello world + CRLF)");
     expect_num(root.lines, 1, "lines");
     // BODY[1] 提取
-    expect_str(Fsm::extract_part_content(raw, root), "Hello world", "BODY[1] content");
+    expect_str(imap_utils::extract_part_content(raw, root), "Hello world", "BODY[1] content");
     // BODYSTRUCTURE
-    std::string bs = Fsm::build_bodystructure_tree(root);
+    std::string bs = imap_utils::build_bodystructure_tree(root);
     expect_contains(bs, "(\"text\" \"plain\" (\"CHARSET\" \"utf-8\") NIL NIL \"7bit\" 13 1", "BS single-part");
 }
 
@@ -86,7 +86,7 @@ static void test_single_html_qp_unquoted_charset() {
     expect_str(root.charset, "us-ascii", "unquoted charset");
     expect_str(root.encoding, "quoted-printable", "encoding");
     expect_num(root.length, raw.size(), "root.length");
-    expect_str(Fsm::extract_part_content(raw, root),
+    expect_str(imap_utils::extract_part_content(raw, root),
                "<!doctype html><p>Hello=20world</p>", "BODY[1] QP content (raw)");
 }
 
@@ -120,11 +120,11 @@ static void test_multipart_alternative_base64() {
         expect_str(root.subs[1].subtype, "html", "sub1 subtype");
         expect_str(root.subs[1].encoding, "base64", "sub1 encoding");
         // BODY[1] 返回原始 base64（RFC 3501：客户端自行解码）
-        expect_str(Fsm::extract_part_content(raw, root.subs[0]), "SGVsbG8gd29ybGQ=", "BODY[1] base64");
-        expect_str(Fsm::extract_part_content(raw, root.subs[1]), "PGgxPkhlbGxvPC9oMT4=", "BODY[2] base64");
+        expect_str(imap_utils::extract_part_content(raw, root.subs[0]), "SGVsbG8gd29ybGQ=", "BODY[1] base64");
+        expect_str(imap_utils::extract_part_content(raw, root.subs[1]), "PGgxPkhlbGxvPC9oMT4=", "BODY[2] base64");
     }
     // BODYSTRUCTURE 必须：子 part 在前、subtype 在后（RFC 3501 §7.4.2）
-    std::string bs = Fsm::build_bodystructure_tree(root);
+    std::string bs = imap_utils::build_bodystructure_tree(root);
     expect_true(bs.size() >= 2 && bs[0] == '(' && bs[1] == '(', "BS starts with (( (subparts first)");
     expect_contains(bs, "(\"text\" \"plain\" (\"CHARSET\" \"utf-8\") NIL NIL \"base64\"", "BS has text/plain subpart");
     expect_contains(bs, "(\"text\" \"html\" (\"CHARSET\" \"utf-8\") NIL NIL \"base64\"", "BS has text/html subpart");
@@ -158,9 +158,9 @@ static void test_multipart_mixed_attachment() {
     if (root.subs.size() == 2) {
         expect_str(root.subs[1].name, "file.bin", "attachment name");
         expect_str(root.subs[1].encoding, "base64", "attachment encoding");
-        expect_str(Fsm::extract_part_content(raw, root.subs[1]), "AAECAwQ=", "attachment body (base64)");
+        expect_str(imap_utils::extract_part_content(raw, root.subs[1]), "AAECAwQ=", "attachment body (base64)");
     }
-    std::string bs = Fsm::build_bodystructure_tree(root);
+    std::string bs = imap_utils::build_bodystructure_tree(root);
     expect_contains(bs, "\"mixed\"", "BS subtype mixed");
 }
 
@@ -201,7 +201,7 @@ static void test_nested_multipart() {
         expect_str(root.subs[1].name, "doc.pdf", "attachment name");
     }
     // 嵌套 BODYSTRUCTURE：内层 alternative 也必须是子 part 在前
-    std::string bs = Fsm::build_bodystructure_tree(root);
+    std::string bs = imap_utils::build_bodystructure_tree(root);
     expect_contains(bs, "\"alternative\" (\"BOUNDARY\" \"INNER1\")", "nested BS alternative");
 }
 
@@ -225,7 +225,7 @@ static void test_folded_content_type() {
     expect_str(root.boundary, "FOLDED1", "boundary from folded line");
     expect_num(root.subs.size(), 1, "sub count");
     if (root.subs.size() == 1) {
-        expect_str(Fsm::extract_part_content(raw, root.subs[0]), "folded test", "BODY[1] folded");
+        expect_str(imap_utils::extract_part_content(raw, root.subs[0]), "folded test", "BODY[1] folded");
     }
 }
 
@@ -242,7 +242,7 @@ static void test_dkim_h_contains_content_type() {
     expect_str(root.type, "text", "type not confused by DKIM h=");
     expect_str(root.subtype, "plain", "subtype not confused by DKIM h=");
     expect_str(root.charset, "utf-8", "charset");
-    expect_str(Fsm::extract_part_content(raw, root), "dkim test", "BODY[1]");
+    expect_str(imap_utils::extract_part_content(raw, root), "dkim test", "BODY[1]");
 }
 
 // 9. 畸形邮件：HTML 正文在前、真实 header 在 </html> 之后（如部分 OpenAI 通知邮件）。
@@ -300,7 +300,7 @@ static void test_unquoted_boundary_with_quoted_to() {
                "unquoted boundary not confused by To: quote");
     expect_num(root.subs.size(), 1, "sub count");
     if (root.subs.size() == 1) {
-        expect_str(Fsm::extract_part_content(raw, root.subs[0]), "hello feishu", "BODY[1]");
+        expect_str(imap_utils::extract_part_content(raw, root.subs[0]), "hello feishu", "BODY[1]");
     }
 }
 

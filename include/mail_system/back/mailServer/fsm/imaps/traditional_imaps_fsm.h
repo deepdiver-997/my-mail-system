@@ -9,6 +9,7 @@
 #include "mail_system/back/db/sql_queries.h"
 #include "framework/thread_pool/thread_pool_base.h"
 #include "mail_system/back/mailServer/fsm/imaps/imap_types.hpp"
+#include "mail_system/back/mailServer/fsm/imaps/imap_utils.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/lru_cache.h"
 #include "mail_system/back/common/auth_cache.h"
@@ -204,9 +205,6 @@ public:
                                            const std::string& recipient,
                                            int status, std::function<void(bool)> cb);
 
-    // IMAP-UTF-7 解码
-    static std::string decode_imap_utf7(const std::string& imap7);
-
     // 缓存感知的邮箱统计（CPS）。缓存命中且未过期时 cb 同步触发。
     // 本函数在 miss/stale 时自行回源并写回缓存，无需调用方再刷。
     void get_mailbox_stats_cached_async(std::shared_ptr<ScopedConnection> conn,
@@ -284,32 +282,6 @@ private:
     void invoke_handler(Handler& h,
         std::shared_ptr<SessionBase<ConnectionType>> session) override;
 
-    // ========== 工具方法 ==========
-    static std::string imap_timestamp(time_t t);
-    static std::string quote_string(const std::string& s);
-    static std::string encode_mailbox_name(const std::string& name);
-    static std::string decode_mailbox_name(const std::string& imap7);
-    static std::string build_flags_string(int status, bool starred, bool deleted, bool important);
-    static std::string build_envelope_string(
-        const std::string& date_str,
-        const std::string& subject,
-        const std::string& from,
-        const std::string& sender,
-        const std::string& reply_to,
-        const std::string& to,
-        const std::string& cc,
-        const std::string& bcc,
-        const std::string& in_reply_to,
-        const std::string& message_id);
-    static std::string build_fetch_body_response(
-        const std::string& body_content,
-        size_t octets);
-public:
-    // 以下纯静态工具方法对外暴露以便单元测试（不依赖实例状态）
-    static std::string build_bodystructure(const std::string& raw);
-    static std::string build_bodystructure_tree(const MimePart& mp);
-    static std::string extract_part_content(const std::string& raw, const MimePart& part);
-private:
     // ========== 状态处理器 ==========
     void handle_init_connect(std::shared_ptr<SessionBase<ConnectionType>> session);
     void handle_capability(std::shared_ptr<SessionBase<ConnectionType>> session);
