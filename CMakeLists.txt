@@ -485,6 +485,10 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(mapped_file_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(mapped_file_test)
 
+    add_executable(bcrypt_test test/unit/bcrypt_test.cpp src/mail_system/back/common/bcrypt.cpp)
+    target_include_directories(bcrypt_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
+    setup_mail_target(bcrypt_test)
+
     add_executable(thread_pool_test
         src/framework/thread_pool/io_thread_pool.cpp
         src/framework/thread_pool/io_context_registry.cpp
@@ -620,6 +624,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     add_test(NAME server_base_test COMMAND server_base_test)
     add_test(NAME outbound_utils_test COMMAND outbound_utils_test)
     add_test(NAME metrics_core_test COMMAND metrics_core_test)
+    add_test(NAME bcrypt_test COMMAND bcrypt_test)
 
     # 聚合 target：新增单测只需在上面 add_executable/add_test，
     # CI 与本地都构建这一个 target，避免测试清单漂移（此前 CI 的
@@ -647,6 +652,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
         server_base_test
         outbound_utils_test
         metrics_core_test
+        bcrypt_test
     )
     # ASan 对全部单测生效：string_view 越界索引不一定 segfault，
     # 没有地址消毒的模糊测试发现不了这类堆/栈越界
@@ -658,7 +664,7 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
             async_storage_provider_test fsm_base_test fast_fsm_base_test
             intrusion_detector_test server_config_test mapped_file_test
             thread_pool_test session_base_test server_base_test
-            outbound_utils_test metrics_core_test)
+            outbound_utils_test metrics_core_test bcrypt_test)
         foreach(_t IN LISTS _asan_tests)
             # vptr 排除：它给多态向下转型插 typeinfo 引用，跨翻译单元链接不了
             target_compile_options(${_t} PRIVATE -fsanitize=address,undefined -fno-sanitize=vptr -fno-sanitize-recover=undefined -g -O1)

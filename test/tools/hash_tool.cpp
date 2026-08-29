@@ -15,20 +15,34 @@
 static const char kBase64Code[] =
     "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
+// 标准 bcrypt base64（OpenBSD/jBCrypt 风格）：每 3 字节一组 → 4 字符，末组按剩余字节数收尾。
+// ⚠ 旧实现把全部字节累进 32 位 unsigned int：salt 16 字节(128bit) / hash 23 字节(184bit)
+//   直接溢出只剩最后 4 字节 → 生成的 hash 与标准 bcrypt 不兼容（python/openssl 均不认），
+//   且 verify 对任意密码都返回 true。2026-08-29 修复（与 src/.../bcrypt.cpp 保持一致）。
 static void b64_encode(char* dst, const unsigned char* src, int len, int out_chars) {
-    unsigned int val = 0;
-    int bits = 0;
-    for (int i = 0; i < len; ++i) {
-        val = (val << 8) | src[i];
-        bits += 8;
-    }
-    int total_bits = out_chars * 6;
-    if (total_bits > bits) {
-        val <<= (total_bits - bits);
-    }
-    for (int i = out_chars - 1; i >= 0; --i) {
-        dst[i] = kBase64Code[val & 0x3F];
-        val >>= 6;
+    int o = 0;
+    for (int i = 0; i < len && o < out_chars; i += 3) {
+        unsigned int c1 = src[i];
+        dst[o++] = kBase64Code[(c1 >> 2) & 0x3F];
+        if (o >= out_chars) break;
+        c1 = (c1 & 0x03) << 4;
+        if (i + 1 < len) {
+            unsigned int c2 = src[i + 1];
+            c1 |= (c2 >> 4) & 0x0F;
+            dst[o++] = kBase64Code[c1 & 0x3F];
+            if (o >= out_chars) break;
+            c1 = (c2 & 0x0F) << 2;
+            if (i + 2 < len) {
+                unsigned int c3 = src[i + 2];
+                c1 |= (c3 >> 6) & 0x03;
+                dst[o++] = kBase64Code[c1 & 0x3F];
+                dst[o++] = kBase64Code[c3 & 0x3F];
+            } else {
+                dst[o++] = kBase64Code[c1 & 0x3F];
+            }
+        } else {
+            dst[o++] = kBase64Code[c1 & 0x3F];
+        }
     }
 }
 
@@ -208,7 +222,7 @@ static const BFWord kInitS[4][256] = {
 0x1b0a7441u,0x4ba3348cu,0xc5be7120u,0xc37632d8u,0xdf359f8du,0x9b992f2eu,
 0xe60b6f47u,0x0fe3f11du,0xe54cda54u,0x1edad891u,0xce6279cfu,0xcd3e7e6fu,
 0x1618b166u,0xfd2c1d05u,0x848fd2c5u,0xf6fb2299u,0xf523f357u,0xa6327623u,
-0x93a83531u,0x56cccdu,0xacf08162u,0x5a75ebb5u,0x6e163697u,0x88d273ccu,
+0x93a83531u,0x56cccd02u,0xacf08162u,0x5a75ebb5u,0x6e163697u,0x88d273ccu,
 0xde966292u,0x81b949d0u,0x4c50901bu,0x71c65614u,0xe6c6c7bdu,0x327a140au,
 0x45e1d006u,0xc3f27b9au,0xc9aa53fdu,0x62a80f00u,0xbb25bfe2u,0x35bdd2f6u,
 0x71126905u,0xb2040222u,0xb6cbcf7cu,0xcd769c2bu,0x53113ec0u,0x1640e3d3u,
@@ -228,126 +242,114 @@ static inline BFWord bf_f(const BlowfishCtx& ctx, BFWord x) {
             ^ ctx.S[2][(x >> 8) & 0xFF]) + ctx.S[3][x & 0xFF];
 }
 
-static void bf_encrypt(BlowfishCtx& ctx, BFWord& L, BFWord& R) {
-    for (int i = 0; i < 16; ++i) {
-        L ^= ctx.P[i];
-        R ^= bf_f(ctx, L);
-        BFWord t = L; L = R; R = t;
+static void bf_encrypt(BlowfishCtx& ctx, BFWord& xl, BFWord& xr) {
+    // 参考 OpenBSD Blowfish_encipher（直接移植其结构）
+    BFWord Xl = xl, Xr = xr;
+    Xl ^= ctx.P[0];
+    for (int i = 1; i < 17; i += 2) {
+        Xr ^= bf_f(ctx, Xl) ^ ctx.P[i];
+        Xl ^= bf_f(ctx, Xr) ^ ctx.P[i + 1];
     }
-    BFWord t = L; L = R; R = t;
-    R ^= ctx.P[16];
-    L ^= ctx.P[17];
+    Xr ^= ctx.P[17];
+    xl = Xr;
+    xr = Xl;
 }
 
-// ============================================================
+// =========================================================================
 // EksBlowfishSetup
-// ============================================================
+// =========================================================================
 static void eks_blowfish_setup(BlowfishCtx& ctx,
                                const unsigned char salt[16],
                                const unsigned char* key, int key_len,
                                unsigned int cost) {
+    // ⚠ 2026-08-29 对照 OpenBSD blowfish.c 重写。旧实现与参考多处分歧
+    //（缺每轮 expand0state 开头的 key/salt→P XOR、每轮 mix 的 block 未归零、
+    //  轮内 salt/key 顺序颠倒、初始 S-mix 前缺 salt 字、多一步不存在的 S 盒 key XOR），
+    //  导致产物与标准 bcrypt 不兼容。
+    // Init from π
     std::memcpy(ctx.P, kInitP, sizeof(kInitP));
     std::memcpy(ctx.S, kInitS, sizeof(kInitS));
 
+    // 参考 Blowfish_stream2word：循环取 4 字节，大端合成一个 32 位字
+    auto stream2word = [](const unsigned char* data, int databytes, int& j) {
+        BFWord temp = 0;
+        for (int i = 0; i < 4; ++i, ++j) {
+            if (j >= databytes) j = 0;
+            temp = (temp << 8) | data[j];
+        }
+        return temp;
+    };
+
+    // ---- Blowfish_expandstate：key 循环 XOR 进 P，然后 salt 混合 P/S（block 从 0 起） ----
     {
         int j = 0;
-        for (int i = 0; i < 18; ++i) {
-            BFWord d = 0;
-            for (int k = 0; k < 4; ++k) {
-                d = (d << 8) | key[j];
-                j = (j + 1) % key_len;
-            }
-            ctx.P[i] ^= d;
-        }
+        for (int i = 0; i < 18; ++i) ctx.P[i] ^= stream2word(key, key_len, j);
     }
-
-    BFWord block_L = 0, block_R = 0;
     {
+        BFWord bl = 0, br = 0;
         int j = 0;
         for (int i = 0; i < 18; i += 2) {
-            BFWord d = 0;
-            for (int k = 0; k < 4; ++k) {
-                d = (d << 8) | salt[j];
-                j = (j + 1) % 16;
-            }
-            block_L ^= d;
-            d = 0;
-            for (int k = 0; k < 4; ++k) {
-                d = (d << 8) | salt[j];
-                j = (j + 1) % 16;
-            }
-            block_R ^= d;
-            bf_encrypt(ctx, block_L, block_R);
-            ctx.P[i] = block_L;
-            ctx.P[i+1] = block_R;
+            bl ^= stream2word(salt, 16, j);
+            br ^= stream2word(salt, 16, j);
+            bf_encrypt(ctx, bl, br);
+            ctx.P[i] = bl;
+            ctx.P[i + 1] = br;
         }
         for (int box = 0; box < 4; ++box) {
             for (int i = 0; i < 256; i += 2) {
-                bf_encrypt(ctx, block_L, block_R);
-                ctx.S[box][i] = block_L;
-                ctx.S[box][i+1] = block_R;
+                bl ^= stream2word(salt, 16, j);
+                br ^= stream2word(salt, 16, j);
+                bf_encrypt(ctx, bl, br);
+                ctx.S[box][i] = bl;
+                ctx.S[box][i + 1] = br;
             }
         }
     }
 
+    // ---- rounds：每轮先 expand0state(key) 再 expand0state(salt)；每个 call 内 P-XOR + block 归零 ----
     unsigned int rounds = 1u << cost;
-    for (unsigned int r = 1; r <= rounds; ++r) {
+    for (unsigned int r = 0; r < rounds; ++r) {
+        // expand0state(key)
         {
             int j = 0;
+            for (int i = 0; i < 18; ++i) ctx.P[i] ^= stream2word(key, key_len, j);
+            BFWord bl = 0, br = 0;
             for (int i = 0; i < 18; i += 2) {
-                BFWord d = 0;
-                for (int k = 0; k < 4; ++k) {
-                    d = (d << 8) | salt[j];
-                    j = (j + 1) % 16;
-                }
-                block_L ^= d;
-                d = 0;
-                for (int k = 0; k < 4; ++k) {
-                    d = (d << 8) | salt[j];
-                    j = (j + 1) % 16;
-                }
-                block_R ^= d;
-                bf_encrypt(ctx, block_L, block_R);
-                ctx.P[i] = block_L;
-                ctx.P[i+1] = block_R;
+                bf_encrypt(ctx, bl, br);
+                ctx.P[i] = bl;
+                ctx.P[i + 1] = br;
             }
             for (int box = 0; box < 4; ++box) {
                 for (int i = 0; i < 256; i += 2) {
-                    bf_encrypt(ctx, block_L, block_R);
-                    ctx.S[box][i] = block_L;
-                    ctx.S[box][i+1] = block_R;
+                    bf_encrypt(ctx, bl, br);
+                    ctx.S[box][i] = bl;
+                    ctx.S[box][i + 1] = br;
                 }
             }
         }
+        // expand0state(salt)
         {
             int j = 0;
+            for (int i = 0; i < 18; ++i) ctx.P[i] ^= stream2word(salt, 16, j);
+            BFWord bl = 0, br = 0;
             for (int i = 0; i < 18; i += 2) {
-                BFWord d = 0;
-                for (int k = 0; k < 4; ++k) {
-                    d = (d << 8) | key[j];
-                    j = (j + 1) % key_len;
-                }
-                block_L ^= d;
-                d = 0;
-                for (int k = 0; k < 4; ++k) {
-                    d = (d << 8) | key[j];
-                    j = (j + 1) % key_len;
-                }
-                block_R ^= d;
-                bf_encrypt(ctx, block_L, block_R);
-                ctx.P[i] = block_L;
-                ctx.P[i+1] = block_R;
+                bf_encrypt(ctx, bl, br);
+                ctx.P[i] = bl;
+                ctx.P[i + 1] = br;
             }
             for (int box = 0; box < 4; ++box) {
                 for (int i = 0; i < 256; i += 2) {
-                    bf_encrypt(ctx, block_L, block_R);
-                    ctx.S[box][i] = block_L;
-                    ctx.S[box][i+1] = block_R;
+                    bf_encrypt(ctx, bl, br);
+                    ctx.S[box][i] = bl;
+                    ctx.S[box][i + 1] = br;
                 }
             }
         }
     }
 }
+
+// =========================================================================
+
 
 // ============================================================
 // Core hash function
@@ -373,13 +375,17 @@ static std::string bcrypt_hashpw(const std::string& password,
         0x63,0x72,0x79,0x44,0x6f,0x75,0x62,0x74
     };
 
-    BFWord L = ((BFWord)magic[0] << 24)  | ((BFWord)magic[1] << 16)
-             | ((BFWord)magic[2] << 8)   |  (BFWord)magic[3];
-    BFWord R = ((BFWord)magic[4] << 24)  | ((BFWord)magic[5] << 16)
-             | ((BFWord)magic[6] << 8)   |  (BFWord)magic[7];
-
-    for (int i = 0; i < 64; ++i) {
-        bf_encrypt(ctx, L, R);
+    // 标准 bcrypt：24 字节 magic 当作 3 个 64-bit 块，每一轮把 3 块整体加密，共 64 轮。
+    // ⚠ 旧实现只加密 magic 前 8 字节(1 个块) → 与标准 bcrypt 不兼容。2026-08-29 修复。
+    BFWord cdata[6];
+    for (int i = 0; i < 6; ++i) {
+        cdata[i] = ((BFWord)magic[4 * i] << 24) | ((BFWord)magic[4 * i + 1] << 16)
+                 | ((BFWord)magic[4 * i + 2] << 8) | (BFWord)magic[4 * i + 3];
+    }
+    for (int r = 0; r < 64; ++r) {
+        for (int b = 0; b < 6; b += 2) {
+            bf_encrypt(ctx, cdata[b], cdata[b + 1]);
+        }
     }
 
     char cost_str[4];
@@ -389,15 +395,14 @@ static std::string bcrypt_hashpw(const std::string& password,
     b64_encode(b64_salt, salt, 16, 22);
     b64_salt[22] = '\0';
 
-    unsigned char ctext[23] = {};
-    ctext[0] = static_cast<unsigned char>(L >> 24);
-    ctext[1] = static_cast<unsigned char>(L >> 16);
-    ctext[2] = static_cast<unsigned char>(L >> 8);
-    ctext[3] = static_cast<unsigned char>(L);
-    ctext[4] = static_cast<unsigned char>(R >> 24);
-    ctext[5] = static_cast<unsigned char>(R >> 16);
-    ctext[6] = static_cast<unsigned char>(R >> 8);
-    ctext[7] = static_cast<unsigned char>(R);
+    // Ciphertext: 24 字节，标准只取前 23 字节编码（184 bit，丢最后一个字节）
+    unsigned char ctext[24];
+    for (int i = 0; i < 6; ++i) {
+        ctext[4 * i]     = static_cast<unsigned char>(cdata[i] >> 24);
+        ctext[4 * i + 1] = static_cast<unsigned char>(cdata[i] >> 16);
+        ctext[4 * i + 2] = static_cast<unsigned char>(cdata[i] >> 8);
+        ctext[4 * i + 3] = static_cast<unsigned char>(cdata[i]);
+    }
 
     char b64_hash[32];
     b64_encode(b64_hash, ctext, 23, 31);
