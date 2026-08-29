@@ -214,13 +214,13 @@ void PersistentQueue::delete_task(mail* mail_data) {
 
     int shard = shard_from_mail(mail_data);
     auto conn = m_shardRouter->get_db_pool(shard)->acquire_connection();
-    if (!conn.is_valid()) {
+    if (!conn->is_valid()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for deleting mail ID {}", mail_data->id);
         return;
     }
 
     try {
-        auto* conn_ptr = conn.operator->();
+        auto* conn_ptr = conn->operator->();
         // 第一步：删除邮件收发件人关系记录
         std::string recipient_sql = db::sql::build_delete_recipients_by_mail(mail_data->id);
         if (!conn_ptr->execute(recipient_sql)) {
@@ -247,7 +247,7 @@ void PersistentQueue::delete_multi_tasks(std::vector<mail*>& mail_list) {
 
     int shard = shard_from_mail(mail_list.front());
     auto conn = m_shardRouter->get_db_pool(shard)->acquire_connection();
-    if (!conn.is_valid()) {
+    if (!conn->is_valid()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for batch delete");
         return;
     }
@@ -265,7 +265,7 @@ void PersistentQueue::delete_multi_tasks(std::vector<mail*>& mail_list) {
         }
 
         if (!id_list.empty()) {
-            auto* conn_ptr = conn.operator->();
+            auto* conn_ptr = conn->operator->();
             // 第一步：删除邮件收发件人关系记录
             std::string recipient_sql = db::sql::build_delete_mail_recipients_by_id_list(id_list);
             if (!conn_ptr->execute(recipient_sql)) {
@@ -685,13 +685,13 @@ void PersistentQueue::persist_mail_transactional_async(mail* mail_data,
 
     int shard = shard_from_mail(mail_data);
     auto scoped_raw = m_shardRouter->get_db_pool(shard)->acquire_connection();
-    if (!scoped_raw.is_valid()) {
+    if (!scoped_raw->is_valid()) {
         cb(false, "Failed to get database connection");
         return;
     }
 
     // shared_ptr 保持连接存活跨越整个回调链
-    auto scoped = std::make_shared<ScopedConnection>(std::move(scoped_raw));
+    auto scoped = scoped_raw;
     auto* conn = scoped->operator->();
 
     // Step 1: 去重检查
@@ -790,12 +790,12 @@ bool PersistentQueue::persist_to_recipient_shard(mail* mail_data,
     }
 
     auto scoped = m_shardRouter->get_db_pool(recipient_shard)->acquire_connection();
-    if (!scoped.is_valid()) {
+    if (!scoped->is_valid()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get DB connection for recipient shard {}, mail_id={}",
                                    recipient_shard, mail_data->id);
         return false;
     }
-    auto* conn_ptr = scoped.operator->();
+    auto* conn_ptr = scoped->operator->();
 
     if (!conn_ptr->begin_transaction()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to begin transaction on recipient shard {}, mail_id={}",
@@ -901,14 +901,14 @@ void PersistentQueue::cleanup_failed_mail(mail* mail_data) {
 
     int shard = shard_from_mail(mail_data);
     auto scoped = m_shardRouter->get_db_pool(shard)->acquire_connection();
-    if (!scoped.is_valid()) {
+    if (!scoped->is_valid()) {
         LOG_PERSISTENT_QUEUE_ERROR("Failed to get database connection for cleaning up failed mail ID {}", mail_data->id);
         cleanup_mail_files(mail_data);
         return;
     }
 
     try {
-        auto* conn_ptr = scoped.operator->();
+        auto* conn_ptr = scoped->operator->();
 
         // 删除附件元数据
         if (!mail_data->attachments.empty()) {

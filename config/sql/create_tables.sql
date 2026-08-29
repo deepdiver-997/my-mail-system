@@ -116,6 +116,13 @@ CREATE TABLE IF NOT EXISTS mail_mailbox (
     INDEX idx_user_id (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='邮件-邮箱关联表';
 
+-- per-mailbox UIDNEXT 高水位（RFC 3501 §2.3.1.1 原子推进，防并发撞值/expunge 回落）
+-- mailbox_id 主键支撑 INSERT ... ON DUPLICATE KEY UPDATE 的冲突键
+CREATE TABLE IF NOT EXISTS mailbox_uidnext (
+    mailbox_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+    uidnext BIGINT UNSIGNED NOT NULL DEFAULT 1
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='per-mailbox UIDNEXT 高水位';
+
 -- 创建分片映射表（table 模式分片路由使用）
 CREATE TABLE IF NOT EXISTS user_shards (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

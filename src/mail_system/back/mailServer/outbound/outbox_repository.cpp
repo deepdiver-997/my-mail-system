@@ -52,7 +52,7 @@ bool OutboxRepository::enqueue_from_mail(DBPool& db,
                                          const std::string& local_domain,
                                          std::vector<std::uint64_t>* outbox_ids) {
     auto connection = db.acquire_connection();
-    auto* conn = connection.operator->();
+    auto* conn = connection->operator->();
     if (!conn || !conn->is_connected()) {
         LOG_OUTBOUND_ERROR("OutboxRepository: failed to get DB connection");
         return false;
@@ -96,7 +96,7 @@ std::vector<OutboxRecord> OutboxRepository::claim_batch(DBPool& db,
     if (limit == 0) return claimed;
 
     auto connection = db.acquire_connection();
-    auto* conn = connection.operator->();
+    auto* conn = connection->operator->();
     if (!conn || !conn->is_connected()) return claimed;
 
     auto result = conn->query(db::sql::build_outbox_claim_select(static_cast<int>(limit)));
@@ -133,7 +133,7 @@ std::vector<OutboxRecord> OutboxRepository::claim_batch(DBPool& db,
 // ---- load_mail ----
 std::unique_ptr<mail> OutboxRepository::load_mail(DBPool& db, std::uint64_t mail_id) {
     auto connection = db.acquire_connection();
-    auto* conn = connection.operator->();
+    auto* conn = connection->operator->();
     if (!conn || !conn->is_connected()) return nullptr;
 
     auto mail_result = conn->query(db::sql::build_load_mail_metadata(mail_id));
@@ -193,7 +193,7 @@ bool OutboxRepository::release_local_reservations(DBPool& db,
     if (outbox_ids.empty()) return true;
 
     auto connection = db.acquire_connection();
-    auto* conn = connection.operator->();
+    auto* conn = connection->operator->();
     if (!conn || !conn->is_connected()) return false;
 
     std::string sql = db::sql::build_outbox_release_reservations(outbox_ids);
@@ -205,7 +205,7 @@ bool OutboxRepository::mark_sent(DBPool& db,
                                  std::uint64_t outbox_id,
                                  const std::string& smtp_response) {
     auto connection = db.acquire_connection();
-    auto* conn = connection.operator->();
+    auto* conn = connection->operator->();
     if (!conn || !conn->is_connected()) return false;
 
     std::string sql = db::sql::build_outbox_mark_sent(outbox_id, smtp_response, conn);
@@ -218,7 +218,7 @@ bool OutboxRepository::mark_retry(DBPool& db,
                                   const std::string& error_message,
                                   int retry_delay_seconds) {
     auto connection = db.acquire_connection();
-    auto* conn = connection.operator->();
+    auto* conn = connection->operator->();
     if (!conn || !conn->is_connected()) return false;
 
     auto status = OutboxStatus::RETRY;
@@ -241,7 +241,7 @@ bool OutboxRepository::mark_dead(DBPool& db,
                                  std::uint64_t outbox_id,
                                  const std::string& error_message) {
     auto connection = db.acquire_connection();
-    auto* conn = connection.operator->();
+    auto* conn = connection->operator->();
     if (!conn || !conn->is_connected()) return false;
 
     std::string sql = db::sql::build_outbox_mark_dead(outbox_id, error_message, conn);
@@ -251,7 +251,7 @@ bool OutboxRepository::mark_dead(DBPool& db,
 // ---- requeue_expired_leases ----
 bool OutboxRepository::requeue_expired_leases(DBPool& db) {
     auto connection = db.acquire_connection();
-    auto* conn = connection.operator->();
+    auto* conn = connection->operator->();
     if (!conn || !conn->is_connected()) return false;
 
     std::string sql = db::sql::build_outbox_requeue_expired_leases();

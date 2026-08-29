@@ -774,7 +774,7 @@ TEST(uidnext_advance_read) {
     // read 的 async_query 弹出一个 {uidnext: 42}；advance 的 async_execute 不消耗
     db->mock_conn()->push_sync_result(std::make_shared<test::MockDbResult>(
         std::vector<std::map<std::string, std::string>>{{{"uidnext", "42"}}}));
-    auto conn = std::make_shared<ScopedConnection>(db->acquire_connection());
+    auto conn = db->acquire_connection();
     uint64_t v = 0;
     fsm->get_mailbox_uidnext_async(conn, 5001, 1001, [&v](uint64_t x) { v = x; });
     assert(v == 42);
@@ -783,7 +783,7 @@ TEST(uidnext_advance_read) {
 
 TEST(uidnext_no_db_default) {
     // 无 DB（fixture 的空 router）→ 优雅回调 1，不崩溃
-    auto conn = std::make_shared<ScopedConnection>(fx.fsm->acquire_connection(0));
+    auto conn = fx.fsm->acquire_connection(0);
     uint64_t v = 0;
     fx.fsm->get_mailbox_uidnext_async(conn, 5001, 1001, [&v](uint64_t x) { v = x; });
     assert(v == 1);
@@ -813,7 +813,7 @@ TEST(stats_flight_dedup_concurrent) {
     fsm->set_mailbox_stats_cache(
         std::make_shared<TraditionalImapsFsm<MockConnection>::MailboxStatsCache>(16));
 
-    auto conn = std::make_shared<ScopedConnection>(db->acquire_connection());
+    auto conn = db->acquire_connection();
 
     // 两个并发调用（同 key），缓存 miss
     MailboxCacheEntry r1, r2;
@@ -877,7 +877,7 @@ TEST(stats_flight_concurrent_threads) {
     auto fsm = std::make_shared<TraditionalImapsFsm<MockConnection>>(io, wk, router);
     fsm->set_mailbox_stats_cache(
         std::make_shared<TraditionalImapsFsm<MockConnection>::MailboxStatsCache>(16));
-    auto conn = std::make_shared<ScopedConnection>(db->acquire_connection());
+    auto conn = db->acquire_connection();
 
     MailboxCacheEntry ra, rb;
     bool a_done = false, b_done = false;

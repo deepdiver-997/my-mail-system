@@ -109,7 +109,7 @@ void TraditionalPop3Fsm<ConnectionType>::auth_user_async(
         return;
     }
     // conn 用 shared 保活：真异步接入后回调在 DB 线程触发，链中捕获不悬垂
-    auto conn = std::make_shared<ScopedConnection>(db_pool->acquire_connection());
+    auto conn = db_pool->acquire_connection();
     if (!conn->is_valid()) {
         LOG_AUTH_ERROR("Failed to get database connection for shard {}", shard);
         cb(false, 0, shard);
@@ -236,7 +236,7 @@ void TraditionalPop3Fsm<ConnectionType>::renew_lock_heartbeat_async(
     if (!router) { cb(false); return; }
     auto pool = router->get_db_pool(static_cast<size_t>(shard));
     if (!pool) { cb(false); return; }
-    auto conn = std::make_shared<ScopedConnection>(pool->acquire_connection());
+    auto conn = pool->acquire_connection();
     if (!conn->is_valid()) { cb(false); return; }
 
     // 条件续约（区别于抢锁的 upsert）：只在"仍持有这行锁"时刷新心跳。
@@ -267,11 +267,11 @@ bool TraditionalPop3Fsm<ConnectionType>::sweep_expired_locks(
         auto pool = router->get_db_pool(shard);
         if (!pool) continue;
         auto conn = pool->acquire_connection();
-        if (!conn.is_valid()) { all_ok = false; continue; }
+        if (!conn->is_valid()) { all_ok = false; continue; }
         // 心跳断 >5min 视为死锁（硬崩溃的会话不再续约），回收。
         // 与续约周期（60s）之间留足余量，正常 idle 会话不会被误杀。
         // fire-and-forget 无续作：直接用同步 execute()
-        if (!conn.operator->()->execute(
+        if (!conn->operator->()->execute(
                 "DELETE FROM pop3_session_lock WHERE last_heartbeat < NOW() - INTERVAL 5 MINUTE"))
             all_ok = false;
     }
@@ -595,7 +595,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_pass(
                 // 2. 拿 DB 连接（shared 保活，贯穿整条链）
                 auto pool = router ? router->get_db_pool(static_cast<size_t>(shard)) : nullptr;
                 if (!pool) { finish_fail("-ERR Server configuration error", "no_pool"); return; }
-                auto conn = std::make_shared<ScopedConnection>(pool->acquire_connection());
+                auto conn = pool->acquire_connection();
                 if (!conn->is_valid()) { finish_fail("-ERR Server database unavailable", "no_conn"); return; }
 
                 // 3. INBOX id
@@ -929,7 +929,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_quit(
         if (router) {
             auto pool = router->get_db_pool(static_cast<size_t>(shard));
             if (pool) {
-                auto conn = std::make_shared<ScopedConnection>(pool->acquire_connection());
+                auto conn = pool->acquire_connection();
                 if (conn->is_valid()) {
                     // async CPS 链：apply_deletions → release_lock → Bye + close
                     // （conn 由 shared 保活；默认同步触发，将来真异步回调在 DB 线程）
@@ -977,7 +977,7 @@ void TraditionalPop3Fsm<ConnectionType>::handle_timeout(
         auto pool = m_shardRouter->get_db_pool(
             static_cast<size_t>(ctx->shard_index));
         if (pool) {
-            auto conn = std::make_shared<ScopedConnection>(pool->acquire_connection());
+            auto conn = pool->acquire_connection();
             if (conn->is_valid()) {
                 // async CPS：释放锁后关闭（conn 保活；默认同步触发）
                 uint64_t user_id = ctx->user_id;

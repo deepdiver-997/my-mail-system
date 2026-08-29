@@ -1083,7 +1083,7 @@ void TraditionalSmtpsFsm<ConnectionType>::auth_user_async(
             // （MockDbPool 手动 fire）也保持兼容 —— 回调链不挑线程。
             auto db_pool = router->get_db_pool(static_cast<size_t>(shard));
             if (!db_pool) { LOG_AUTH_ERROR("No DB pool for shard {}", shard); cb(false, 0); return; }
-            auto conn = std::make_shared<ScopedConnection>(db_pool->acquire_connection());
+            auto conn = db_pool->acquire_connection();
             if (!conn->is_valid()) { LOG_AUTH_ERROR("Failed to get DB connection"); cb(false, 0); return; }
 
             (*conn)->async_query(db::sql::build_auth_user_query(), {mail_address},
@@ -1140,9 +1140,8 @@ void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
     // 缓存未命中，查 DB
     std::shared_ptr<DBPool> pool = m_shardRouter ? m_shardRouter->get_db_pool(static_cast<size_t>(shard)) : nullptr;
     if (!pool) { LOG_SMTP_WARN("RCPT check no DB pool for shard {}", shard); cb(false); return; }
-    auto conn_raw = pool->acquire_connection();
-    if (!conn_raw.is_valid()) { LOG_SMTP_WARN("RCPT check failed to get DB connection"); cb(false); return; }
-    auto conn = std::make_shared<ScopedConnection>(std::move(conn_raw));
+    auto conn = pool->acquire_connection();
+    if (!conn->is_valid()) { LOG_SMTP_WARN("RCPT check failed to get DB connection"); cb(false); return; }
 
     // 暂停流水线：DB 查询期间不消费新命令，回调中 drain_buffered_commands()
     session->set_paused(true);
@@ -1184,12 +1183,12 @@ std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_mail_metadata_async(
 
     auto task = [this, file_path_prefix, mail_data]() -> bool {
         auto conn = this->acquire_connection(0);
-        if (!conn.is_valid()) {
+        if (!conn->is_valid()) {
             LOG_DATABASE_ERROR("Failed to get database connection in async task");
             return false;
         }
 
-        auto* conn_ptr = conn.operator->();
+        auto* conn_ptr = conn->operator->();
 
         bool success = true;
 
@@ -1245,12 +1244,12 @@ std::future<bool> TraditionalSmtpsFsm<ConnectionType>::save_attachment_metadata_
 
     auto task = [this, att, mail_id]() -> bool {
         auto conn = this->acquire_connection(0);
-        if (!conn.is_valid()) {
+        if (!conn->is_valid()) {
             LOG_DATABASE_ERROR("Failed to get database connection in save_attachment_metadata_async");
             return false;
         }
 
-        auto* conn_ptr = conn.operator->();
+        auto* conn_ptr = conn->operator->();
         if (!conn_ptr) {
             LOG_DATABASE_ERROR("Failed to cast to MySQLConnection");
             return false;
@@ -1274,7 +1273,7 @@ void TraditionalSmtpsFsm<ConnectionType>::remove_metadata_by_file_path(
     const std::vector<std::string>& file_paths)
 {
     auto conn = acquire_connection(0);
-    if (!conn.is_valid()) {
+    if (!conn->is_valid()) {
         LOG_DATABASE_ERROR("Failed to get database connection in remove_metadata_by_file_path");
         return;
     }
@@ -1282,7 +1281,7 @@ void TraditionalSmtpsFsm<ConnectionType>::remove_metadata_by_file_path(
     // 注意：数据库中 body_path 字段存储的是文件路径
     std::string sql = "DELETE FROM mails WHERE body_path = ?";
     for (const auto& file_path : file_paths) {
-        if (!conn.operator->()->execute(sql, {file_path})) {
+        if (!conn->operator->()->execute(sql, {file_path})) {
             LOG_DATABASE_ERROR("Failed to delete mail metadata for file path: {}", file_path);
         }
     }

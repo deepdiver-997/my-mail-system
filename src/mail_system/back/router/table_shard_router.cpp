@@ -50,15 +50,15 @@ int TableShardRouter::route(const std::string& email) {
     }
 
     auto conn = m_route_db_pool->acquire_connection();
-    if (!conn.is_valid()) {
+    if (!conn->is_valid()) {
         LOG_SERVER_ERROR("TableShardRouter: failed to acquire connection for route lookup");
         return -1;
     }
 
     std::string sql = db::sql::build_shard_lookup(m_table_name, m_email_column, m_shard_column,
-                                                    conn->escape_string(key));
+                                                    (*conn)->escape_string(key));
 
-    auto result = conn->query(sql);
+    auto result = (*conn)->query(sql);
     if (result && result->get_row_count() > 0) {
         try {
             shard = std::stoi(result->get_value(0, m_shard_column));

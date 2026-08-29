@@ -36,7 +36,7 @@ int main() {
     // 探活：连不上真实 DB 就 skip（本地 CI 无 DB 也能过）
     {
         auto probe = pool->acquire_connection();
-        if (!probe.is_valid()) {
+        if (!probe->is_valid()) {
             std::cout << "SKIP: database unavailable (" << pool->get_available_connections()
                       << " avail)\n";
             return 0;
@@ -49,9 +49,9 @@ int main() {
 
     for (int i = 0; i < kQueries; ++i) {
         auto sc = pool->acquire_connection();
-        if (!sc.is_valid()) break;
+        if (!sc->is_valid()) break;
         bool done = false;
-        sc->async_query("SELECT 1", [&](std::shared_ptr<IDBResult> r) { done = (r != nullptr); });
+        sc->operator->()->async_query("SELECT 1", [&](std::shared_ptr<IDBResult> r) { done = (r != nullptr); });
         // 主线程 → 阻塞 poll 路径，回调同步触发；失败即代表 async 链断了
         if (done) ++completed;
         // sc 出作用域 → release_connection。旧代码（done 捕获 op 的循环）这里不归还，

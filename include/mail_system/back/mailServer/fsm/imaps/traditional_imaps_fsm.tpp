@@ -484,8 +484,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_select(
         return;
     }
 
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
         return;
@@ -568,8 +567,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_examine(
         return;
     }
 
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
         return;
@@ -639,8 +637,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_list(
 
     // LIST 参数: reference mailbox_name
     // 简单实现：列出用户所有邮箱
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
         return;
@@ -697,8 +694,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_lsub(
     }
 
     // Simplified: return all mailboxes as subscribed
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
         return;
@@ -767,8 +763,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_status(
         }
     }
 
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
         return;
@@ -857,8 +852,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_fetch(
     }
 
     // 读路径 DB 查询走 CPS 链：查完在回调里继续组装 FETCH。
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
         return;
@@ -1329,8 +1323,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_store(
 
     // 批量 flag 更新（STORE）：读路径 CPS 链查邮件 + 收件人，然后
     // 单条 IN 列表 SQL 批量写（拍平原 N 次循环 update_mail_seen/...）。
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
         return;
@@ -1471,8 +1464,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_expunge(
     }
 
     // 读邮件列表 → 算 \Deleted 序号 → 批量物理删除 → 回 EXPUNGE 通知
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
         return;
@@ -1541,8 +1533,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_close(
 
     // If SELECTED, expunge deleted mails first（异步 CPS，完成后回包）
     if (static_cast<ImapState>(session->get_current_state()) == ImapState::SELECTED && ctx) {
-        auto conn = std::make_shared<ScopedConnection>(
-            this->acquire_connection(ctx->shard_index));
+        auto conn = this->acquire_connection(ctx->shard_index);
         if (conn->is_valid()) {
             session->set_paused(true);
             auto self = session->shared_from_this();
@@ -1635,13 +1626,13 @@ void TraditionalImapsFsm<ConnectionType>::handle_create(
     mailbox_name = imap_utils::decode_mailbox_name(mailbox_name);
 
     auto conn = this->acquire_connection(ctx->shard_index);
-    if (!conn.is_valid()) {
+    if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server error");
         return;
     }
 
     session->set_paused(true);
-    conn->async_execute(db::sql::build_imap_create_mailbox(),
+    (*conn)->async_execute(db::sql::build_imap_create_mailbox(),
                         {std::to_string(ctx->user_id), mailbox_name},
                         [session, tag](bool ok) {
                             if (ok) send_tagged(session, tag, "OK", "CREATE completed");
@@ -1671,8 +1662,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_delete(
         }
     }
 
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server error");
         return;
@@ -1762,8 +1752,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_rename(
     // 新名称也要解码（客户端发来的可能是 IMAP-UTF-7 编码）
     new_name = imap_utils::decode_mailbox_name(new_name);
 
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server error");
         return;
@@ -1904,8 +1893,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_append(
 
     // CPS 链：找目标邮箱 → worker 写 storage + DB（阻塞 I/O 不进 io 线程）→
     // create → user_email → link → 回 APPENDUID
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
         return;
@@ -2006,8 +1994,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_search(
     bool search_deleted = (upper_args.find("DELETED") != std::string::npos
                           && upper_args.find("UNDELETED") == std::string::npos);
 
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server database unavailable");
         return;
@@ -2118,8 +2105,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_uid(
 
     // UID FETCH/STORE/COPY: 把 UID 序列号映射为 mails 数组下标+1（CPS 查邮件列表）
     if (subcmd == "FETCH" || subcmd == "STORE" || subcmd == "COPY") {
-        auto conn = std::make_shared<ScopedConnection>(
-            this->acquire_connection(ctx->shard_index));
+        auto conn = this->acquire_connection(ctx->shard_index);
         if (!conn->is_valid()) {
             send_tagged(session, tag, "NO", "Server database unavailable");
             return;
@@ -2259,8 +2245,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_copy_move(
     }
     target_name = imap_utils::decode_mailbox_name(target_name);
 
-    auto conn = std::make_shared<ScopedConnection>(
-        this->acquire_connection(ctx->shard_index));
+    auto conn = this->acquire_connection(ctx->shard_index);
     if (!conn->is_valid()) {
         send_tagged(session, tag, "NO", "Server error");
         return;
@@ -2481,7 +2466,7 @@ void TraditionalImapsFsm<ConnectionType>::auth_user_async(
         return;
     }
     // conn 用 shared 保活：真异步接入后回调在 DB 线程触发，链中捕获不悬垂
-    auto conn = std::make_shared<ScopedConnection>(db_pool->acquire_connection());
+    auto conn = db_pool->acquire_connection();
     if (!conn->is_valid()) {
         LOG_AUTH_ERROR("Failed to get database connection for shard {}", shard);
         cb(false, 0, shard);

@@ -88,7 +88,9 @@ class DBPool {
 public:
     virtual ~DBPool() = default;
 
-    ScopedConnection acquire_connection();
+    // 直接返回 shared_ptr<ScopedConnection>——FSM CPS 链本来就要持 shared 跨异步回调，
+    // 免去每处再 make_shared 包一层。RAII 自动归还不变（最后一个引用析构时归还）。
+    std::shared_ptr<ScopedConnection> acquire_connection();
 
     virtual size_t get_pool_size() const = 0;
     virtual size_t get_available_connections() const = 0;
@@ -124,7 +126,11 @@ public:
     IDBConnection* operator->() const { return connection_.get(); }
 
     // 无池/取池失败的空连接：is_valid() 为 false，调用方按连接失败处理
-    static ScopedConnection invalid() { return ScopedConnection(nullptr); }
+    // ⚠ 用 new + shared_ptr 而非 make_shared：make_shared 的模板实例化上下文拿不到
+    // 私有构造函数（clang/libc++ 的已知限制），new 是普通表达式、成员上下文可访问。
+    static std::shared_ptr<ScopedConnection> invalid() {
+        return std::shared_ptr<ScopedConnection>(new ScopedConnection(nullptr));
+    }
 
 private:
     friend class DBPool;
@@ -135,8 +141,8 @@ private:
     std::shared_ptr<IDBConnection> connection_;
 };
 
-inline ScopedConnection DBPool::acquire_connection() {
-    return ScopedConnection(this);
+inline std::shared_ptr<ScopedConnection> DBPool::acquire_connection() {
+    return std::shared_ptr<ScopedConnection>(new ScopedConnection(this));
 }
 
 // ---- DBService: 数据库服务抽象工厂 ----
