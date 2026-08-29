@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <string>
 #include <ctime>
+#include <stdexcept>   // std::invalid_argument / out_of_range（safe_stoull）
+// ⚠ 必须有：macOS libc++ 会经 <string> 传递包含 <stdexcept>，Linux libstdc++ 不会，
+// 交叉编译时 catch(std::invalid_argument&) 直接报 expected unqualified-id。2026-08-29
 
 namespace mail_system {
 

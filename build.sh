@@ -446,12 +446,25 @@ print_info "Building per-target: ${SERIAL_PER_TARGET_JOBS} jobs/target (target o
 
 # 目标顺序：lib 先（最重并行工作），再 exe（依赖 lib + 链接器峰值），
 # 最后 test（依赖 lib）
-SERIAL_TARGETS_LIB=("mailServer")
+# ⚠ object-only 模式下 CMake 定义的是 *_obj 对象库 target（smtpsServer_obj 等），
+# 没有 "mailServer" 这个 exe target —— 之前这里写死 mailServer 导致
+# `make: No rule to make target` 直接失败。2026-08-29 修复。
+if [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
+    SERIAL_TARGETS_LIB=("smtpsServer_obj" "imapsServer_obj" "mailServer_obj")
+else
+    SERIAL_TARGETS_LIB=("mailServer")
+fi
 SERIAL_TARGETS_EXE=("smtpsServer" "imapsServer" "smtp_client")
 
 for target in "${SERIAL_TARGETS_LIB[@]}" "${SERIAL_TARGETS_EXE[@]}"; do
-    if [ "$BUILD_OBJECT_ONLY" = "ON" ] && [[ "$target" != "mailServer" ]]; then
-        continue   # object-only 模式不链接 exe
+    # ⚠ object-only 模式只跳过 exe target；旧条件 `!= "mailServer"` 会把
+    # *_obj 对象库也全跳过（一个 .o 都不编），2026-08-29 修复。
+    if [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
+        skip=1
+        for _exe in "${SERIAL_TARGETS_EXE[@]}"; do
+            [[ "$target" == "$_exe" ]] && { skip=0; break; }
+        done
+        [[ $skip -eq 1 ]] && continue
     fi
     print_info "  → $target (jobs=$SERIAL_PER_TARGET_JOBS)"
     cmake --build "$BUILD_DIR" --target "$target" -j"$SERIAL_PER_TARGET_JOBS"
