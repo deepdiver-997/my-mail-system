@@ -26,7 +26,9 @@ CONFIG="${CONFIG:-/tmp/pop3_bench_config.json}"
 # 500 轮（STAT+LIST+RETR 1:5，多命令往返较慢）≈ 覆盖 10s 采样。
 POP3_USERS="${POP3_USERS:-test2@scut.email,t1@scut.email,test@scut.email,alice@a.local,bob@b.local}"
 # 用户列表无空格，直接展开（unquoted $LOAD_ARGS 会 word-split）；有空格时用 --load-args 覆盖
-LOAD_ARGS="${LOAD_ARGS:---port 1110 --users ${POP3_USERS} --t 4 --conns 1 --rounds 500 --mails 5}"
+# ⚠ POP3 快：6 连接实测 ~2400 rounds/s，默认负载必须跑得比采样窗口久——
+# 6 并发 × 5000 轮 ≈ 12s，覆盖 10s 采样。轮数太少会只采到空闲帧。
+LOAD_ARGS="${LOAD_ARGS:---port 1110 --users ${POP3_USERS} --t 6 --conns 1 --rounds 5000 --mails 5}"
 SAMPLE_SECS=10
 TOPN=20
 
@@ -89,7 +91,7 @@ fi
 
 wait "$LOAD_PID" 2>/dev/null || true
 LOAD_PID=""
-THROUGHPUT="$(grep -oE "throughput=[0-9]+ rounds/s" "$LOAD_OUT" | tail -1 || true)"
+THROUGHPUT="$(grep -oE "throughput=[0-9.]+ rounds/s" "$LOAD_OUT" | tail -1 || true)"
 
 if [[ "$UNAME" == "Darwin" ]]; then
     TOP_TABLE="$(perl -ne '
