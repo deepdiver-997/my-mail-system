@@ -426,7 +426,12 @@ inline bool ensure_mime_tree(const std::string& body_path,
 }
 
 // 从 sidecar JSON 加载预解析的 MIME 树
+// ⚠ 必须先清空 root：调用方会复用同一个 MimePart（如 IMAP 批量 FETCH 逐封拉
+// BODYSTRUCTURE 时 ctx->struct_tree 跨邮件复用），不清空会导致第二封起残留/累积
+// 上一封的 subs —— 批量 BODYSTRUCTURE 串台（如 A 邮件的结构出现在 B 邮件）。
+// ensure_mime_tree 已有 root=MimePart{}，这里补上，2026-08-30 修复。
 inline bool load_mime_tree(const std::string& body_path, MimePart& root) {
+    root = MimePart{};
     std::string path = body_path + ".mime";
     std::ifstream f(path);
     if (!f.is_open()) return false;
