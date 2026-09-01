@@ -16,6 +16,7 @@
 #include "web_server/http_types.hpp"
 #include "web_server/http_fsm.h"
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <memory>
@@ -37,6 +38,12 @@ class HttpSession : public mail_system::SessionBase<ConnectionType> {
     static constexpr size_t kMaxRequestBody = 8ull * 1024 * 1024;
 
 public:
+    // watchdog 各阶段闲置超时（rearm 是"距上次进度"的 deadline，由本类在每个进度点续）
+    static constexpr std::chrono::milliseconds kRequestLineTimeout{30'000};
+    static constexpr std::chrono::milliseconds kHeaderTimeout{30'000};
+    static constexpr std::chrono::milliseconds kBodyTimeout{60'000};
+    static constexpr std::chrono::milliseconds kKeepAliveTimeout{30'000};
+
     HttpSession(mail_system::ServerBase* server,
                 std::unique_ptr<ConnectionType> connection,
                 std::shared_ptr<HttpFsm<ConnectionType>> fsm);

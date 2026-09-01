@@ -168,6 +168,17 @@ public:
     virtual void*       get_context() = 0;
     virtual std::string get_last_command_args() const = 0;
 
+    // ── 6d. Watchdog 阶段/闲置超时 ──────────────────────────────
+    // rearm(d)：协议逻辑在"有进度/该续"时显式调用，重排单一定时器。
+    // 到点（未被 rearm 取代，ec==operation_aborted 之外的触发）→ 置
+    // close_requested_ 并 cancel 挂起读，强制制造一个 io 完成点；
+    // do_async_read 完成回调见 close_requested_ 即走正常 close。
+    // 对端断电/keep-alive 挂死时读永不返回 → 这里靠 cancel 唤醒回收。
+    // 必须在 io 线程调用（连接同线程串行读/写/timer）。
+    void rearm(std::chrono::milliseconds timeout);
+    void disarm_timeout();
+    bool close_requested() const { return close_requested_.load(std::memory_order_acquire); }
+
     // ── 7. 数据成员（public 临时变量，供 FSM 使用） ──────────────
     size_t last_bytes_transferred_ = 0;
     int    stay_times_ = 0;
@@ -189,6 +200,10 @@ protected:
     // 回调线程在续作入口读（pause 独占约定覆盖不到这个标志本身）。
     std::atomic<bool> closed_{false};
     std::atomic<bool> paused_{false};
+    // watchdog 到期标志：timer（io 线程）触发置位；do_async_read 完成回调（同样
+    // io 线程）看到即 close。单线程写+读，atomic 仅为与可能存在的跨线程续跑路径
+    // （worker 回调）保持一致，实际上严格串行。
+    std::atomic<bool> close_requested_{false};
     bool session_authenticated_ = false;
     int  auth_attempt_count_ = 0;
     SessionError last_error_ = SessionError::None;
@@ -196,6 +211,11 @@ protected:
     ServerBase* m_server = nullptr;
     std::chrono::steady_clock::time_point session_start_{
         std::chrono::steady_clock::now()};
+
+    // watchdog 单定时器（绑连接 executor，io 线程触发）。rearm 惰性创建；
+    // close() 必须 cancel() 释放 async_wait 捕获的 self（断 self 循环）。
+    std::shared_ptr<boost::asio::steady_timer> timeout_timer_;
+    void on_watchdog_fire();   // timer 到期（未取代）→ 置标志 + cancel 挂起读
 
     std::string m_trace_buf;            // 累积的 C:/S: 对话
     bool m_trace_clean_close = false;   // QUIT/LOGOUT 干净关闭 → 丢弃 trace

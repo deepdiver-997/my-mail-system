@@ -27,6 +27,10 @@ void SessionBase<ConnectionType>::close() {
     if (closed_) return;
     closed_ = true;
 
+    // 释放 watchdog：cancel 让 async_wait 的 handler 以 operation_aborted 立即
+    // 返回 → io_context 释放其捕获的 self（断 timeout_timer_ ↔ self 的引用循环）
+    disarm_timeout();
+
     // 连接追踪：正常关闭(QUIT/LOGOUT)丢弃，异常结束落盘
     trace_maybe_save();
 
@@ -124,6 +128,10 @@ void SessionBase<ConnectionType>::do_async_read() {
             const boost::system::error_code& error, std::size_t bytes) mutable {
             if (self->closed_) return;
 
+            // watchdog 回收点：timer 到期已置 close_requested_ 并 cancel 本读 → 这里
+            // 以 operation_aborted 完成 → 见标志即正常 close（对端断电时唯一观察点）。
+            if (self->close_requested_) { self->close(); return; }
+
             if (error) {
                 LOG_SESSION_ERROR("Error reading data: {}", error.message());
                 self->handle_error(error);
@@ -192,6 +200,39 @@ void SessionBase<ConnectionType>::do_async_write(
             if (cb) cb(self, ec);
             else    self->do_async_read();
         });
+}
+
+// ================================================================
+// 3b. Watchdog 阶段/闲置超时
+// ================================================================
+template <typename ConnectionType>
+void SessionBase<ConnectionType>::rearm(std::chrono::milliseconds timeout) {
+    if (closed_ || !connection_) return;
+    if (!timeout_timer_)
+        timeout_timer_ = std::make_shared<boost::asio::steady_timer>(connection_->get_executor());
+    // expires_after 重排：旧的 async_wait 因到期时间改变而自发 operation_aborted，
+    // 只剩最后一次 rearm 真正会触发 → 天然实现"单定时器、后设取代先设"。
+    timeout_timer_->expires_after(timeout);
+    timeout_timer_->async_wait(
+        [self = this->shared_from_this()](const boost::system::error_code& ec) {
+            if (ec) return;                 // operation_aborted：被 rearm / close 取代
+            if (self->closed_) return;
+            self->on_watchdog_fire();
+        });
+}
+
+template <typename ConnectionType>
+void SessionBase<ConnectionType>::disarm_timeout() {
+    if (timeout_timer_) timeout_timer_->cancel();
+}
+
+// io 线程触发（steady_timer handler 绑连接 executor）。
+template <typename ConnectionType>
+void SessionBase<ConnectionType>::on_watchdog_fire() {
+    close_requested_.store(true, std::memory_order_release);
+    // 强制挂起读完成：对端断电时读永不返回，cancel 制造一个 io 完成点；
+    // do_async_read 完成回调看到 close_requested_ 即走正常 close。
+    if (connection_ && connection_->is_open()) connection_->cancel();
 }
 
 // ================================================================

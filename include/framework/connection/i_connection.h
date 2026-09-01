@@ -67,6 +67,11 @@ public:
     // 关闭连接
     virtual void close() = 0;
 
+    // 取消挂起的异步操作（尤其是挂起的 async_read）。不关闭连接；
+    // 被取消的 op 的 handler 以 operation_aborted 立即返回。
+    // Watchdog 超时回收挂死连接靠它强行制造一个 io 完成点。
+    virtual void cancel() {}   // 默认 no-op（有的连接类型无挂起 op 也安全）
+
     // 检查连接是否打开
     virtual bool is_open() const = 0;
 

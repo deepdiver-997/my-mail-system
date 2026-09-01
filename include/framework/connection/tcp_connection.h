@@ -72,6 +72,13 @@ public:
         return socket_ ? socket_->native_handle() : -1;
     }
 
+    // 取消挂起的读/写 → 其 handler 以 operation_aborted 返回（watchdog 用）
+    void cancel() override {
+        if (!socket_) return;
+        boost::system::error_code ec;
+        socket_->cancel(ec);
+    }
+
     // 释放原始 socket
     std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() override {
         return std::move(socket_);

@@ -57,6 +57,13 @@ public:
         stream_->async_handshake(type, handler);
     }
 
+    // 取消挂起的读/写（watchdog 用：只取消，不关闭连接）
+    void cancel() override {
+        if (!stream_) return;
+        boost::system::error_code ec;
+        stream_->lowest_layer().cancel(ec);
+    }
+
     // 关闭连接
     void close() override {
         boost::system::error_code ec;

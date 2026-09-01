@@ -57,6 +57,7 @@ template <typename ConnectionType>
 void HttpSession<ConnectionType>::start(std::shared_ptr<HttpSession> self) {
     self->set_current_state(static_cast<int>(HttpState::WAIT_REQUEST_LINE));
     self->set_next_event(static_cast<int>(HttpEvent::REQUEST_LINE));
+    self->rearm(kRequestLineTimeout);   // 等待请求行
     self->do_async_read();
 }
 
@@ -163,6 +164,7 @@ void HttpSession<ConnectionType>::handle_read(const std::string& data) {
         case HttpState::WAIT_REQUEST_LINE: {
             this->trace_append_inbound(data + "\r\n");
             bool ok = parse_request_line(data, request_);
+            if (ok) this->rearm(kHeaderTimeout);   // 进入 header 收集阶段
             next_event_ = ok ? HttpEvent::REQUEST_LINE : HttpEvent::ERROR;
             break;
         }
@@ -178,6 +180,7 @@ void HttpSession<ConnectionType>::handle_read(const std::string& data) {
             } else if (!parse_header_line(data, request_)) {
                 next_event_ = HttpEvent::ERROR;
             } else {
+                this->rearm(kHeaderTimeout);   // 每收一行 header 续命（防单阶段卡死）
                 next_event_ = HttpEvent::HEADER_LINE;
             }
             break;
@@ -186,7 +189,10 @@ void HttpSession<ConnectionType>::handle_read(const std::string& data) {
             auto r = feed_body(data);
             if (r == 2) next_event_ = HttpEvent::BODY_END;
             else if (r == 1) next_event_ = HttpEvent::ERROR;
-            else next_event_ = HttpEvent::BODY;
+            else {
+                this->rearm(kBodyTimeout);     // body 每来一块续命
+                next_event_ = HttpEvent::BODY;
+            }
             break;
         }
         default:
@@ -297,6 +303,10 @@ std::string HttpSession<ConnectionType>::build_header(int status,
 
 template <typename ConnectionType>
 void HttpSession<ConnectionType>::finish_response(bool keep_alive) {
+    if (this->close_requested()) {          // watchdog 已在响应期标记 → 不再续接
+        this->close();
+        return;
+    }
     if (!this->connection_ || !this->connection_->is_open()) {
         this->set_current_state(static_cast<int>(HttpState::CLOSED));
         this->close();
@@ -314,6 +324,7 @@ void HttpSession<ConnectionType>::finish_response(bool keep_alive) {
     chunk_trailers_ = false; body_pending_ = false; header_size_too_large_ = false;
     this->set_current_state(static_cast<int>(HttpState::WAIT_REQUEST_LINE));
     this->set_next_event(static_cast<int>(HttpEvent::REQUEST_LINE));
+    this->rearm(kKeepAliveTimeout);         // 下一个请求的 idle 死限
     this->drain_buffered_commands();
     if (!this->has_buffered_input() && !this->is_paused() && !this->is_closed())
         this->do_async_read();
@@ -353,6 +364,7 @@ void HttpSession<ConnectionType>::stream_file_body(
         [self, ifs, next, close](std::shared_ptr<mail_system::SessionBase<ConnectionType>> s,
                                  const boost::system::error_code& ec) mutable {
             if (ec) { self->handle_error(ec); return; }
+            self->rearm(kBodyTimeout);       // 每写完一块续命（慢客户端存活，真停则回收）
             self->stream_file_body(ifs, next, close);
         });
 }
@@ -426,7 +438,9 @@ void HttpSession<ConnectionType>::serve_file_sendfile(const std::string& full_pa
             int in_fd = ::open(full_path.c_str(), O_RDONLY);
             if (in_fd < 0) { self->send_simple(404, "Not Found", close); return; }
             bool keep_alive = !close;
-            // sendfile 是阻塞系统调用 → 交给 worker 池；完成后 post 回 io 线程复位 keep-alive。
+            // sendfile 在 worker 线程期间 io 无进度信号 → 给整段发送一个总预算；
+            // 完成后 post 回 io 线程复位 keep-alive。
+            self->rearm(kBodyTimeout);
             pool->post([self, in_fd, sock_fd, length, keep_alive, exec] {
                 http_sendfile_worker(in_fd, sock_fd, length);
                 boost::asio::post(exec, [self, keep_alive] {
