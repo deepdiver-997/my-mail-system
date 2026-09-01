@@ -233,15 +233,14 @@ void SessionBase<ConnectionType>::rearm_impl(std::chrono::milliseconds timeout) 
         });
 }
 
-// disarm 同样 post 到 io 线程。注意：不判 closed_ —— close() 之后仍要 cancel 释放
-// async_wait 捕获的 self（posted lambda 本身持 self，把会话保活到 cancel 完成）。
+// disarm 直接同步 cancel，不用 shared_from_this + post。
+// 原因：disarm 由 close() 调用，而 close() 可能来自 ~SessionBase()（最后 owner
+// 释放——典型是 watchdog 定时器 handler 完成释放 self）。此时对象已无 shared owner，
+// shared_from_this() 会抛 bad_weak_ptr。disarm 只在 io 线程（正常 close / IMAP 退出
+// IDLE）或析构（无并发 dispatch）被调，直接 cancel 安全且不依赖 owner。
 template <typename ConnectionType>
 void SessionBase<ConnectionType>::disarm_timeout() {
-    if (!connection_) return;
-    auto exec = connection_->get_executor();
-    boost::asio::post(exec, [self = this->shared_from_this()] {
-        if (self->timeout_timer_) self->timeout_timer_->cancel();
-    });
+    if (timeout_timer_) timeout_timer_->cancel();
 }
 
 // io 线程触发（steady_timer handler 绑连接 executor）。
