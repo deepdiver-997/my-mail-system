@@ -39,6 +39,10 @@ class HttpSession : public mail_system::SessionBase<ConnectionType> {
 
 public:
     // watchdog 各阶段闲置超时（rearm 是"距上次进度"的 deadline，由本类在每个进度点续）
+    // 小文件阈值：≤此值读进内存、io 线程单次合并写(header+body)，不跳 worker、不 sendfile。
+// 大文件的零拷贝(sendfile)只在 > 此值时启用——小文件用户态一次拷贝 << worker 两跳代价。
+static constexpr size_t kSmallFileThreshold = 64 * 1024;
+
     static constexpr std::chrono::milliseconds kRequestLineTimeout{30'000};
     static constexpr std::chrono::milliseconds kHeaderTimeout{30'000};
     static constexpr std::chrono::milliseconds kBodyTimeout{60'000};

@@ -377,6 +377,27 @@ void HttpSession<ConnectionType>::send_file(const std::string& full_path,
     std::string head = build_header(200, "OK", content_type, length, length > 0, close);
     auto self = self_ptr();
 
+    // 小文件：读进内存，io 线程单次合并写(header+body)。不跳 worker、不 sendfile——
+    // sendfile 的零拷贝收益 >> 用户态拷贝，但小文件一次拷贝 << 每请求两次 worker 跳转
+    // (io→worker→io，两个 futex)。混合策略：小文件用户态、大文件内核直飞。
+    if (length > 0 && length <= static_cast<int64_t>(kSmallFileThreshold) && !head_only) {
+        std::ifstream in(full_path, std::ios::binary);
+        if (!in.good()) { send_simple(404, "Not Found", close); return; }
+        std::string resp;
+        resp.reserve(head.size() + static_cast<size_t>(length));
+        resp += head;
+        resp.append(std::istreambuf_iterator<char>(in),
+                    std::istreambuf_iterator<char>());   // 一次 append 读到 head 之后，零额外拷贝
+        this->rearm(kBodyTimeout);
+        this->do_async_write(resp,
+            [self, close](std::shared_ptr<mail_system::SessionBase<ConnectionType>> s,
+                          const boost::system::error_code& ec) mutable {
+                if (ec) { self->handle_error(ec); return; }
+                self->finish_response(!close);
+            });
+        return;
+    }
+
 #ifdef __linux__
     // 零拷贝兜底：明文 TCP + 拿到原生 fd + 有 worker 池才走 sendfile。
     // `if constexpr` 保证 TLS(SslConnection) 与普通读流绝不经此路径——
