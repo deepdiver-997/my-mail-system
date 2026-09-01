@@ -450,11 +450,11 @@ print_info "Building per-target: ${SERIAL_PER_TARGET_JOBS} jobs/target (target o
 # 没有 "mailServer" 这个 exe target —— 之前这里写死 mailServer 导致
 # `make: No rule to make target` 直接失败。2026-08-29 修复。
 if [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
-    SERIAL_TARGETS_LIB=("smtpsServer_obj" "imapsServer_obj" "mailServer_obj")
+    SERIAL_TARGETS_LIB=("smtpsServer_obj" "imapsServer_obj" "mailServer_obj" "webServer_obj")
 else
     SERIAL_TARGETS_LIB=("mailServer")
 fi
-SERIAL_TARGETS_EXE=("smtpsServer" "imapsServer" "smtp_client")
+SERIAL_TARGETS_EXE=("smtpsServer" "imapsServer" "smtp_client" "webServer")
 
 for target in "${SERIAL_TARGETS_LIB[@]}" "${SERIAL_TARGETS_EXE[@]}"; do
     # ⚠ object-only 模式只跳过 exe target（CMake 只定义了 *_obj 对象库，
@@ -540,6 +540,10 @@ else
     if [ -f "${BUILD_DIR}/smtpsServer" ]; then
         cp "${BUILD_DIR}/smtpsServer" "${EXPORT_DIR}/"
         chmod +x "${EXPORT_DIR}/smtpsServer"
+    fi
+    if [ -f "${BUILD_DIR}/webServer" ]; then
+        cp "${BUILD_DIR}/webServer" "${EXPORT_DIR}/"
+        chmod +x "${EXPORT_DIR}/webServer"
     fi
 fi
 
