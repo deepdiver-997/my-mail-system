@@ -198,11 +198,18 @@ struct ServerConfig : public pr::ServerConfig {
     // 静态路由：domain → { host, port }，跳过 DNS 直接连
     std::unordered_map<std::string, outbound::OutboundConfig::StaticRoute> outbound_static_routes;
 
+    // 外部投递开关：false 时认证客户端（465/587 提交）对外部域收件人 RCPT 直接 550
+    // （内部投递不受影响；未认证 25 端口 MTA 入站本来就禁中继）
+    bool external_delivery_enabled;
+
     bool metrics_enabled;
     uint16_t metrics_port;
     std::string metrics_bind_address;
 
     InboundAuthPolicy inbound_auth_policy;
+    // 每日发信配额：认证账号（465/587 提交）当日可发送上限，0 = 不限。
+    // MAIL FROM 时条件 UPDATE users.sent_today 原子占用，超限 550 拒收。
+    int smtp_daily_send_limit;
     std::string inbound_spf_mode;
     std::string inbound_dkim_mode;
     std::string inbound_dmarc_mode;
@@ -252,10 +259,12 @@ struct ServerConfig : public pr::ServerConfig {
         , outbound_rewrite_header_from(true)
         , outbound_dkim_enabled(false)
         , outbound_dkim_selector("default")
+        , external_delivery_enabled(true)
         , metrics_enabled(false)
         , metrics_port(9090)
         , metrics_bind_address("127.0.0.1")
         , inbound_auth_policy(InboundAuthPolicy::OFF)
+        , smtp_daily_send_limit(0)
         , inbound_spf_mode("off")
         , inbound_dkim_mode("off")
         , inbound_dmarc_mode("off")
@@ -355,6 +364,7 @@ struct ServerConfig : public pr::ServerConfig {
         outbound_dkim_private_key_file = resolve_path(filename,
             j.value("outbound_dkim_private_key_file", outbound_dkim_private_key_file));
         outbound_max_attempts  = j.value("outbound_max_attempts", outbound_max_attempts);
+        external_delivery_enabled = j.value("external_delivery_enabled", external_delivery_enabled);
         outbound_poll_busy_sleep_ms  = j.value("outbound_poll_busy_sleep_ms", outbound_poll_busy_sleep_ms);
         outbound_poll_backoff_base_ms= j.value("outbound_poll_backoff_base_ms", outbound_poll_backoff_base_ms);
         outbound_poll_backoff_max_ms = j.value("outbound_poll_backoff_max_ms", outbound_poll_backoff_max_ms);
@@ -406,6 +416,7 @@ struct ServerConfig : public pr::ServerConfig {
 
         inbound_auth_policy = inbound_auth_policy_from_string(
             j.value("inbound_auth_policy", std::string(inbound_auth_policy_to_string(inbound_auth_policy))));
+        smtp_daily_send_limit = j.value("smtp_daily_send_limit", smtp_daily_send_limit);
         inbound_spf_mode   = j.value("inbound_spf_mode", inbound_spf_mode);
         inbound_dkim_mode  = j.value("inbound_dkim_mode", inbound_dkim_mode);
         inbound_dmarc_mode = j.value("inbound_dmarc_mode", inbound_dmarc_mode);

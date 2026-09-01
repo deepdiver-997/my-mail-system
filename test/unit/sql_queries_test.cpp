@@ -236,6 +236,17 @@ void test_build_recipient_exists_query() {
     check_contains("rcpt_exists_limit", sql, "LIMIT 1");
 }
 
+void test_build_increment_sent_today_query() {
+    std::string sql = mail_system::db::sql::build_increment_sent_today_query();
+    check_contains("sent_quota_update", sql, "UPDATE users");
+    // 跨天归零：sent_date != 今天时按 0 计
+    check_contains("sent_quota_reset_cross_day", sql, "IF(sent_date = CURRENT_DATE, sent_today, 0) + 1");
+    check_contains("sent_quota_date_stamp", sql, "sent_date  = CURRENT_DATE");
+    // 条件卡超限：配额 WHERE 与参数化占位符
+    check_contains("sent_quota_where", sql, "mail_address = ?");
+    check_contains("sent_quota_limit_cond", sql, "IF(sent_date = CURRENT_DATE, sent_today, 0) < ?");
+}
+
 // ---- IMAP ----
 
 void test_build_imap_list_mailboxes() {
@@ -364,6 +375,7 @@ int main() {
     test_build_auth_user_query();
     test_build_update_last_login();
     test_build_recipient_exists_query();
+    test_build_increment_sent_today_query();
 
     test_build_imap_list_mailboxes();
     test_build_imap_get_mailbox_mails();

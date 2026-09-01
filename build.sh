@@ -457,12 +457,15 @@ fi
 SERIAL_TARGETS_EXE=("smtpsServer" "imapsServer" "smtp_client")
 
 for target in "${SERIAL_TARGETS_LIB[@]}" "${SERIAL_TARGETS_EXE[@]}"; do
-    # ⚠ object-only 模式只跳过 exe target；旧条件 `!= "mailServer"` 会把
-    # *_obj 对象库也全跳过（一个 .o 都不编），2026-08-29 修复。
+    # ⚠ object-only 模式只跳过 exe target（CMake 只定义了 *_obj 对象库，
+    # exe target 不存在，`make: No rule to make target` 直接失败）。
+    # 注意 2026-08-29 的"修复"把条件写反了：默认 skip=1 + 命中 exe 才 skip=0，
+    # 结果跳过全部 *_obj 库、反去编 exe → 一个 .o 都不编还直接报错。
+    # 正确语义：默认构建（skip=0），命中 exe 才跳过。2026-09-01 修正。
     if [ "$BUILD_OBJECT_ONLY" = "ON" ]; then
-        skip=1
+        skip=0
         for _exe in "${SERIAL_TARGETS_EXE[@]}"; do
-            [[ "$target" == "$_exe" ]] && { skip=0; break; }
+            [[ "$target" == "$_exe" ]] && { skip=1; break; }
         done
         [[ $skip -eq 1 ]] && continue
     fi

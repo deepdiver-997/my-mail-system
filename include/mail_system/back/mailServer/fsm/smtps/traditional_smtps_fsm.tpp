@@ -491,66 +491,97 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_auth_mail_from(
         ctx->recipient_addresses.clear();
         ctx->spf_checked = false;
 
-        // SPF check — 异步（worker 线程池执行 DNS 查询，不阻塞 io_context）
+        // MAIL FROM 后续处理（SPF 检查 → 250 / 拒绝）抽成 proceed：
+        // 认证账号要先过每日发信配额，通过后再进入 SPF 逻辑
         auto cfg = std::atomic_load(&session->get_server()->m_config);
+        // 认证提交豁免 SPF：SPF 只该管 MTA 间未认证投递（RFC 7208 语义）。
+        // 认证客户端已用密码证明身份，且发件人强制等于自身账号，无从伪装，
+        // 对它们做 SPF 只会把从非授权 IP 登录的合法用户（家里/咖啡馆）误杀。
         bool need_spf = !cfg->perf_mode && cfg->inbound_spf_mode != "off" &&
+                        !ctx->is_authenticated &&
                         !ctx->sender_address.empty() && ctx->sender_address != "<>";
-        if (!need_spf) {
-            session->do_async_write("250 Ok\r\n",
-                [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                    if (ec) return;
-                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                    s->do_async_read();
-                });
-            return;
-        }
-
-        auto* dns = session->get_server()->get_dns_resolver().get();
-        if (!dns) {
-            session->do_async_write("250 Ok\r\n",
-                [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                    if (ec) return;
-                    s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                    s->do_async_read();
-                });
-            return;
-        }
-
         std::string client_ip = session->get_client_ip();
         std::string sender = ctx->sender_address;
         std::string ehlo = ctx->ehlo_domain;
         std::string spf_mode = cfg->inbound_spf_mode;
 
-        // 发起 DNS 前显式置阻塞：状态机函数返回后 io_context 线程不会继续处理本 session
-        // （do_async_read 流水线循环检查 is_paused），DNS 回调独占操作，无需 post 回 io_context
-        session->set_paused(true);
-        inbound::InboundVerifier::check_spf_only_async(*dns, client_ip, sender, ehlo,
-            [session, sender, spf_mode](inbound::SpfResult spf) {
-                session->set_paused(false);
-                auto* c = static_cast<SmtpsContext*>(session->get_context());
-                c->spf_checked = true;
-                c->spf_result = spf.result;
-                c->spf_reason = spf.reason;
-                std::string reject;
-                if (spf.result == "fail" && spf_mode == "hard")
-                    reject = "SPF hard-fail for " + sender;
-                if (!reject.empty()) {
-                    session->do_async_write("550 5.7.1 SPF verification failed: " + reject + "\r\n",
-                        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                            if (ec) return;
-                            s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
-                            s->do_async_read();
-                        });
-                } else {
-                    session->do_async_write("250 Ok\r\n",
-                        [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
-                            if (ec) return;
-                            s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
-                            s->drain_buffered_commands();
-                            if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
-                        });
-                }
-            });
+        auto proceed = [session, need_spf, client_ip, sender, ehlo, spf_mode]() {
+            // SPF check — 异步（worker 线程池执行 DNS 查询，不阻塞 io_context）
+            if (!need_spf) {
+                session->do_async_write("250 Ok\r\n",
+                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                        if (ec) return;
+                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
+                        s->do_async_read();
+                    });
+                return;
+            }
+
+            auto* dns = session->get_server()->get_dns_resolver().get();
+            if (!dns) {
+                session->do_async_write("250 Ok\r\n",
+                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                        if (ec) return;
+                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
+                        s->do_async_read();
+                    });
+                return;
+            }
+
+            // 发起 DNS 前显式置阻塞：状态机函数返回后 io_context 线程不会继续处理本 session
+            // （do_async_read 流水线循环检查 is_paused），DNS 回调独占操作，无需 post 回 io_context
+            session->set_paused(true);
+            inbound::InboundVerifier::check_spf_only_async(*dns, client_ip, sender, ehlo,
+                [session, sender, spf_mode](inbound::SpfResult spf) {
+                    session->set_paused(false);
+                    auto* c = static_cast<SmtpsContext*>(session->get_context());
+                    c->spf_checked = true;
+                    c->spf_result = spf.result;
+                    c->spf_reason = spf.reason;
+                    std::string reject;
+                    if (spf.result == "fail" && spf_mode == "hard")
+                        reject = "SPF hard-fail for " + sender;
+                    if (!reject.empty()) {
+                        session->do_async_write("550 5.7.1 SPF verification failed: " + reject + "\r\n",
+                            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                                if (ec) return;
+                                s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                                s->do_async_read();
+                            });
+                    } else {
+                        session->do_async_write("250 Ok\r\n",
+                            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                                if (ec) return;
+                                s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
+                                s->drain_buffered_commands();
+                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
+                            });
+                    }
+                });
+        };
+
+        // 认证账号（465/587 提交）：MAIL FROM 时原子占用当日一个配额，超限 550 拒收。
+        // 未认证入站（25 端口 MTA 投递）无账号，不计数。
+        if (ctx->is_authenticated) {
+            session->set_paused(true);
+            this->check_send_quota_async(session, ctx->sender_address,
+                [session, proceed](bool allowed) {
+                    session->set_paused(false);
+                    if (!allowed) {
+                        session->do_async_write("550 5.7.0 Daily sending quota exceeded\r\n",
+                            [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                                if (ec) return;
+                                s->set_current_state(static_cast<int>(SmtpsState::WAIT_AUTH));
+                                s->drain_buffered_commands();
+                                if (!s->has_buffered_input() && !s->is_paused() && !s->is_closed()) s->do_async_read();
+                            });
+                        return;
+                    }
+                    proceed();
+                });
+        } else {
+            proceed();
+        }
     } else {
         session->do_async_write("501 Syntax error in parameters or arguments\r\n",
             [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
@@ -598,6 +629,24 @@ void TraditionalSmtpsFsm<ConnectionType>::handle_wait_rcpt_to_rcpt_to(
 
     // 认证客户端（465/587 提交）：允许任意收件人（含外部域名，按提交模式转发）
     if (ctx->is_authenticated) {
+        // 外部投递开关：external_delivery_enabled=false 时拒外部域收件人。
+        // 内部投递（system_domain）不受影响；未认证 25 端口 MTA 入站本来就禁中继。
+        auto cfg = std::atomic_load(&session->get_server()->m_config);
+        if (!cfg->external_delivery_enabled) {
+            std::string domain;
+            auto at = recipient.rfind('@');
+            if (at != std::string::npos) domain = recipient.substr(at + 1);
+            if (algorithm::to_lower(algorithm::trim(domain)) != algorithm::to_lower(cfg->system_domain)) {
+                LOG_SMTP_INFO("RCPT external delivery disabled: {}", recipient);
+                session->do_async_write("550 5.7.1 External delivery disabled\r\n",
+                    [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
+                        if (ec) return;
+                        s->set_current_state(static_cast<int>(SmtpsState::WAIT_RCPT_TO));
+                        s->do_async_read();
+                    });
+                return;
+            }
+        }
         ctx->recipient_addresses.push_back(recipient);
         session->do_async_write("250 Ok\r\n",
             [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
@@ -1159,6 +1208,54 @@ void TraditionalSmtpsFsm<ConnectionType>::user_exists_async(
             int status = std::stoi(result->get_value(0, "status"));
             m_recipientCache->store(mail_address, {"", status, 0, 0});
             cb(status == 1);
+        });
+}
+
+
+// 每日发信配额：认证账号 MAIL FROM 时原子占用今日一个配额。
+// 条件 UPDATE（跨天归零 + 配额 WHERE）后 SELECT ROW_COUNT() 读实际占用行数：
+//   1 行 → 占用成功（allowed=true）；0 行 → 当日配额已超（allowed=false）。
+// 失败语义：DB 故障 / 无连接 / 配额关闭（config<=0）→ fail-open 放行并 WARN。
+// 与 user_exists_async 一致：短查询直接在调用线程内联执行，不做 worker 池转发。
+template <typename ConnectionType>
+void TraditionalSmtpsFsm<ConnectionType>::check_send_quota_async(
+    std::shared_ptr<SessionBase<ConnectionType>> session,
+    const std::string& mail_address,
+    std::function<void(bool allowed)> cb)
+{
+    if (!session) { if (cb) cb(true); return; }
+    if (!cb) return;
+
+    auto cfg = std::atomic_load(&session->get_server()->m_config);
+    if (!cfg || cfg->smtp_daily_send_limit <= 0) { cb(true); return; }  // 0 = 不限
+    int daily_limit = cfg->smtp_daily_send_limit;
+
+    int shard = 0;
+    if (m_shardRouter) { int r = m_shardRouter->route(mail_address); if (r >= 0) shard = r; }
+
+    std::shared_ptr<DBPool> pool = m_shardRouter ? m_shardRouter->get_db_pool(static_cast<size_t>(shard)) : nullptr;
+    if (!pool) { LOG_SMTP_WARN("quota check: no DB pool for shard {} (fail-open)", shard); cb(true); return; }
+    auto conn = pool->acquire_connection();
+    if (!conn->is_valid()) { LOG_SMTP_WARN("quota check: DB connection failed (fail-open)"); cb(true); return; }
+
+    std::string sql = db::sql::build_increment_sent_today_query();
+    (*conn)->async_execute(sql, {mail_address, std::to_string(daily_limit)},
+        [conn, cb = std::move(cb)](bool ok) mutable {
+            if (!ok) {
+                LOG_SMTP_WARN("quota check: conditional update failed (fail-open)");
+                cb(true);
+                return;
+            }
+            // 同一连接读 ROW_COUNT()：1 = 占用成功，0 = 配额已超
+            (*conn)->async_query(db::sql::build_select_row_count(),
+                [cb = std::move(cb)](std::shared_ptr<IDBResult> r) mutable {
+                    size_t affected = 0;
+                    if (r && r->get_row_count() > 0) {
+                        try { affected = static_cast<size_t>(std::stoull(r->get_value(0, "affected"))); }
+                        catch (...) { affected = 0; }
+                    }
+                    cb(affected > 0);
+                });
         });
 }
 

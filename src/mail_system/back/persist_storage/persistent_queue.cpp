@@ -303,6 +303,10 @@ void PersistentQueue::set_pressure_config(PersistentQueuePressureConfig config) 
     pressure_config_ = config;
 }
 
+void PersistentQueue::set_max_attempts(size_t max_attempts) {
+    max_attempts_ = max_attempts;
+}
+
 void PersistentQueue::shutdown() {
     if (shutdown_.exchange(true, std::memory_order_acq_rel)) {
         return;
@@ -628,7 +632,8 @@ void PersistentQueue::enqueue_outbox_tasks_async(mail* mail_data,
         std::string sql = reserve_for_local
             ? db::sql::build_insert_outbox_reserved(mail_data->id, mail_data->from, recipient,
                                                      reserve_owner, reserve_lease_seconds, conn)
-            : db::sql::build_insert_outbox_pending(mail_data->id, mail_data->from, recipient, 8, conn);
+            : db::sql::build_insert_outbox_pending(mail_data->id, mail_data->from, recipient,
+                                                   static_cast<int>(max_attempts_), conn);
 
         // 递归前 lock 出强引用 self：跨 async 间隔保持 process_next 存活
         // （enqueue_outbox_tasks_async 返回后局部 process_next 即释放，仅 self 持有）。
@@ -663,7 +668,7 @@ void PersistentQueue::enqueue_outbox_tasks_async(mail* mail_data,
                         record.recipient = recipient;
                         record.body_path = mail_data->body_path;
                         record.attempt_count = reserve_for_local ? 1 : 0;
-                        record.max_attempts = 8;
+                        record.max_attempts = static_cast<int>(max_attempts_);
                         reserved_records->push_back(std::move(record));
                         (*self)();
                     });

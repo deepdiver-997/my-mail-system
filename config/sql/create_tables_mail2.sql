@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS users (
     telephone VARCHAR(20) COMMENT '电话号码',
     status TINYINT NOT NULL DEFAULT 1 COMMENT '账户状态: 1=正常, 0=禁用',
     last_login_time TIMESTAMP NULL DEFAULT NULL COMMENT '最后登录时间',
+    sent_today INT NOT NULL DEFAULT 0 COMMENT '今日已发信数（每日配额计数，配置 smtp_daily_send_limit=0 则不限）',
+    sent_date DATE NULL COMMENT '计数所属日期，跨天自动归零',
     register_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '注册时间',
     INDEX idx_mail_address (mail_address)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户信息表';

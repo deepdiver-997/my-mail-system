@@ -82,6 +82,8 @@ public:
     void set_local_domain(std::string local_domain);
     void set_batch_pop_size(size_t batch_size);
     void set_pressure_config(PersistentQueuePressureConfig config);
+    // 出站投递最大尝试次数：写进 mail_outbox.max_attempts 行（供 claim/重试/DEAD 判断）
+    void set_max_attempts(size_t max_attempts);
 
     void shutdown();
     bool is_shutdown() const { return shutdown_.load(std::memory_order_acquire); }
@@ -143,6 +145,7 @@ private:
     std::shared_ptr<ThreadPoolBase> worker_pool_;
     std::shared_ptr<mail_system::outbound::OutboundServer> outbound_server_;
     std::string local_domain_{"example.com"};
+    size_t max_attempts_{8};               // outbox 行 max_attempts（默认对齐 kDefaultMaxAttempts）
     PersistentQueuePressureConfig pressure_config_{};
 
     // 无锁队列：多生产者(session)单消费者(worker thread)

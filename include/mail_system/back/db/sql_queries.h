@@ -155,6 +155,9 @@ std::string build_update_last_login();
 // RCPT TO 校验：本地收件人是否存在（未认证 MTA 入站路径）
 std::string build_recipient_exists_query();
 
+// 每日发信配额：条件 UPDATE 原子占用今日一个配额（超限 affected rows = 0）
+std::string build_increment_sent_today_query();
+
 // ============================================================
 // IMAP 命令
 // ============================================================

@@ -106,8 +106,17 @@ def main():
     cfg['inbound_dmarc_mode'] = 'off'
     cfg['log_file'] = os.path.join(tmpdir, 'server.log')
     cfg['metrics_enabled'] = False
-    # db_config 路径需要是绝对路径 (配置在 tmpdir, db_config 在原项目)
+    # 每日发信配额：设小值，验证认证账号 MAIL FROM 超限 550（Test 5）
+    cfg['smtp_daily_send_limit'] = 2
+    # 外部投递开关：关闭，验证认证客户端 RCPT 外部域 550（Test 5b）
+    cfg['external_delivery_enabled'] = False
+    # db_config 路径需要是绝对路径 (配置在 tmpdir, db_config 在原项目)。
+    # smtpsConfig.json 里是裸文件名 "db_config.json"（相对 config/ 目录），
+    # 直接 join(proj_root, ...) 会拼成不存在的 v8/db_config.json →
+    # 服务器连不上库（Null pool）。补 config/ 前缀。
     db_file = cfg.get('db_config_file', 'config/db_config.json')
+    if not os.path.exists(os.path.join(proj_root, db_file)):
+        db_file = os.path.join('config', os.path.basename(db_file))
     cfg['db_config_file'] = os.path.join(proj_root, db_file)
     cert_file = cfg.get('certFile', ''); cfg['certFile'] = os.path.join(proj_root, cert_file) if cert_file and not os.path.isabs(cert_file) else cert_file
     key_file = cfg.get('keyFile', ''); cfg['keyFile'] = os.path.join(proj_root, key_file) if key_file and not os.path.isabs(key_file) else key_file
@@ -212,6 +221,18 @@ def main():
             r.test("mail file exists on disk", lambda: _verify_mail_on_disk(mail_dir))
         else:
             r.skip("smtplib auth+send", "DB config not found")
+
+        # ================================================================
+        # Test 5: 每日发信配额（认证账号 MAIL FROM 原子占用，超限 550）
+        #   独立账号 + 多连接：配额按账号计，与客户端所在会话/IP 无关
+        # ================================================================
+        if db_cfg and not perf_mode:
+            r.test("external delivery disabled: RCPT external 550, internal 250", lambda:
+                _ext_delivery_test(host, 587, cfg, db_cfg))
+            r.test("daily send quota: within-limit 250, over-limit 550", lambda:
+                _quota_test(host, 587, cfg, db_cfg))
+        else:
+            r.skip("daily send quota", "no DB config (or perf_mode)")
 
     finally:
         print("\nStopping server...")
@@ -355,6 +376,102 @@ def _smtplib_send(host, port, db_cfg):
     s.sendmail('test@extern.com', 'user@test.local',
                'From: test@extern.com\r\nTo: user@test.local\r\nSubject: E2E Test\r\n\r\nHello.')
     s.quit()
+
+
+# ---- 每日发信配额 ----
+
+QUOTA_USER = 'quota@scut.email'
+QUOTA_PASS = 'quota_e2e_pass'
+
+
+def _mysql_exec(db_cfg, sql):
+    """对测试 DB 执行 SQL，返回 stdout（-N -B 批处理模式，SELECT 只出值）。"""
+    args = ['mysql', '-h', db_cfg.get('host', 'localhost'),
+            '-P', str(db_cfg.get('port', 3306)),
+            '-u', db_cfg.get('user', 'root'),
+            f"-p{db_cfg.get('password', '')}",
+            db_cfg.get('database', 'mail'),
+            '-N', '-B', '-e', sql]
+    r = subprocess.run(args, capture_output=True, timeout=15, text=True)
+    if r.returncode != 0:
+        raise AssertionError(f"mysql exec failed: {r.stderr[:200]}")
+    return r.stdout.strip()
+
+
+def _smtp_auth_mail_from(host, port, user, pwd, sender):
+    """AUTH PLAIN（单步）后 MAIL FROM，返回响应前 3 字符（'250'/'550'）。"""
+    token = base64.b64encode(('\0' + user + '\0' + pwd).encode()).decode()
+    s = socket.create_connection((host, port), timeout=5)
+    s.recv(1024)                          # banner
+    s.sendall(b'EHLO quota.test\r\n')
+    s.recv(4096)
+    s.sendall(('AUTH PLAIN ' + token + '\r\n').encode())
+    s.recv(1024)                          # 235
+    s.sendall(('MAIL FROM:<' + sender + '>\r\n').encode())
+    resp = s.recv(1024).decode()
+    s.close()
+    return resp[:3]
+
+
+def _seed_quota_user(db_cfg):
+    """播种独立 quota 账号 + 重置计数（INSERT IGNORE 幂等）。"""
+    _mysql_exec(db_cfg,
+        f"INSERT IGNORE INTO users (mail_address, password, name, register_time) "
+        f"VALUES ('{QUOTA_USER}', '{QUOTA_PASS}', 'quota e2e', NOW()); "
+        f"UPDATE users SET sent_today=0, sent_date=NULL WHERE mail_address='{QUOTA_USER}';")
+
+
+def _smtp_auth_mail_rcpt(host, port, user, pwd, sender, recipient):
+    """AUTH PLAIN + MAIL FROM + RCPT TO，返回 (mail_from_code, rcpt_code)。"""
+    token = base64.b64encode(('\0' + user + '\0' + pwd).encode()).decode()
+    s = socket.create_connection((host, port), timeout=5)
+    s.recv(1024)                          # banner
+    s.sendall(b'EHLO quota.test\r\n')
+    s.recv(4096)
+    s.sendall(('AUTH PLAIN ' + token + '\r\n').encode())
+    s.recv(1024)                          # 235
+    s.sendall(('MAIL FROM:<' + sender + '>\r\n').encode())
+    mf = s.recv(1024).decode()[:3]
+    s.sendall(('RCPT TO:<' + recipient + '>\r\n').encode())
+    rc = s.recv(1024).decode()[:3]
+    s.close()
+    return mf, rc
+
+
+def _ext_delivery_test(host, port, cfg, db_cfg):
+    if cfg.get('external_delivery_enabled', True):
+        raise AssertionError("external_delivery_enabled must be false for this test")
+    _seed_quota_user(db_cfg)
+
+    # 外部域收件人 → RCPT 550
+    mf, rc = _smtp_auth_mail_rcpt(host, port, QUOTA_USER, QUOTA_PASS, QUOTA_USER, 'someone@gmail.com')
+    assert mf == '250', f"MAIL FROM expected 250, got {mf}"
+    assert rc == '550', f"RCPT external expected 550, got {rc}"
+
+    # 内部域收件人 → RCPT 250
+    _, rc2 = _smtp_auth_mail_rcpt(host, port, QUOTA_USER, QUOTA_PASS, QUOTA_USER, 'test@scut.email')
+    assert rc2 == '250', f"RCPT internal expected 250, got {rc2}"
+
+
+def _quota_test(host, port, cfg, db_cfg):
+    limit = cfg.get('smtp_daily_send_limit', 0)
+    if limit <= 0:
+        raise AssertionError("smtp_daily_send_limit not set in temp config")
+
+    _seed_quota_user(db_cfg)
+
+    # 配额内 limit 封（每封独立连接）→ MAIL FROM 250
+    for i in range(limit):
+        code = _smtp_auth_mail_from(host, port, QUOTA_USER, QUOTA_PASS, QUOTA_USER)
+        assert code == '250', f"send #{i+1} within quota: expected 250, got {code}"
+
+    # 超限第 limit+1 封 → MAIL FROM 550
+    code = _smtp_auth_mail_from(host, port, QUOTA_USER, QUOTA_PASS, QUOTA_USER)
+    assert code == '550', f"send #{limit+1} over quota: expected 550, got {code}"
+
+    # DB 计数校验
+    sent = _mysql_exec(db_cfg, f"SELECT sent_today FROM users WHERE mail_address='{QUOTA_USER}'")
+    assert sent == str(limit), f"expected sent_today={limit}, got '{sent}'"
 
 
 if __name__ == '__main__':

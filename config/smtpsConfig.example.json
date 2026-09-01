@@ -50,6 +50,8 @@
   "inbound_ack_mode": "after_enqueue",
 
   "inbound_auth_policy": "off",
+  "smtp_daily_send_limit": 100,
+  "external_delivery_enabled": false,
   "inbound_spf_mode": "hard",
   "inbound_dkim_mode": "soft",
   "inbound_dmarc_mode": "soft",

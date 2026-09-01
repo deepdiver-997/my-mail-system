@@ -100,6 +100,13 @@ public:
                            const std::string& mail_address,
                            std::function<void(bool exists)> cb);
 
+    // 每日发信配额：认证账号 MAIL FROM 时原子占用今日一个配额（条件 UPDATE + ROW_COUNT）。
+    // 回调 allowed=true 表示占用成功（或配额关闭/DB 故障 fail-open）；false = 超限。
+    // 调用方负责 session pause 语义（与 SPF 检查一致：前置 set_paused(true)，回调起点恢复）。
+    void check_send_quota_async(std::shared_ptr<SessionBase<ConnectionType>> session,
+                                const std::string& mail_address,
+                                std::function<void(bool allowed)> cb);
+
     // 保存邮件元数据到数据库（异步），返回future用于跟踪操作结果
     std::future<bool> save_mail_metadata_async(mail* data, const std::string& file_path_prefix);
 

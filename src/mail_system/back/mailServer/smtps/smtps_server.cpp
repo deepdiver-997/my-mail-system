@@ -38,6 +38,8 @@ SmtpsServer::SmtpsServer(const ServerConfig& config,
             pressure_config.min_available_memory_mb = cfg->persist_min_available_memory_mb;
             pressure_config.min_db_available_connections = cfg->persist_min_db_available_connections;
             m_persistentQueue->set_pressure_config(pressure_config);
+            // 出站 max_attempts：config → outbox 行（入队时写列，重试/DEAD 判断用）
+            m_persistentQueue->set_max_attempts(cfg->outbound_max_attempts);
             m_persistentQueue->inject_metrics(get_metrics());
             LOG_SERVER_INFO("PersistentQueue created for SMTP server");
         }
