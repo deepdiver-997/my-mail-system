@@ -67,6 +67,11 @@ public:
         return socket_->remote_endpoint(ec).address().to_string();
     }
 
+    // 原生 fd（零拷贝 sendfile 用；仅限明文路径）
+    int native_handle() const override {
+        return socket_ ? socket_->native_handle() : -1;
+    }
+
     // 释放原始 socket
     std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() override {
         return std::move(socket_);

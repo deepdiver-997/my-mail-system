@@ -389,6 +389,15 @@ if(BUILD_OBJECT_ONLY)
     setup_mail_target(imapsServer_obj)
     add_library(mailServer_obj OBJECT test/server/mail_server_combined.cpp)
     setup_mail_target(mailServer_obj)
+    add_library(webServer_obj OBJECT
+        ${COMMON_SRCS}
+        src/web_server/http_parser.cpp
+        src/web_server/http_fsm_inst.cpp
+        src/web_server/http_session_inst.cpp
+        src/web_server/http_server.cpp
+        test/server/web_server_main.cpp
+    )
+    setup_mail_target(webServer_obj)
 else()
     add_executable(smtpsServer
         ${COMMON_SRCS}
@@ -419,6 +428,16 @@ else()
         test/server/pop3_test.cpp
     )
     setup_mail_target(pop3Server)
+
+    add_executable(webServer
+        ${COMMON_SRCS}
+        src/web_server/http_parser.cpp
+        src/web_server/http_fsm_inst.cpp
+        src/web_server/http_session_inst.cpp
+        src/web_server/http_server.cpp
+        test/server/web_server_main.cpp
+    )
+    setup_mail_target(webServer)
 endif()
 
 # ================================================================

@@ -81,6 +81,10 @@ public:
 
     // 获取原始 socket 指针（谨慎使用，仅用于类型转换）
     virtual std::unique_ptr<boost::asio::ip::tcp::socket> release_socket() = 0;
+
+    // 原生 fd（Linux 零拷贝 sendfile/splice 需要）。默认 -1 表示不可用；
+    // TcpConnection 覆写返回真实 fd。注意：该 fd 绕过 SSL 层，绝不可用于 TLS。
+    virtual int native_handle() const { return -1; }
 };
 
 } // namespace mail_system
