@@ -20,6 +20,7 @@ Pop3Session<ConnectionType>::Pop3Session(
 template <typename ConnectionType>
 void Pop3Session<ConnectionType>::start(std::shared_ptr<Pop3Session> self) {
     if (!self) return;
+    self->rearm(self->config_read_timeout());   // 挂接看门狗：闲置/对端断电 over read_timeout 回收
     // POP3 启动即发 +OK banner（INIT → AUTHORIZATION 自动转移）
     auto fsm = std::static_pointer_cast<TraditionalPop3Fsm<ConnectionType>>(self->fsm_);
     fsm->process_event(self, Pop3Event::CONNECT);
@@ -112,6 +113,8 @@ void Pop3Session<ConnectionType>::parse_pop3_command(const std::string& data) {
 
 template <typename ConnectionType>
 void Pop3Session<ConnectionType>::handle_read(const std::string& data) {
+    // watchdog：每次入站命令续命（线程安全，post 到 io）。POP3 无合法长 idle 态。
+    this->rearm(this->config_read_timeout());
     parse_pop3_command(data);
 }
 
