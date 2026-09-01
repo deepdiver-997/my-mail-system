@@ -7,6 +7,7 @@
 #include "framework/connection/ssl_connection.h"
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
+#include <csignal>
 
 namespace mail_system {
 
@@ -116,6 +117,12 @@ TcpServerBase<TcpSession, SslSession>::~TcpServerBase() {
 template <typename TcpSession, typename SslSession>
 void TcpServerBase<TcpSession, SslSession>::start() {
     if (m_state.load() != ServerState::Stopped) {
+        // 手写的 sendfile/splice（H5 webServer 及 IMAP/POP3 零拷贝读路径）不设
+        // MSG_NOSIGNAL；asio 的 async_write 用 MSG_NOSIGNAL 所以平常不会触发。
+        // 对端半途关闭报文时 sendfile 会先发 SIGPIPE（默认动作杀进程）。
+        // 服务器应把 broken pipe 当普通 I/O 错误（sendfile 返回 EPIPE，worker 自会
+        // break）而非致命信号 → 进程级忽略。所有协议服务器都派生本类，一处生效。
+        std::signal(SIGPIPE, SIG_IGN);
         m_state.store(ServerState::Running);
         start_metrics_server();
 

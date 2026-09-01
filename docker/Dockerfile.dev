@@ -1,0 +1,39 @@
+# 本地开发容器：原生编译 + 同容器压测用（不 COPU 代码，运行时 bind-mount /src）
+# 用代理：docker build --build-arg http_proxy=http://host.docker.internal:12002 --build-arg https_proxy=http://host.docker.internal:12002 ...
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 代理透传（apt / 后续任何拉取）。host.docker.internal 从容器内指到宿主。
+ARG http_proxy=""
+ARG https_proxy=""
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+ENV http_proxy=$http_proxy https_proxy=$https_proxy \
+    HTTP_PROXY=$HTTP_PROXY HTTPS_PROXY=$HTTPS_PROXY \
+    no_proxy=localhost,127.0.0.1,::1,host.docker.internal,.local \
+    NO_PROXY=localhost,127.0.0.1,::1,host.docker.internal,.local
+
+# 依赖对齐现有 Dockerfile（mysql 客户端而非 mariadb）+ 缺的 nlohmann/wrk/strace/ninja/vim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    build-essential \
+    cmake \
+    ninja-build \
+    pkg-config \
+    curl \
+    git \
+    vim \
+    libssl-dev \
+    libcurl4-openssl-dev \
+    libboost-all-dev \
+    default-libmysqlclient-dev \
+    libspdlog-dev \
+    libc-ares-dev \
+    nlohmann-json3-dev \
+    wrk \
+    strace \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+CMD ["sleep", "infinity"]
