@@ -2358,6 +2358,10 @@ void TraditionalImapsFsm<ConnectionType>::handle_idle(
 
     ctx->idle_mode = true;
 
+    // IDLE 是合法的长无数据等待态：撤掉看门狗，避免被闲置超时误回收；
+    // DONE 到达时 handle_done 里重新 arm。
+    session->disarm_timeout();
+
     // RFC 2177: send continuation
     session->do_async_write("+ idling\r\n",
         [](std::shared_ptr<SessionBase<ConnectionType>> s,
@@ -2386,6 +2390,7 @@ void TraditionalImapsFsm<ConnectionType>::handle_done(
     if (!ctx) return;
 
     ctx->idle_mode = false;
+    session->rearm(session->config_read_timeout());   // 离开 IDLE，重新 arm
 
     std::string tag = ctx->current_tag;
     send_tagged(session, tag, "OK", "IDLE terminated");

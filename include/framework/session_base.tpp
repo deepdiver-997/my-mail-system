@@ -205,9 +205,21 @@ void SessionBase<ConnectionType>::do_async_write(
 // ================================================================
 // 3b. Watchdog 阶段/闲置超时
 // ================================================================
+// rearm 线程安全：把改 timer 的动作 post 到 io 线程执行。SMTP/IMAP 的
+// handle_read 会从 worker 线程续跑路径（drain_buffered_commands，DB/commit 回调）
+// 被调用，直接碰 timer 会和 io 线程 dispatch 竞态 → 一律经 post 收敛到 io。
 template <typename ConnectionType>
 void SessionBase<ConnectionType>::rearm(std::chrono::milliseconds timeout) {
     if (closed_ || !connection_) return;
+    auto exec = connection_->get_executor();
+    boost::asio::post(exec, [self = this->shared_from_this(), timeout] {
+        if (self->closed_ || !self->connection_) return;
+        self->rearm_impl(timeout);
+    });
+}
+
+template <typename ConnectionType>
+void SessionBase<ConnectionType>::rearm_impl(std::chrono::milliseconds timeout) {
     if (!timeout_timer_)
         timeout_timer_ = std::make_shared<boost::asio::steady_timer>(connection_->get_executor());
     // expires_after 重排：旧的 async_wait 因到期时间改变而自发 operation_aborted，
@@ -221,9 +233,15 @@ void SessionBase<ConnectionType>::rearm(std::chrono::milliseconds timeout) {
         });
 }
 
+// disarm 同样 post 到 io 线程。注意：不判 closed_ —— close() 之后仍要 cancel 释放
+// async_wait 捕获的 self（posted lambda 本身持 self，把会话保活到 cancel 完成）。
 template <typename ConnectionType>
 void SessionBase<ConnectionType>::disarm_timeout() {
-    if (timeout_timer_) timeout_timer_->cancel();
+    if (!connection_) return;
+    auto exec = connection_->get_executor();
+    boost::asio::post(exec, [self = this->shared_from_this()] {
+        if (self->timeout_timer_) self->timeout_timer_->cancel();
+    });
 }
 
 // io 线程触发（steady_timer handler 绑连接 executor）。

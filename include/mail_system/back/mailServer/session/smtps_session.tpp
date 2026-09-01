@@ -31,6 +31,7 @@ void SmtpsSession<ConnectionType>::start(std::shared_ptr<SmtpsSession> self) {
         boost::asio::ssl::stream_base::server,
         [](std::shared_ptr<SessionBase<ConnectionType>> s, const boost::system::error_code& ec) mutable {
             if (ec) { LOG_SESSION_ERROR("Handshake failed: {}", ec.message()); return; }
+            s->rearm(s->config_read_timeout());   // 挂接看门狗：闲置/对端断电 over read_timeout 回收
             auto fsm = static_cast<TraditionalSmtpsFsm<ConnectionType>*>(s->get_fsm());
             fsm->process_event(s, SmtpsEvent::CONNECT);
         }
@@ -47,6 +48,7 @@ void SmtpsSession<ConnectionType>::start_after_starttls(std::shared_ptr<SmtpsSes
             s->set_current_state(static_cast<int>(SmtpsState::WAIT_EHLO));
             s->set_next_event(static_cast<int>(SmtpsEvent::TIMEOUT));
             LOG_SMTP_DETAIL_INFO("STARTTLS handshake complete, waiting for EHLO on TLS session");
+            s->rearm(s->config_read_timeout());
             s->do_async_read();
         }
     );
@@ -54,6 +56,9 @@ void SmtpsSession<ConnectionType>::start_after_starttls(std::shared_ptr<SmtpsSes
 
 template <typename ConnectionType>
 void SmtpsSession<ConnectionType>::handle_read(const std::string& data) {
+    // watchdog：每个入站单元（命令 / DATA 数据块）续命。经 rearm post 到 io 线程，
+    // 从 worker 线程续跑路径（drain）被调用也安全。闲置 over read_timeout 即回收。
+    this->rearm(this->config_read_timeout());
     parse_smtp_command(data);
 }
 

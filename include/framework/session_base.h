@@ -178,6 +178,12 @@ public:
     void rearm(std::chrono::milliseconds timeout);
     void disarm_timeout();
     bool close_requested() const { return close_requested_.load(std::memory_order_acquire); }
+    // 取配置 read_timeout（秒），缺省 60s。协议用它做各 stage 的默认 watchdog 时长。
+    std::chrono::milliseconds config_read_timeout() const {
+        auto cfg = m_server ? std::atomic_load(&m_server->m_config) : nullptr;
+        return std::chrono::milliseconds(cfg && cfg->read_timeout
+                                          ? cfg->read_timeout * 1000u : 60000u);
+    }
 
     // ── 7. 数据成员（public 临时变量，供 FSM 使用） ──────────────
     size_t last_bytes_transferred_ = 0;
@@ -212,9 +218,11 @@ protected:
     std::chrono::steady_clock::time_point session_start_{
         std::chrono::steady_clock::now()};
 
-    // watchdog 单定时器（绑连接 executor，io 线程触发）。rearm 惰性创建；
-    // close() 必须 cancel() 释放 async_wait 捕获的 self（断 self 循环）。
+    // watchdog 单定时器（绑连接 executor）。rearm/disarm 会 post 到 io 线程执行，
+    // 因此从任意线程（含 worker 线程续跑 drain）调用都安全。close() 必须 cancel()
+    // 释放 async_wait 捕获的 self（断 self 循环）。
     std::shared_ptr<boost::asio::steady_timer> timeout_timer_;
+    void rearm_impl(std::chrono::milliseconds timeout);   // 真正改 timer（io 线程）
     void on_watchdog_fire();   // timer 到期（未取代）→ 置标志 + cancel 挂起读
 
     std::string m_trace_buf;            // 累积的 C:/S: 对话

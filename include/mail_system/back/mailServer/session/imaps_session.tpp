@@ -71,6 +71,7 @@ void ImapsSession<ConnectionType>::start(std::shared_ptr<ImapsSession> self) {
                 return;
             }
             auto fsm = static_cast<TraditionalImapsFsm<ConnectionType>*>(s->get_fsm());
+            s->rearm(s->config_read_timeout());   // 挂接看门狗
             fsm->process_event(s, ImapEvent::CONNECT, "");
         }
     );
@@ -88,6 +89,7 @@ void ImapsSession<ConnectionType>::start_after_starttls(std::shared_ptr<ImapsSes
             }
             s->set_current_state(static_cast<int>(ImapState::NOT_AUTHENTICATED));
             LOG_IMAP_INFO("STARTTLS handshake complete, waiting for commands on TLS session");
+            s->rearm(s->config_read_timeout());
             s->do_async_read();
         }
     );
@@ -101,6 +103,9 @@ template <typename ConnectionType>
 void ImapsSession<ConnectionType>::handle_read(const std::string& data) {
     auto self = this->shared_from_this();
     auto* session = this;
+
+    // watchdog：每个入站单元（命令 / literal 数据块）续命（线程安全，post 到 io）。
+    this->rearm(this->config_read_timeout());
 
     // literal 数据累积：data 是 extract_one_line 返回的原始 chunk
     if (session->awaiting_literal_) {
