@@ -438,6 +438,15 @@ else()
         test/server/web_server_main.cpp
     )
     setup_mail_target(webServer)
+
+    add_executable(h2web
+        ${COMMON_SRCS}
+        src/web_server/h2/h2_framer.cpp
+        src/web_server/h2/h2_session_inst.cpp
+        src/web_server/h2/h2_server.cpp
+        test/server/h2web_main.cpp
+    )
+    setup_mail_target(h2web)
 endif()
 
 # ================================================================
