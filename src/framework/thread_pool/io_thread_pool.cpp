@@ -5,8 +5,19 @@
 namespace mail_system {
 
 IOThreadPool::IOThreadPool(size_t thread_count)
-    : m_thread_count(thread_count), m_io_contexts(thread_count, std::make_shared<boost::asio::io_context>()),
-      m_running(false) {
+    : m_thread_count(thread_count), m_running(false) {
+    // 每个 io 线程必须持有【各自独立的】io_context，形成"一连接一 context 一线程"的
+    // 并发模型（连接轮转绑定其一，其读写完成只在那一线程调度）。
+    //
+    // 坑：std::vector<T>(count, value) 对 shared_ptr<T> 是把同一个 make_shared 结果
+    // 复制 count 份——若直接写 m_io_contexts(thread_count, std::make_shared<io_context>())，
+    // 会让所有线程 run 同一个 io_context，等于一个多线程共享队列：
+    //   同一条连接的读回调与写完成回调由任意 io 线程并发调度 → 无保护地抢共享缓冲
+    //   （H2 连续多帧时 read-drain 与 write-complete 交叉，ASan 报 out_pending_ UAF）。
+    // 显式逐索引 make_shared，避免这个"复制同指针"陷阱。
+    m_io_contexts.reserve(thread_count);
+    for (size_t i = 0; i < thread_count; ++i)
+        m_io_contexts.push_back(std::make_shared<boost::asio::io_context>());
 }
 
 IOThreadPool::~IOThreadPool() {
