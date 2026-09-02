@@ -15,10 +15,13 @@ namespace h2 {
 class H2Server : public mail_system::TcpServerBase<TcpH2Session, SslH2Session> {
 public:
     H2Server(const mail_system::ServerConfig& config,
+             std::string doc_root = ".",
              std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool = nullptr,
              std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool = nullptr,
              std::shared_ptr<mail_system::DBPool> dbPool = nullptr);
     ~H2Server() override = default;
+
+    const std::string& doc_root() const { return doc_root_; }
 
 protected:
     std::shared_ptr<TcpH2Session> make_tcp_session(
@@ -29,6 +32,9 @@ protected:
         const mail_system::ListenerConfig& lc) override;
     bool should_reject_connection(std::string& reason,
         const std::string& client_ip = "") const override;
+
+private:
+    std::string doc_root_;
 };
 
 } // namespace h2

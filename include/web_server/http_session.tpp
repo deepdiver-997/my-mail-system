@@ -3,6 +3,7 @@
 // 依赖见实例化文件 include 顺序；本文件在实例化前需 http_parser.h 可见。
 #include "web_server/http_parser.h"
 #include "web_server/http_types.hpp"
+#include "web_server/message_processor.h"   // process_static_request（H1/H2 共用路由）
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -476,37 +477,16 @@ template <typename ConnectionType>
 void HttpSession<ConnectionType>::serve() {
     auto& req = request_;
     bool close = !req.keep_alive() || req.version == "HTTP/1.0";
-
-    // 只认 GET / HEAD（静态服务器语义；POST 等回 405）
-    if (req.method != "GET" && req.method != "HEAD") {
-        send_simple(405, "<h1>405 Method Not Allowed</h1>", close);
-        return;
-    }
-
-    // 路径解析 + 防穿越
-    std::string full;
-    if (!resolve_safe_path(doc_root_, req.path, full)) {
-        send_simple(403, "<h1>403 Forbidden</h1>", close);
-        return;
-    }
-
-    std::error_code ec;
-    if (std::filesystem::is_directory(full, ec)) {
-        full = (std::filesystem::path(full) / "index.html").string();   // 目录 → index
-    }
-    ec.clear();
-
-    // 打开文件定长
-    std::ifstream probe(full, std::ios::binary);
-    if (!probe.good()) { send_simple(404, "<h1>404 Not Found</h1>", close); return; }
-    probe.seekg(0, std::ios::end);
-    auto length = static_cast<int64_t>(probe.tellg());
-    probe.close();
-
-    std::filesystem::path fp(full);
-    std::string ctype = mime_for_extension(fp.extension().string());
     bool head_only = (req.method == "HEAD");
-    send_file(full, ctype, length, close, head_only);
+
+    // 路由/防穿越/定长/ctype 与 H2 共用同一份 MessageProcessor —— 避免两份重复。
+    // 只有"体怎么送"按传输层区分：这里走 send_file（小文件合并写 / 大文件 sendfile）。
+    web_server::HttpResponse r = process_static_request(req, doc_root_);
+    if (r.status != 200) {
+        send_simple(r.status, r.body, close);
+        return;
+    }
+    send_file(r.full_path, r.content_type, r.content_length, close, head_only);
 }
 
 template <typename ConnectionType>

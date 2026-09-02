@@ -77,11 +77,15 @@ std::string build_data(uint32_t stream_id, const std::string& body, bool end_str
     return serialize_frame(FrameType::DATA, f, stream_id, body);
 }
 
+std::string build_headers(uint32_t stream_id, const std::string& block, bool end_stream) {
+    uint8_t f = flag::END_HEADERS | (end_stream ? flag::END_STREAM : 0);
+    return serialize_frame(FrameType::HEADERS, f, stream_id, block);
+}
+
 std::string build_headers_200(uint32_t stream_id, bool end_stream) {
     // HPACK 静态表索引 8 = `:status: 200` → 编码为字面值 0x88
     std::string block(1, char(0x88));
-    uint8_t f = flag::END_HEADERS | (end_stream ? flag::END_STREAM : 0);
-    return serialize_frame(FrameType::HEADERS, f, stream_id, block);
+    return build_headers(stream_id, block, end_stream);
 }
 
 std::string build_goaway(uint32_t last_stream, ErrorCode code) {

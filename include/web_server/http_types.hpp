@@ -114,6 +114,7 @@ struct HttpResponse {
     std::string content_type = "text/html; charset=utf-8";
     std::string body;                  // 内联响应体（错误页/首页/HEAD的占位）
     int64_t     content_length = -1;   // -1 = 由 body.size() 推导
+    std::string full_path;             // 200 静态文件：本地绝对路径（供 sendfile/流式发送），体不入内存
     std::string extra_headers;         // 附加头部（逐条含 CRLF），如 Cache-Control
     bool        close_after = false;   // 响应后断开（HTTP/1.0 无 keep-alive 等）
 

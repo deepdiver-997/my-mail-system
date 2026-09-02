@@ -19,6 +19,10 @@
 #include "mail_system/back/common/logger.h"
 #include "web_server/h2/h2_types.hpp"
 #include "web_server/h2/h2_framer.h"
+#include "web_server/h2/h2_hpack.h"
+#include "web_server/http_parser.h"     // resolve_safe_path / mime_for_extension
+#include "web_server/http_types.hpp"    // mime_for_extension
+#include "web_server/message_processor.h"  // process_static_request（纯 request→response）
 #include <atomic>
 #include <cstdint>
 #include <map>
@@ -59,6 +63,9 @@ public:
     std::string get_last_command_args() const override { return {}; }
 
 public:
+    // 静态根目录（工厂注入）
+    void set_doc_root(std::string d) { doc_root_ = std::move(d); }
+
     // 出站帧队列：串行发送，避免 SessionBase 请求-响应写缓冲把 H2 帧滞留。
     void send_frame(const std::string& wire_frame);
 
@@ -74,6 +81,10 @@ private:
     void handle_connection_frame(const Frame& f);
     void handle_stream_frame(const Frame& f);
     void serve_stream(H2Stream& st);
+    void send_response(H2Stream& st, std::vector<Header> resp, std::string body, bool head_only);
+    void drain_stream(H2Stream& st);       // 按流/连接窗口发 DATA 余量
+    void prune_streams();                  // 移除标记 done 的流（安全点 GC，不在遍历中删）
+    uint32_t available_window(const H2Stream& st) const;
     void apply_peer_settings(const std::string& payload);
     void close_protocol(ErrorCode code);
 
@@ -83,6 +94,11 @@ private:
     Frame cur_frame_;
     std::map<int32_t, H2Stream> streams_;
     int32_t last_client_stream_ = 0;   // 校验流 ID 单调递增（客户端开奇流）
+
+    // HTTP/2 语义：连接级 HPACK 解码器（动态表跨流共享）+ 连接级发送窗口 + 静态根
+    HeaderDecoder decoder_;
+    std::string   doc_root_;
+    int32_t       conn_send_window_ = static_cast<int32_t>(kDefaultWindow);
 
     // 出站队列
     std::string out_pending_;

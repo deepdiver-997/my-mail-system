@@ -23,6 +23,7 @@ static std::unique_ptr<web_server::h2::H2Server> g_server;
 
 int main(int argc, char* argv[]) {
     int port = argc > 1 ? std::atoi(argv[1]) : 8081;
+    std::string doc_root = argc > 2 ? argv[2] : "./config/web";
 
     sigemptyset(&g_sigset);
     sigaddset(&g_sigset, SIGINT);
@@ -42,10 +43,10 @@ int main(int argc, char* argv[]) {
         config.storage.local.mail_path = "config/h2storage/mail";
         config.storage.local.attachment_path = "config/h2storage/attachments";
 
-        g_server = std::make_unique<web_server::h2::H2Server>(config);
+        g_server = std::make_unique<web_server::h2::H2Server>(config, doc_root);
         g_server->start();
 
-        std::cout << "HTTP/2 multi-stream skeleton on :" << port
+        std::cout << "HTTP/2 static file server on :" << port << "  doc_root=" << doc_root
                   << "\n  test: nghttp http://127.0.0.1:" << port << "/\n"
                   << "  or:   curl --http2-prior-knowledge http://127.0.0.1:" << port << "/ -i\n";
 

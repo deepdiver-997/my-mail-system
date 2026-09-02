@@ -27,6 +27,8 @@ std::string build_settings_ack();
 std::string build_ping_ack(const std::string& opaque8);
 // stream_id 上发 END_STREAM 的空 DATA
 std::string build_data(uint32_t stream_id, const std::string& body, bool end_stream);
+// 一个 HEADERS 帧（payload = HPACK 编码的 header block）
+std::string build_headers(uint32_t stream_id, const std::string& block, bool end_stream = false);
 // 一个最小响应头块：静态表索引 8 = `:status: 200`（单字节 0x88）
 std::string build_headers_200(uint32_t stream_id, bool end_stream = false);
 std::string build_goaway(uint32_t last_stream, ErrorCode code);

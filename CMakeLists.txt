@@ -391,6 +391,7 @@ if(BUILD_OBJECT_ONLY)
     setup_mail_target(mailServer_obj)
     add_library(webServer_obj OBJECT
         ${COMMON_SRCS}
+        src/web_server/message_processor.cpp
         src/web_server/http_parser.cpp
         src/web_server/http_fsm_inst.cpp
         src/web_server/http_session_inst.cpp
@@ -431,6 +432,7 @@ else()
 
     add_executable(webServer
         ${COMMON_SRCS}
+        src/web_server/message_processor.cpp
         src/web_server/http_parser.cpp
         src/web_server/http_fsm_inst.cpp
         src/web_server/http_session_inst.cpp
@@ -441,7 +443,10 @@ else()
 
     add_executable(h2web
         ${COMMON_SRCS}
+        src/web_server/message_processor.cpp
+        src/web_server/http_parser.cpp        # resolve_safe_path / mime（静态路由复用）
         src/web_server/h2/h2_framer.cpp
+        src/web_server/h2/h2_hpack.cpp
         src/web_server/h2/h2_session_inst.cpp
         src/web_server/h2/h2_server.cpp
         test/server/h2web_main.cpp

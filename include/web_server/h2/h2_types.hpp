@@ -9,6 +9,7 @@
 // 本文件只放类型与常量；帧读写见 h2_framer，会话/流注册表见 h2_session。
 // HPACK 解码是独立 codec，这里留 raw header block 槽位，后续单独接。
 // ──────────────────────────────────────────────────────────────────
+#include "web_server/h2/h2_hpack.h"
 #include <cstdint>
 #include <string>
 
@@ -102,10 +103,15 @@ struct H2Stream {
     StreamState state = StreamState::IDLE;
     bool      end_stream_received = false;      // 对端 END_STREAM 已到
     bool      headers_done = false;             // END_HEADERS 已到
-    std::string header_block;                    // 原始 HPACK 字节（解码留槽位）
-    std::string body;                            // DATA 累积（本例 GET 无 body）
+    std::string header_block;                    // 原始 HPACK 字节
+    std::vector<Header> headers;               // 解码后的头（END_HEADERS 时产出）
+    std::string body;                           // DATA 累积（GET 一般没有）
     // 本流我方发送窗口（对端给我们的信用）；仅发的 DATA 消耗它
     int32_t send_window = static_cast<int32_t>(kDefaultWindow);
+    // 流控等待时待发的 DATA 余量（大文件 > 窗口时分段发）
+    std::string pending_body;
+    bool served = false;                       // 已开始响应
+    bool done = false;                         // 已完成（END_STREAM 已发），待 GC
 };
 
 } // namespace h2

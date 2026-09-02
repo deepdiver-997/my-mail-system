@@ -6,27 +6,33 @@ namespace web_server {
 namespace h2 {
 
 H2Server::H2Server(const mail_system::ServerConfig& config,
+                   std::string doc_root,
                    std::shared_ptr<mail_system::ThreadPoolBase> ioThreadPool,
                    std::shared_ptr<mail_system::ThreadPoolBase> workerThreadPool,
                    std::shared_ptr<mail_system::DBPool> dbPool)
     : mail_system::TcpServerBase<TcpH2Session, SslH2Session>(
           config, ioThreadPool, workerThreadPool, dbPool)
+    , doc_root_(std::move(doc_root))
 {
-    LOG_SERVER_INFO("H2Server (HTTP/2 multi-stream）ready");
+    LOG_SERVER_INFO("H2Server (HTTP/2 multi-stream) ready, doc_root={}", doc_root_);
 }
 
 std::shared_ptr<TcpH2Session> H2Server::make_tcp_session(
     std::unique_ptr<mail_system::TcpConnection> conn,
     const mail_system::ListenerConfig& /*lc*/)
 {
-    return std::make_shared<TcpH2Session>(this, std::move(conn));
+    auto s = std::make_shared<TcpH2Session>(this, std::move(conn));
+    s->set_doc_root(doc_root_);
+    return s;
 }
 
 std::shared_ptr<SslH2Session> H2Server::make_ssl_session(
     std::unique_ptr<mail_system::SslConnection> conn,
     const mail_system::ListenerConfig& /*lc*/)
 {
-    return std::make_shared<SslH2Session>(this, std::move(conn));
+    auto s = std::make_shared<SslH2Session>(this, std::move(conn));
+    s->set_doc_root(doc_root_);
+    return s;
 }
 
 bool H2Server::should_reject_connection(std::string& reason,
