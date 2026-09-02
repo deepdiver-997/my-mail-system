@@ -233,14 +233,19 @@ void SessionBase<ConnectionType>::rearm_impl(std::chrono::milliseconds timeout) 
         });
 }
 
-// disarm 直接同步 cancel，不用 shared_from_this + post。
-// 原因：disarm 由 close() 调用，而 close() 可能来自 ~SessionBase()（最后 owner
-// 释放——典型是 watchdog 定时器 handler 完成释放 self）。此时对象已无 shared owner，
-// shared_from_this() 会抛 bad_weak_ptr。disarm 只在 io 线程（正常 close / IMAP 退出
-// IDLE）或析构（无并发 dispatch）被调，直接 cancel 安全且不依赖 owner。
+// disarm 把 cancel post 回 io 线程，靠捕获 timer 自身 shared_ptr（而非 this/session）。
+// 这样同时躲开两个坑：
+//   1) 直接同步 cancel：close() 可能来自 ~SessionBase() 所在线程 ≠ 定时器 io 线程 → 在
+//      别的线程改 io 对象，与 io 线程 dispatch 竞争 = 跨线程 UAF（ASan 实测于此崩）。
+//   2) shared_from_this() + post：析构期对象已无 owner，shared_from_this 抛 bad_weak_ptr。
+// 捕获 timer（shared_ptr 原子拷贝、不依赖 session owner）→ 定时器在 post 运行期间被
+// 保活 → cancel 在它自己的 io 线程执行 → 都安全。析构期也成立：析构前先拷贝 timer 即可。
 template <typename ConnectionType>
 void SessionBase<ConnectionType>::disarm_timeout() {
-    if (timeout_timer_) timeout_timer_->cancel();
+    if (!timeout_timer_) return;
+    auto timer = timeout_timer_;                       // 拷贝共享所有权（不依赖 session）
+    auto ex = timer->get_executor();
+    boost::asio::post(std::move(ex), [timer]() { timer->cancel(); });
 }
 
 // io 线程触发（steady_timer handler 绑连接 executor）。
