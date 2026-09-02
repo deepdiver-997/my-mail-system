@@ -493,6 +493,17 @@ if(NOT BUILD_OBJECT_ONLY AND BUILD_TESTS)
     target_include_directories(buffered_upload_stream_test PRIVATE "${CMAKE_SOURCE_DIR}/test/unit")
     setup_mail_target(buffered_upload_stream_test)
 
+    # web_server 纯函数层单测：MessageProcessor / h2_framer / h2_hpack / h2_codec
+    add_executable(h2_web_test
+        test/unit/h2_web_test.cpp
+        src/web_server/message_processor.cpp
+        src/web_server/http_parser.cpp
+        src/web_server/h2/h2_framer.cpp
+        src/web_server/h2/h2_hpack.cpp
+        src/web_server/codec/h2_codec.cpp
+    )
+    setup_mail_target(h2_web_test)
+
     add_executable(io_error_test
         test/unit/io_error_test.cpp
     )
