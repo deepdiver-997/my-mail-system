@@ -99,6 +99,12 @@ private:
     HeaderDecoder decoder_;
     std::string   doc_root_;
     int32_t       conn_send_window_ = static_cast<int32_t>(kDefaultWindow);
+    // 对端最大帧大小（RFC 9113 §3.5 默认 16384；对端 SETTINGS_MAX_FRAME_SIZE 可提高）。
+    // 发 DATA 必须切成 ≤ 它的大小，否则超长帧 = FRAME_SIZE_ERROR → 对端断连。
+    uint32_t      max_frame_size_  = 16384;
+    // 对端 SETTINGS_INITIAL_WINDOW_SIZE：新流的发送窗口（RFC 9113 §6.5.2 —— 管每流，
+    // 不管连接窗）。连接窗 conn_send_window_ 与它无关，只由连接级 WINDOW_UPDATE 抬升。
+    int32_t       peer_stream_window_ = static_cast<int32_t>(kDefaultWindow);
 
     // 出站队列
     std::string out_pending_;

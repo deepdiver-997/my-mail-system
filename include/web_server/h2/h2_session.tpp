@@ -151,12 +151,22 @@ void H2Session<ConnectionType>::handle_connection_frame(const Frame& f) {
 // ── 流级帧（stream>0）：路由到 map<stream_id, H2Stream> ──────
 template <typename ConnectionType>
 void H2Session<ConnectionType>::handle_stream_frame(const Frame& f) {
-    // 客户端必须用单调递增的奇流 ID 开流；非法 → 连接级错误
-    if ((f.stream_id & 1) == 0 || f.stream_id <= last_client_stream_) {
+    // 偶数流 ID 一律不可能是客户端开的流 → 连接级错误
+    if ((f.stream_id & 1) == 0) {
         close_protocol(ErrorCode::PROTOCOL_ERROR);
         return;
     }
-    last_client_stream_ = f.stream_id;
+    // 只有 HEADERS 才"开新流"，才适用"客户端必须单调递增的奇流 ID"门控。
+    // 同一流上后续的 WINDOW_UPDATE/DATA/CONTINUATION 复用同一 stream_id 完全合法，
+    // 若对它们也套 <=last_client_stream_，会在发完首批 65535B 后把流误判为新流→
+    // 误报 PROTOCOL_ERROR（8MB 流控大文件卡死点）。
+    if (f.type == FrameType::HEADERS) {
+        if (f.stream_id <= (uint32_t)last_client_stream_) {
+            close_protocol(ErrorCode::PROTOCOL_ERROR);
+            return;
+        }
+        last_client_stream_ = (int32_t)f.stream_id;
+    }
 
     if (f.type == FrameType::RST_STREAM) {
         streams_.erase(f.stream_id);                     // 对方主动掐流
@@ -166,7 +176,10 @@ void H2Session<ConnectionType>::handle_stream_frame(const Frame& f) {
     prune_streams();                                     // 安全点 GC 已完结流
     auto& st = streams_[f.stream_id];                    // 惰性建流
     st.id = f.stream_id;
-    if (st.state == StreamState::IDLE) st.state = StreamState::OPEN;
+    if (st.state == StreamState::IDLE) {
+        st.state = StreamState::OPEN;
+        st.send_window = peer_stream_window_;            // 新流发送窗口 = 对端广告值
+    }
 
     switch (f.type) {
         case FrameType::HEADERS: {
@@ -295,6 +308,7 @@ void H2Session<ConnectionType>::drain_stream(H2Stream& st) {
         uint32_t avail = available_window(st);
         if (avail == 0) return;                       // 窗口耗尽，等 WINDOW_UPDATE
         size_t n = std::min((size_t)avail, st.pending_body.size());
+        if (n > max_frame_size_) n = max_frame_size_; // 单帧不得超过对端最大帧大小
         std::string chunk = st.pending_body.substr(0, n);
         st.pending_body.erase(0, n);
         st.send_window -= (int32_t)n;
@@ -335,12 +349,20 @@ void H2Session<ConnectionType>::apply_peer_settings(const std::string& payload) 
                        (uint32_t(uint8_t(payload[i + 4])) << 8) |
                        (uint32_t(uint8_t(payload[i + 5])));
         switch (static_cast<SettingsId>(key)) {
-            case SettingsId::INITIAL_WINDOW_SIZE:
-                // 对端给我方的初始发送窗口（影响 DATA 流控）
-                conn_send_window_ = (int32_t)val;
+            case SettingsId::INITIAL_WINDOW_SIZE: {
+                // 对端给我方的每流发送窗口（RFC 9113 §6.5.2）：排他地管"流级"流控，
+                // 与连接窗无关。改动需按 delta 调整所有在建流（RFC 9113 §6.9.2）。
+                int32_t delta = (int32_t)val - peer_stream_window_;
+                peer_stream_window_ = (int32_t)val;
+                for (auto& kv : streams_) kv.second.send_window += delta;
                 break;
+            }
             case SettingsId::HEADER_TABLE_SIZE:
                 decoder_.set_header_table_size(val);
+                break;
+            case SettingsId::MAX_FRAME_SIZE:
+                // 对端允许的最大帧大小（决定我们 DATA 单帧上限）
+                if (val >= 16384 && val <= (1u << 24) - 1) max_frame_size_ = val;
                 break;
             default: break;
         }
