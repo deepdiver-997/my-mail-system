@@ -2,6 +2,8 @@
 
 ProtoRelay is a C++17 mail relay core focused on SMTP protocol execution and delivery pipeline foundations.
 
+It also ships two demo/validation servers built on the same framework — a static‑file **HTTP/1.1** server and a **HTTP/2** multi‑stream server (`webServer`, `h2web`, plus `web_server/`). These exist to validate framework reuse and exercise protocol layering, not as production web hosts.
+
 ## Framework / Application Separation
 
 The codebase is structured as a reusable framework + application:
@@ -26,9 +28,16 @@ include/mail_system/back/   # 邮件系统（框架的成熟应用）
 ├── persist_storage/        #   持久化队列 + Bloom 去重
 ├── inbound/                #   SPF/DKIM/DMARC 入站验证
 └── ...
+
+include/web_server/        # Web 服务器（框架的应用之二，脚手架）
+├── http_*                 #   HTTP/1.1 静态文件（按行读，keep-alive）
+├── message_processor.*    #   协议无关 request→response（H1/H2 共用）
+├── h2/                    #   HTTP/2 多流会话（连接级 FSM + 流注册表 + 流控）
+└── codec/h2_codec.*       #   HTTP/2 wire→message（帧去复用 + HPACK）
 ```
 
-邮件系统目前是框架上最成熟的应用。框架组件可在其他协议服务中复用。
+邮件系统目前是框架上最成熟的应用。框架组件可在其他协议服务中复用；Web 服务器
+（`web_server/`）是验证"框架复用 + 协议分层"的第二应用，详阅 [`docs/web-server/`](docs/web-server/README.md)。
 
 ## Current Implemented Scope
 
@@ -39,6 +48,12 @@ At this stage, ProtoRelay intentionally focuses on core SMTP capabilities:
 - Delivery pipeline (queue + outbound relay path)
 
 This is a deliberate narrow scope: the project is building a robust relay core before adding broader protocol surface.
+
+In parallel, two **web scaffold** servers validate that the same framework (async SessionBase,
+FastFsm, IO/worker pools, watchdog) carries a second protocol family:
+- `webServer` — HTTP/1.1 static files
+- `h2web` — HTTP/2 multi‑stream static files (HPACK + flow control)
+Business docs: [`docs/web-server/README.md`](docs/web-server/README.md).
 
 ## Extensibility by Design
 
@@ -66,6 +81,14 @@ Example:
 ./build/smtpsServer --help
 ./build/smtpsServer --version
 ./build/smtpsServer -c config/smtpsConfig.json
+```
+
+Web scaffold targets (no DB / config file needed):
+```bash
+./build/webServer ./config/web 8080            # HTTP/1.1 静态文件
+./build/h2web 8081 ./config/web                # HTTP/2(prior-knowledge) 静态文件
+curl http://localhost:8080/                    # H1
+curl --http2-prior-knowledge http://localhost:8081/   # H2
 ```
 
 ## Inbound ACK and Persistence Tuning
@@ -117,6 +140,7 @@ Operational note:
 4. **Lock-free queue**: `boost::lockfree::queue` replaced `deque + mutex + cv` in PersistentQueue, with exponential backoff for the worker.
 5. **Log level**: INFO-level spdlog synchronous stdout writes become the bottleneck under concurrency; use `warn` for benchmarks.
 6. **SMTP pipelining**: `do_async_read` checks the command buffer first — complete lines are processed immediately (one FSM round-trip each), only falling back to network read when exhausted. Incomplete commands wait for the next TCP chunk.
+7. **Per-thread io_context is load-bearing**: if `IOThreadPool` ever makes every thread share one `io_context` (a `vector<shared_ptr>(N, make_shared)` footgun), one connection's read & write completions get scheduled by N threads → H2's continuous multi-frame pumping races shared outbound state (ASan UAF). H1/SMTP/IMAP/POP3 hide it because they write once per request. Each io thread must own a distinct context. See [`docs/web-server/bugfixes/2026-09-02-shared-io-context.md`](docs/web-server/bugfixes/2026-09-02-shared-io-context.md).
 
 ## Current Outbound Hot-Dispatch Semantics
 
@@ -144,6 +168,7 @@ Version/build metadata is generated during CMake configure and injected into the
 ```bash
 ./build.sh Debug
 ./build.sh Release
+# 或只编 web 相关： cmake --build build --target webServer / h2web / h2_web_test
 ```
 
 The build script auto-creates `build/` and keeps generated CMake artifacts out of source root.
