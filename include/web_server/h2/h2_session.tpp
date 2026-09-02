@@ -148,119 +148,54 @@ void H2Session<ConnectionType>::handle_connection_frame(const Frame& f) {
     }
 }
 
-// ── 流级帧（stream>0）：路由到 map<stream_id, H2Stream> ──────
+// ── 流级帧（stream>0）：流控类 session 自处理；请求装配/去复用交 codec ──
 template <typename ConnectionType>
 void H2Session<ConnectionType>::handle_stream_frame(const Frame& f) {
-    // 偶数流 ID 一律不可能是客户端开的流 → 连接级错误
-    if ((f.stream_id & 1) == 0) {
-        close_protocol(ErrorCode::PROTOCOL_ERROR);
-        return;
-    }
-    // 只有 HEADERS 才"开新流"，才适用"客户端必须单调递增的奇流 ID"门控。
-    // 同一流上后续的 WINDOW_UPDATE/DATA/CONTINUATION 复用同一 stream_id 完全合法，
-    // 若对它们也套 <=last_client_stream_，会在发完首批 65535B 后把流误判为新流→
-    // 误报 PROTOCOL_ERROR（8MB 流控大文件卡死点）。
-    if (f.type == FrameType::HEADERS) {
-        if (f.stream_id <= (uint32_t)last_client_stream_) {
-            close_protocol(ErrorCode::PROTOCOL_ERROR);
-            return;
-        }
-        last_client_stream_ = (int32_t)f.stream_id;
-    }
-
+    // 流控/资源类帧：session 自处理
     if (f.type == FrameType::RST_STREAM) {
-        streams_.erase(f.stream_id);                     // 对方主动掐流
+        codec_.abort_stream(f.stream_id);                // 清装配态
+        streams_.erase(f.stream_id);                     // 清流控态
         return;
     }
+    if (f.type == FrameType::WINDOW_UPDATE) {
+        auto it = streams_.find(f.stream_id);
+        if (it == streams_.end()) return;                // 未知/已关流的 WU → 规范上忽略
+        uint32_t inc = f.payload.size() >= 4
+            ? ((uint32_t((uint8_t)f.payload[0]) & 0x7f) << 24 |
+               (uint32_t((uint8_t)f.payload[1]) << 16) |
+               (uint32_t((uint8_t)f.payload[2]) << 8) |
+               (uint32_t((uint8_t)f.payload[3]))) : 0;
+        if (inc) it->second.send_window += (int32_t)inc;
+        if (!it->second.pending_body.empty()) drain_stream(it->second);
+        return;
+    }
+    if (f.type == FrameType::PRIORITY) return;           // 影响调度优先级，本骨架忽略
+
+    // HEADERS 记录最近客户流（GOAWAY 用）；单调/Q门控在 codec 内校验
+    if (f.type == FrameType::HEADERS) last_client_stream_ = (int32_t)f.stream_id;
+
+    // 请求装配/去复用/HPACK 归 codec：HEADERS/CONTINUATION/DATA → 可能产出归一化请求
+    auto cr = codec_.feed((int32_t)f.stream_id, f.type, f.flags, f.payload);
+    if (!cr.protocol_ok) { close_protocol(cr.error); return; }
 
     prune_streams();                                     // 安全点 GC 已完结流
-    auto& st = streams_[f.stream_id];                    // 惰性建流
+    auto& st = streams_[f.stream_id];                    // 惰性建【流控】流
     st.id = f.stream_id;
     if (st.state == StreamState::IDLE) {
         st.state = StreamState::OPEN;
         st.send_window = peer_stream_window_;            // 新流发送窗口 = 对端广告值
     }
-
-    switch (f.type) {
-        case FrameType::HEADERS: {
-            // 先剥掉不在 HPACK 里的前缀：PRIORITY(依赖+权重 5B) 与 PADDED(1B 长度+尾部填充)
-            size_t off = 0;
-            std::string payload = f.payload;
-            if (f.flags & flag::PRIORITY) off += 5;
-            if (f.flags & flag::PADDED) {
-                if (payload.size() <= off) { close_protocol(ErrorCode::PROTOCOL_ERROR); return; }
-                uint8_t padlen = (uint8_t)payload[off++];
-                if (payload.size() < off + padlen) { close_protocol(ErrorCode::PROTOCOL_ERROR); return; }
-                payload = payload.substr(off, payload.size() - off - padlen);
-            } else {
-                payload = payload.substr(off);
-            }
-            st.header_block += payload;                  // 纯 HPACK 字节
-            if (f.flags & flag::END_HEADERS) st.headers_done = true;
-            if (f.flags & flag::END_STREAM) { st.end_stream_received = true; st.state = StreamState::HALF_CLOSED_REMOTE; }
-            if (st.headers_done && st.end_stream_received && !st.served) serve_stream(st);
-            break;
-        }
-        case FrameType::CONTINUATION:
-            st.header_block += f.payload;                // 纯 HPACK 续帧（无 PRIORITY/PADDED）
-            if (f.flags & flag::END_HEADERS) st.headers_done = true;
-            if (st.headers_done && !st.served) {
-                if (st.end_stream_received) serve_stream(st);
-            }
-            break;
-            if (f.flags & flag::END_STREAM) { st.end_stream_received = true; st.state = StreamState::HALF_CLOSED_REMOTE; }
-            if (st.headers_done && st.end_stream_received && !st.served) serve_stream(st);
-            break;
-        case FrameType::DATA:
-            st.body += f.payload;
-            if (f.flags & flag::END_STREAM) {
-                st.end_stream_received = true;
-                st.state = StreamState::HALF_CLOSED_REMOTE;
-                if (st.headers_done && !st.served) serve_stream(st);
-            }
-            break;
-        case FrameType::WINDOW_UPDATE: {
-            // 本流发送窗口↑；有新信用就续发本流 pending DATA
-            uint32_t inc = f.payload.size() >= 4
-                ? ((uint32_t((uint8_t)f.payload[0]) & 0x7f) << 24 |
-                   (uint32_t((uint8_t)f.payload[1]) << 16) |
-                   (uint32_t((uint8_t)f.payload[2]) << 8) |
-                   (uint32_t((uint8_t)f.payload[3]))) : 0;
-            if (inc) st.send_window += (int32_t)inc;
-            if (!st.pending_body.empty()) drain_stream(st);
-            break;
-        }
-        case FrameType::PRIORITY:
-            break;   // 影响调度优先级，本骨架忽略
-        default:
-            close_protocol(ErrorCode::PROTOCOL_ERROR);
-            break;
+    if (f.type == FrameType::DATA) st.body += f.payload; // 静态 GET 无体，仅占位累积
+    if (cr.request && !st.served) {
+        st.served = true;
+        serve_stream(st, *cr.request);
     }
 }
 
-// ── 响应：HPACK 解码请求头 → MessageProcessor(纯路由) → HEADERS+分片 DATA(流控) ──
+// ── 响应：MessageProcessor(纯路由) → HEADERS+分片 DATA(流控) ──
+// req 已由 codec 归一化（wire→message）；本函数只做"请求→响应 + 发送"，不碰帧/头装配。
 template <typename ConnectionType>
-void H2Session<ConnectionType>::serve_stream(H2Stream& st) {
-    st.served = true;
-    // 解码请求头（连接级 decoder，动态表跨流共享）
-    if (st.headers.empty() && !st.header_block.empty()) {
-        if (!decoder_.decode(st.header_block, st.headers)) {
-            std::string hx;
-            for (unsigned char c : st.header_block) { char b[4]; std::snprintf(b,4,"%02x",c); hx += b; }
-            LOG_SESSION_ERROR("H2 hpack decode FAIL, {}B block={}", st.header_block.size(), hx);
-            close_protocol(ErrorCode::COMPRESSION_ERROR);   // HPACK 解码失败
-            return;
-        }
-    }
-    // 把流级请求头规约成规范 HttpRequest，喂给纯函数 processor ——
-    // processor 不持有 session，也不知道流过到自己；它就是"请求→响应"。
-    web_server::HttpRequest req;
-    for (auto& h : st.headers) {
-        if      (h.first == ":method") req.method = h.second;
-        else if (h.first == ":path")   req.path   = h.second;
-    }
-    if (req.method.empty()) req.method = "GET";
-    if (req.path.empty()) req.path = "/";
+void H2Session<ConnectionType>::serve_stream(H2Stream& st, const web_server::HttpRequest& req) {
     web_server::HttpResponse resp = web_server::process_static_request(req, doc_root_);
 
     bool head_only = (req.method == "HEAD");
@@ -358,7 +293,7 @@ void H2Session<ConnectionType>::apply_peer_settings(const std::string& payload) 
                 break;
             }
             case SettingsId::HEADER_TABLE_SIZE:
-                decoder_.set_header_table_size(val);
+                codec_.apply_header_table_size(val);       // 解码器归 codec
                 break;
             case SettingsId::MAX_FRAME_SIZE:
                 // 对端允许的最大帧大小（决定我们 DATA 单帧上限）

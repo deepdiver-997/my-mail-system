@@ -20,6 +20,7 @@
 #include "web_server/h2/h2_types.hpp"
 #include "web_server/h2/h2_framer.h"
 #include "web_server/h2/h2_hpack.h"
+#include "web_server/codec/h2_codec.h"  // H2Codec（wire→message）
 #include "web_server/http_parser.h"     // resolve_safe_path / mime_for_extension
 #include "web_server/http_types.hpp"    // mime_for_extension
 #include "web_server/message_processor.h"  // process_static_request（纯 request→response）
@@ -80,7 +81,7 @@ private:
     void dispatch_frame(const Frame& f);
     void handle_connection_frame(const Frame& f);
     void handle_stream_frame(const Frame& f);
-    void serve_stream(H2Stream& st);
+    void serve_stream(H2Stream& st, const web_server::HttpRequest& req);   // req 由 codec 归一化
     void send_response(H2Stream& st, std::vector<Header> resp, std::string body, bool head_only);
     void drain_stream(H2Stream& st);       // 按流/连接窗口发 DATA 余量
     void prune_streams();                  // 移除标记 done 的流（安全点 GC，不在遍历中删）
@@ -92,12 +93,12 @@ private:
     bool got_preface_ = false;
     bool frame_ready_ = false;
     Frame cur_frame_;
-    std::map<int32_t, H2Stream> streams_;
-    int32_t last_client_stream_ = 0;   // 校验流 ID 单调递增（客户端开奇流）
+    std::map<int32_t, H2Stream> streams_;           // 每流【流控/发送】态（见 codec.H2Codec 装配套）
+    int32_t last_client_stream_ = 0;                // 最近的客户端流 ID（close_protocol → GOAWAY 用）
 
-    // HTTP/2 语义：连接级 HPACK 解码器（动态表跨流共享）+ 连接级发送窗口 + 静态根
-    HeaderDecoder decoder_;
+    // HTTP/2 语义：连接级发送窗口 + 静态根；wire→message 头装配/HPACK 归 codec
     std::string   doc_root_;
+    web_server::codec::H2Codec codec_;              // 帧去复用 + 每流请求装配 + HPACK 解码
     int32_t       conn_send_window_ = static_cast<int32_t>(kDefaultWindow);
     // 对端最大帧大小（RFC 9113 §3.5 默认 16384；对端 SETTINGS_MAX_FRAME_SIZE 可提高）。
     // 发 DATA 必须切成 ≤ 它的大小，否则超长帧 = FRAME_SIZE_ERROR → 对端断连。

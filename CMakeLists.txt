@@ -445,6 +445,7 @@ else()
         ${COMMON_SRCS}
         src/web_server/message_processor.cpp
         src/web_server/http_parser.cpp        # resolve_safe_path / mime（静态路由复用）
+        src/web_server/codec/h2_codec.cpp
         src/web_server/h2/h2_framer.cpp
         src/web_server/h2/h2_hpack.cpp
         src/web_server/h2/h2_session_inst.cpp
