@@ -6,16 +6,29 @@
 // 永远不释放 → 每个 async 查询泄漏一条连接 → 池耗尽 → io 线程卡 5s
 // connection_timeout。压测复现：89 次 acquire 只有 1 次 release。
 //
+// 剧情 2（2026-09-05）：结果列超出 256 字节绑定缓冲时，mysql_stmt_fetch 返回
+// MYSQL_DATA_TRUNCATED(101)（行可用、列被截断），旧代码视作错误中止整个结果集
+// → 生产事故：test3 收件箱一封 285 字节主题邮件让 IMAP UID SEARCH 整体失败
+// （NO Server error），客户端表现即"账号连不上"。修复后必须完整取回长列。
+//
 // 依赖真实 DB（config/db_config.json 指向的 MySQL/MariaDB 服务 + mail 库）：
 // 文件不存在或连不上 → 静默 SKIP（返回 0），不影响 CI。
 // 本测试跑在主线程（无 io_context 注册）→ async 走阻塞 poll 路径，回调同步触发。
 
 #include "mail_system/back/db/mariadb_pool.h"
 #include "mail_system/back/db/mariadb_service.h"
+#include "mail_system/back/db/mysql_service.h"
 #include "mail_system/back/db/db_pool.h"
 #include <iostream>
 
 using namespace mail_system;
+
+namespace {
+
+// >256 字节的 UTF-8 值（300 个汉字 = 900 字节），恰好踩中旧的 256 字节默认缓冲
+const char* kBigExpr = "REPEAT('中', 300)";
+
+} // namespace
 
 int main() {
     DBPoolConfig cfg;
@@ -73,5 +86,54 @@ int main() {
 
     std::cout << "PASS: " << completed << " async queries, pool available "
               << initial_avail << " -> " << after_avail << " (no leak)\n";
+
+    // ---- 剧情 2：>256 字节列必须完整取回（MYSQL_DATA_TRUNCATED 不得中止结果集）----
+    {
+        // 期望值：300 个 "中" 的 UTF-8 字节
+        std::string want;
+        for (int i = 0; i < 300; ++i) want += "\xe4\xb8\xad";
+
+        // 1) MariaDB async 路径（AsyncStmtOp 结果拉取）
+        {
+            auto sc = pool->acquire_connection();
+            if (!sc->is_valid()) { std::cout << "FAIL: acquire for big-column test\n"; return 1; }
+            std::shared_ptr<IDBResult> res;
+            bool done = false;
+            sc->operator->()->async_query(
+                std::string("SELECT ") + kBigExpr + " AS big_subject",
+                [&](std::shared_ptr<IDBResult> r) { res = r; done = true; });
+            if (!done || !res) {
+                std::cout << "FAIL: async big-column query returned null result\n";
+                return 1;
+            }
+            if (res->get_row_count() != 1 || res->get_value(0, "big_subject") != want) {
+                std::cout << "FAIL: async big-column value wrong/truncated (len="
+                          << (res->get_row_count() ? res->get_value(0, "big_subject").size() : 0)
+                          << ", expect " << want.size() << ")\n";
+                return 1;
+            }
+        }
+
+        // 2) MySQL 同步 query 路径（生产 IMAP/SMTP 的 MySQLConnection::query）
+        {
+            MySQLService svc;
+            auto conn = svc.create_connection(cfg.host, cfg.user, cfg.password,
+                                              cfg.database, cfg.port);
+            auto res = conn->query(std::string("SELECT ") + kBigExpr + " AS big_subject", {});
+            if (!res) {
+                std::cout << "FAIL: mysql sync big-column query returned null result\n";
+                return 1;
+            }
+            if (res->get_row_count() != 1 || res->get_value(0, "big_subject") != want) {
+                std::cout << "FAIL: mysql sync big-column value wrong/truncated (len="
+                          << (res->get_row_count() ? res->get_value(0, "big_subject").size() : 0)
+                          << ", expect " << want.size() << ")\n";
+                return 1;
+            }
+        }
+
+        std::cout << "PASS: 900-byte column fetched intact via async + sync (DATA_TRUNCATED handled)\n";
+    }
+
     return 0;
 }

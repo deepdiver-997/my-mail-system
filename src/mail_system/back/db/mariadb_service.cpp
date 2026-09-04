@@ -446,7 +446,9 @@ std::shared_ptr<IDBResult> MariaDBConnection::query(
         }
 
         int fetch_rc;
-        while ((fetch_rc = D.mysql_stmt_fetch(stmt)) == 0) {
+        // 同 mysql_service：MYSQL_DATA_TRUNCATED = 行可用（部分列超缓冲，循环内重取），
+        // 不得当作错误中止整个结果集（2026-09-05 test3 收件箱事故）
+        while ((fetch_rc = D.mysql_stmt_fetch(stmt)) == 0 || fetch_rc == MYSQL_DATA_TRUNCATED) {
             std::vector<std::string> row_data(num_fields);
             for (size_t i = 0; i < num_fields; ++i) {
                 if (result_nulls[i]) {
@@ -766,7 +768,8 @@ static std::shared_ptr<IDBResult> read_stmt_rows(MYSQL_STMT* stmt, MariaDbDriver
     }
 
     int fetch_rc;
-    while ((fetch_rc = D.mysql_stmt_fetch(stmt)) == 0) {
+    // 同步路径同理：MYSQL_DATA_TRUNCATED = 行可用（部分列超缓冲，循环内重取）
+    while ((fetch_rc = D.mysql_stmt_fetch(stmt)) == 0 || fetch_rc == MYSQL_DATA_TRUNCATED) {
         std::vector<std::string> row_data(num_fields);
         for (size_t i = 0; i < num_fields; ++i) {
             if (rnulls[i]) {

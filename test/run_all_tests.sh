@@ -54,7 +54,7 @@ for t in build/*_test; do
         pass=$((pass+1))
     else
         rc=$?
-        echo "FAIL  $name (exit $rc，详情: /tmp/${name}.log)"
+        echo "FAIL  $name (exit $rc; log: /tmp/${name}.log)"
         fail=$((fail+1))
         failed_tests+=("$name")
     fi

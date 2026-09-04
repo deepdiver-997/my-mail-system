@@ -418,7 +418,12 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const 
         }
 
         int fetch_rc;
-        while ((fetch_rc = mysql_stmt_fetch(stmt)) == 0) {
+        // MYSQL_DATA_TRUNCATED(101) = 行可用、部分列超出绑定缓冲 → 循环体内按
+        // result_lengths 扩缓冲重取该列。若不接受该返回值，任何一列超缓冲
+        // （如 >256 字节的 subject）都会中止整个结果集 → 查询整体失败。
+        // 事故：2026-09-05 test3 收件箱 285 字节主题行导致 IMAP UID SEARCH
+        // 全体失败（NO Server error），客户端表现即"账号连不上"。
+        while ((fetch_rc = mysql_stmt_fetch(stmt)) == 0 || fetch_rc == MYSQL_DATA_TRUNCATED) {
             std::vector<std::string> row_data(num_fields);
             for (size_t i = 0; i < num_fields; ++i) {
                 if (result_nulls[i]) {
