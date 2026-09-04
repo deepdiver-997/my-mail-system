@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- 创建邮件表（只存储邮件元数据，不存储收发件人）
 CREATE TABLE IF NOT EXISTS mails (
     id BIGINT PRIMARY KEY NOT NULL COMMENT '邮件ID（由服务器生成的Snowflake ID）',
-    subject VARCHAR(255) NOT NULL COMMENT '邮件主题',
+    subject VARCHAR(998) NOT NULL COMMENT '邮件主题（超长截断，≤998 字符）',
     body_path VARCHAR(512) COMMENT '邮件正文文件路径',
     send_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '发送时间',
     INDEX idx_send_time (send_time)

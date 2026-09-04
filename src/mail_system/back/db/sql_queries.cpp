@@ -24,6 +24,30 @@ namespace {
 // 邮件持久化
 // ============================================================
 
+std::string clip_subject_for_db(const std::string& subject) {
+    // 预算按 escape_string 后的字符数计：mysql_real_escape_string 会把
+    // ' " \ NUL \r \n ^Z 各变成 2 字符，其余（含多字节 UTF-8）按 1 计。
+    // 逐字符扣预算保证拼接后的 SQL 里 subject 段不超 kMaxSubjectChars，
+    // 并在不完整的多字节序列边界停住，避免截出半个字符。
+    std::size_t budget = kMaxSubjectChars;
+    std::size_t end = 0;
+    while (end < subject.size() && budget > 0) {
+        const unsigned char c = static_cast<unsigned char>(subject[end]);
+        std::size_t seq_len = 1;
+        if ((c & 0xE0) == 0xC0) seq_len = 2;
+        else if ((c & 0xF0) == 0xE0) seq_len = 3;
+        else if ((c & 0xF8) == 0xF0) seq_len = 4;
+        if (end + seq_len > subject.size()) break;  // 尾部不完整序列
+        const std::size_t cost =
+            (c == '\'' || c == '"' || c == '\\' || c == 0 || c == '\n' || c == '\r' || c == 0x1A) ? 2 : 1;
+        if (cost > budget) break;
+        budget -= cost;
+        end += seq_len;
+    }
+    if (end == subject.size()) return subject;
+    return subject.substr(0, end);
+}
+
 std::string build_insert_mail(std::uint64_t mail_id,
                                const std::string& subject,
                                const std::string& body_path,
@@ -31,7 +55,7 @@ std::string build_insert_mail(std::uint64_t mail_id,
                                IDBConnection* conn) {
     return "INSERT INTO mails (id, subject, body_path, send_time) VALUES (" +
            std::to_string(mail_id) + ", '" +
-           (conn ? conn->escape_string(subject) : subject) + "', '" +
+           (conn ? conn->escape_string(clip_subject_for_db(subject)) : clip_subject_for_db(subject)) + "', '" +
            (conn ? conn->escape_string(body_path) : body_path) + "', FROM_UNIXTIME(" +
            std::to_string(static_cast<long long>(send_time)) + "))";
 }
@@ -44,7 +68,7 @@ std::string build_insert_mail_with_status(std::uint64_t mail_id,
                                            IDBConnection* conn) {
     return "INSERT INTO mails (id, subject, body_path, status) VALUES (" +
            std::to_string(mail_id) + ", '" +
-           (conn ? conn->escape_string(subject) : subject) + "', '" +
+           (conn ? conn->escape_string(clip_subject_for_db(subject)) : clip_subject_for_db(subject)) + "', '" +
            (conn ? conn->escape_string(body_path) : body_path) + "', " +
            std::to_string(status) + ")";
 }
@@ -282,8 +306,9 @@ std::string build_dedup_by_subject_sender(const std::string& subject,
                                            const std::string& sender,
                                            int window_seconds,
                                            IDBConnection* conn) {
+    // 库里存的是截断后的主题（clip_subject_for_db），去重比较须用同一截断结果
     return "SELECT id FROM mails WHERE subject = '" +
-           (conn ? conn->escape_string(subject) : subject) + "' "
+           (conn ? conn->escape_string(clip_subject_for_db(subject)) : clip_subject_for_db(subject)) + "' "
            "AND id IN (SELECT mail_id FROM mail_recipients WHERE sender = '" +
            (conn ? conn->escape_string(sender) : sender) + "') "
            "AND TIMESTAMPDIFF(SECOND, send_time, NOW()) BETWEEN 0 AND " +
@@ -299,7 +324,7 @@ std::string build_dedup_by_subject_sender_recipient(const std::string& subject,
            "JOIN mails m ON m.id = r.mail_id "
            "WHERE r.sender='" + (conn ? conn->escape_string(sender) : sender) + "' "
            "AND r.recipient='" + (conn ? conn->escape_string(recipient) : recipient) + "' "
-           "AND m.subject='" + (conn ? conn->escape_string(subject) : subject) + "' "
+           "AND m.subject='" + (conn ? conn->escape_string(clip_subject_for_db(subject)) : clip_subject_for_db(subject)) + "' "
            "AND TIMESTAMPDIFF(SECOND, m.send_time, NOW()) BETWEEN 0 AND " +
            std::to_string(window_seconds) + " LIMIT 1";
 }

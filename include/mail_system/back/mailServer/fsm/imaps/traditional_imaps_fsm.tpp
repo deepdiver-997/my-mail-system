@@ -2699,7 +2699,7 @@ void TraditionalImapsFsm<ConnectionType>::create_mail_async(
         std::chrono::system_clock::now().time_since_epoch()).count();
     (*conn)->async_execute(db::sql::build_imap_append_mail_metadata(),
         {std::to_string(mail_id),
-         subject.empty() ? "(无主题)" : subject,
+         db::sql::clip_subject_for_db(subject.empty() ? "(无主题)" : subject),
          body_path, std::to_string(ts)},
         [conn, mail_id = static_cast<uint64_t>(mail_id), body_path = std::move(body_path),
          cb = std::move(cb)](bool ok) mutable {

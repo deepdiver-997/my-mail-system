@@ -16,6 +16,15 @@ namespace sql {
 // 邮件持久化 (mails / mail_recipients / mail_mailbox)
 // ============================================================
 
+// mails.subject 列宽（utf8mb4 字符数）。RFC 5322 单行上限 998 字节，encoded-word
+// 展开后的原始主题基本都落在此量级。超列入参会 1406 报错导致整个持久化事务
+// 回滚丢信（2026-09-04 入站事故），故入库/去重前一律先经 clip_subject_for_db。
+inline constexpr std::size_t kMaxSubjectChars = 998;
+
+// 按 DB 列宽截断主题：按 escape_string 后的字符数计预算（' " \ 等转义后翻倍），
+// 且不切断 UTF-8 多字节序列。未超限时原样返回。
+std::string clip_subject_for_db(const std::string& subject);
+
 // 插入邮件元数据 (完整版: 含 send_time)
 std::string build_insert_mail(std::uint64_t mail_id,
                                const std::string& subject,

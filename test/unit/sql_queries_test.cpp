@@ -332,6 +332,102 @@ void test_build_delete_queries() {
                    "DELETE FROM mails WHERE id IN (1,2,3)");
 }
 
+// ---- Subject 超长兜底（2026-09-04 入站 1406 丢信事故）----
+
+void test_clip_subject_helper() {
+    auto& clip = mail_system::db::sql::clip_subject_for_db;
+
+    // 短主题原样通过
+    check("clip_short_passthrough", clip("Hello") == "Hello");
+    check("clip_empty", clip("").empty());
+
+    // ASCII 超长：截到恰好 kMaxSubjectChars 个字符，且保持前缀
+    std::string long_ascii(1200, 'A');
+    check("clip_ascii_len", clip(long_ascii).size() == mail_system::db::sql::kMaxSubjectChars,
+          "expected clamp to column width");
+    check("clip_ascii_prefix", clip(long_ascii) == std::string(mail_system::db::sql::kMaxSubjectChars, 'A'));
+
+    // UTF-8 多字节：998 个汉字恰好占满预算（按字符计 1/字，3 字节/字）
+    std::string cjk998;
+    for (size_t i = 0; i < mail_system::db::sql::kMaxSubjectChars; ++i) cjk998 += "中";
+    std::string cjk1000 = cjk998 + "中西";
+    check("clip_cjk_exact_fit", clip(cjk998) == cjk998);
+    check("clip_cjk_char_boundary", clip(cjk1000) == cjk998,
+          "截断不得切断多字节序列（不能多出半个字）");
+
+    // 引号按转义后 2 字符计预算：600 个 ' → 恰好 499 个（998/2，防转义膨胀破列宽）
+    std::string quotes600(600, '\'');
+    check("clip_quote_escape_budget", clip(quotes600).size() == 499,
+          "预算须按 escape_string 后的字符数计");
+}
+
+void test_build_insert_mail_clamps_long_subject() {
+    // 1200 个 'A'：入库 SQL 中 subject 段必须是 998 个 A，不能更多
+    std::string long_subject(1200, 'A');
+    std::string sql = mail_system::db::sql::build_insert_mail(
+        12345ULL, long_subject, "/tmp/body.eml", 1718234567, nullptr);
+    std::string expect998(mail_system::db::sql::kMaxSubjectChars, 'A');
+    std::string expect999(mail_system::db::sql::kMaxSubjectChars + 1, 'A');
+    check_contains("insert_mail_clamped_subject", sql, "'" + expect998 + "'");
+    check("insert_mail_no_overrun", sql.find("'" + expect999) == std::string::npos,
+          "subject 超过列宽，未截断");
+
+    // 中文超长主题（1200 字 > 998 字符预算）按字符边界截断
+    std::string long_cjk;
+    for (int i = 0; i < 1200; ++i) long_cjk += "中";
+    std::string cjk_sql = mail_system::db::sql::build_insert_mail(
+        12345ULL, long_cjk, "/tmp/body.eml", 1718234567, nullptr);
+    std::string cjk_expect;
+    for (size_t i = 0; i < mail_system::db::sql::kMaxSubjectChars; ++i) cjk_expect += "中";
+    check_contains("insert_mail_clamped_cjk", cjk_sql, "'" + cjk_expect + "'");
+
+    // 短主题不受影响（回归：原有行为不变）
+    std::string short_sql = mail_system::db::sql::build_insert_mail(
+        12345ULL, "Test Subject", "/tmp/body.eml", 1718234567, nullptr);
+    check_contains("insert_mail_short_untouched", short_sql, "'Test Subject'");
+}
+
+void test_build_insert_mail_clamp_accounts_for_escaping() {
+    // 600 个单引号：helper 按「将被转义」保守计预算（生产路径必传 conn），
+    // 每个引号成本 2 → 截为 499 个，escape 后恰好 998 字符，不超列宽
+    std::string quotes(600, '\'');
+    std::string sql = mail_system::db::sql::build_insert_mail(
+        12345ULL, quotes, "/tmp/body.eml", 1718234567, nullptr);
+    // 引号会与外层定界符连成一片，用定长 run 精确判界：
+    // 499 个 subject 引号 + 外层 2 个 = 501 连引号后接 ", '/tmp"；多一个引号即超预算
+    std::string run501(501, '\'');
+    std::string run502(502, '\'');
+    check("insert_mail_quote_budget", sql.find(run501 + ", '/tmp") != std::string::npos);
+    check("insert_mail_quote_no_overrun", sql.find(run502 + ", '/tmp") == std::string::npos,
+          "转义膨胀预算未生效");
+}
+
+void test_build_insert_mail_with_status_clamps() {
+    std::string long_subject(1200, 'A');
+    std::string sql = mail_system::db::sql::build_insert_mail_with_status(
+        12345ULL, long_subject, "/tmp/body.eml", 1, nullptr);
+    std::string expect998(mail_system::db::sql::kMaxSubjectChars, 'A');
+    check_contains("insert_status_clamped_subject", sql, "'" + expect998 + "'");
+}
+
+void test_dedup_clamps_consistently() {
+    // 库里存截断后的主题，去重 WHERE 必须用同一截断结果，否则超长主题永不命中去重
+    std::string long_subject(1200, 'A');
+    std::string expect998(mail_system::db::sql::kMaxSubjectChars, 'A');
+
+    std::string insert_sql = mail_system::db::sql::build_insert_mail(
+        12345ULL, long_subject, "/tmp/body.eml", 1718234567, nullptr);
+    std::string ss = mail_system::db::sql::build_dedup_by_subject_sender(
+        long_subject, "alice@x.com", 600, nullptr);
+    std::string ssr = mail_system::db::sql::build_dedup_by_subject_sender_recipient(
+        long_subject, "alice@x.com", "bob@x.com", 600, nullptr);
+
+    check_contains("dedup_ss_clamped", ss, "subject = '" + expect998 + "'");
+    check_contains("dedup_ssr_clamped", ssr, "m.subject='" + expect998 + "'");
+    // 与入库截断结果逐字一致（同为 998 个 A，子串匹配即证明前缀一致）
+    check("dedup_matches_insert", insert_sql.find("'" + expect998 + "'") != std::string::npos);
+}
+
 // ---- Utilities ----
 
 void test_build_select_last_insert_id() {
@@ -371,6 +467,12 @@ int main() {
     test_build_dedup_by_subject_sender();
     test_build_dedup_by_ssr();
     test_build_dedup_by_msgid();
+
+    test_clip_subject_helper();
+    test_build_insert_mail_clamps_long_subject();
+    test_build_insert_mail_clamp_accounts_for_escaping();
+    test_build_insert_mail_with_status_clamps();
+    test_dedup_clamps_consistently();
 
     test_build_auth_user_query();
     test_build_update_last_login();
