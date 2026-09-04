@@ -10,10 +10,14 @@
 #include "framework/thread_pool/boost_thread_pool.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/router/static_shard_router.h"
+#include "mail_system/back/storage/local_file_storage_provider.h"
 #include "mail_system/back/common/logger.h"
 #include "mail_system/back/common/mail_crypto.h"
+#include "mail_system/back/algorithm/line_folder.h"
 #include "mock_connection.h"
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -22,6 +26,7 @@
 #include <spdlog/common.h>
 
 using namespace mail_system;
+using mail_system::algorithm::LineFolder;
 namespace pq = persist_storage;
 
 // ========== 测试夹具 ==========
@@ -57,11 +62,15 @@ struct FsmTestFixture {
         io_pool->start();
         worker_pool->start();
 
+        // 真实存储提供者：正文落盘到 /tmp/smtps_fsm_test_mail，供落盘内容断言
+        // （此前为空列表 → 正文被静默丢弃，DATA 落盘路径零覆盖）
+        auto storage = std::make_shared<storage::LocalFileStorageProvider>(
+            "/tmp/smtps_fsm_test_mail", "/tmp/smtps_fsm_test_att");
         router = std::make_shared<router::StaticShardRouter>(
             std::vector<std::pair<std::string, int>>{},
             0,
             std::vector<std::shared_ptr<DBPool>>{},
-            std::vector<std::shared_ptr<storage::IStorageProvider>>{});
+            std::vector<std::shared_ptr<storage::IStorageProvider>>{storage});
 
         persist_q = std::make_shared<pq::PersistentQueue>(router, worker_pool);
         pq::PersistentQueuePressureConfig pc;
@@ -284,6 +293,77 @@ TEST(full_delivery_pipeline) {
     assert(mails_accepted_after > mails_accepted_before &&
            "DATA END should have triggered submit_owned_mail + mails_accepted++");
     std::cout << "  [PASS] full_delivery_pipeline" << std::endl;
+}
+
+TEST(long_header_line_folded_on_ingest) {
+    // 入站行折叠（2026-09-05 防御层）：>2048 字节的头行落盘前被折叠成
+    // ≤2048 字节的合规行，投递流程不受影响；unfold 后语义可完整还原。
+    std::string long_subject(5000, 'x');
+    auto h = fx.make_session(
+        "EHLO test\r\n"
+        "MAIL FROM:<sender@test.local>\r\n"
+        "RCPT TO:<rcpt@test.local>\r\n"
+        "DATA\r\n"
+        "From: sender@test.local\r\n"
+        "To: rcpt@test.local\r\n"
+        "Subject: " + long_subject + "\r\n"
+        "\r\n"
+        "body\r\n"
+        ".\r\n"
+        "QUIT\r\n");
+    fx.start(h);
+    auto w = h.conn->written();
+    assert(HAS(w, "250 "));   // 折叠不阻断投递
+
+    // 落盘的原始报文（mail/<id>）每一行都 ≤2048 字节；Subject 折叠块
+    // unfold（删除 "\r\n "）后与原值逐字一致
+    namespace fs = std::filesystem;
+    const std::string want_subject = "Subject: " + long_subject;
+    bool subject_verified = false;
+    bool checked_raw_file = false;
+    for (auto& e : fs::directory_iterator("/tmp/smtps_fsm_test_mail")) {
+        if (!e.is_regular_file()) continue;
+        if (e.path().extension() == ".mime") continue;   // 结构 JSON，非原始报文
+        std::ifstream in(e.path(), std::ios::binary);
+        if (!in.is_open()) continue;   // 异步持久化可能在扫描中途增删文件，跳过即可
+        std::string line;
+        std::string folded_subject;
+        bool in_subject = false;
+        auto verify_folded = [&]() {
+            if (folded_subject.empty()) return;
+            // unfold：删除我们插入的折叠序列
+            std::string unfolded = folded_subject;
+            const std::string fold_seq = "\r\n ";
+            size_t pos;
+            while ((pos = unfolded.find(fold_seq)) != std::string::npos)
+                unfolded.erase(pos, fold_seq.size());
+            if (unfolded == want_subject) subject_verified = true;
+            folded_subject.clear();
+        };
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            assert(line.size() <= LineFolder::kMaxStorageLineBytes);
+            checked_raw_file = true;
+            if (line.rfind("Subject: ", 0) == 0) {
+                if (line == want_subject) { subject_verified = true; break; }  // 未折叠的短主题
+                if (line.size() > LineFolder::kMaxStorageLineBytes - 16) {
+                    folded_subject = line;                 // 长主题首行（被折叠的那个）
+                    in_subject = true;
+                }
+            } else if (in_subject) {
+                if (!line.empty() && line[0] == ' ') {
+                    folded_subject += "\r\n" + line;       // 折叠续行
+                } else {
+                    verify_folded();                       // 折叠块结束（如头/体空行）
+                    in_subject = false;
+                }
+            }
+        }
+        verify_folded();                                   // 文件结束时仍处于折叠块内
+    }
+    assert(checked_raw_file);
+    assert(subject_verified);
+    std::cout << "  [PASS] long_header_line_folded_on_ingest" << std::endl;
 }
 
 TEST(multiple_rcpt) {
@@ -769,6 +849,7 @@ int main() {
         test_empty_body(fx);
         test_dot_stuffing(fx);
         test_data_without_rcpt(fx);
+        test_long_header_line_folded_on_ingest(fx);
 
         // ── Timeout/Error ──
         test_timeout_handler(fx);

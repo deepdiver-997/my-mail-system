@@ -458,6 +458,7 @@ void SmtpsSession<ConnectionType>::reset_mail_state() {
     this->mail_ = nullptr;
     // 未 commit 就销毁 → MailBodyWriter 析构自动 abort，半成品文件不会留在盘上
     body_writer_.reset();
+    body_line_folder_.reset();
     clear_pending_mail_submission();
 
     context_.mail_data.clear();
@@ -568,10 +569,17 @@ void SmtpsSession<ConnectionType>::parse_smtp_command(const std::string& data) {
                 }
                 write_chunk = std::move(unstuffed);
             }
+            // 落盘前折叠超长行：给存储的原始报文单行长度设上界（≤2048 字节），
+            // 防止 BODY[HEADER]/POP3 RETR 等原始内容路径对弱缓冲客户端断连。
+            // 折叠器跨块携带半行，数据结束时须 flush()（见下方 data_end_seen）。
+            write_chunk = body_line_folder_.feed(write_chunk);
             append_body_data(write_chunk.data(), write_chunk.size());
         }
 
         if (data_end_seen) {
+            if (std::string tail = body_line_folder_.flush(); !tail.empty()) {
+                append_body_data(tail.data(), tail.size());
+            }
             finalize_attachment_from_context();
             next_event_ = SmtpsEvent::DATA_END;
             last_command_args_.clear();

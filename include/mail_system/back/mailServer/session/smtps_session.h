@@ -10,6 +10,7 @@
 #include "mail_system/back/mailServer/fsm/smtps/traditional_smtps_fsm.h"
 #include "mail_system/back/algorithm/smtp_utils.h"
 #include "mail_system/back/algorithm/snow.h"
+#include "mail_system/back/algorithm/line_folder.h"
 #include "mail_system/back/persist_storage/persistent_queue.h"
 #include "mail_system/back/storage/i_storage_provider.h"
 #include "mail_system/back/storage/mail_body_writer.h"
@@ -115,6 +116,10 @@ private:
     // 正文写入器。DATA 命令时创建，reset_mail_state() 时销毁；
     // 未 commit 就销毁会自动 abort 并删掉半成品文件。
     std::unique_ptr<storage::MailBodyWriter> body_writer_;
+
+    // 正文落盘前的超长行折叠器（跨 TCP 块携带半行，DATA 结束时 flush）。
+    // reset_mail_state() 时一并 reset，与 body_writer_ 生命周期对齐。
+    algorithm::LineFolder body_line_folder_;
 
     std::shared_ptr<persist_storage::PersistentQueue> persistent_queue_;
     persist_storage::PersistSubmissionTicket pending_submission_;
