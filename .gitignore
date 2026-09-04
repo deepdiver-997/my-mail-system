@@ -152,6 +152,7 @@ $RECYCLE.BIN/
 !test/scripts/*.sh
 !test/bench/*.sh
 !test/bench/*/profile.sh
+!test/run_all_tests.sh
 !scripts/generate_dkim_keys.sh
 !scripts/clear_mysql_mail_data.sh
 

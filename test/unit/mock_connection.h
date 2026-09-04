@@ -3,6 +3,7 @@
 #include "framework/connection/i_connection.h"
 #include "mock_io_context.h"
 
+#include <boost/asio/io_context.hpp>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -150,7 +151,12 @@ public:
     }
 
     boost::asio::any_io_executor get_executor() override {
-        return boost::asio::any_io_executor{};
+        // watchdog（SessionBase::rearm/disarm_timeout）无条件 post 到连接 executor。
+        // 必须返回真实 executor：空 any_io_executor 上 post 直接抛
+        // bad_executor，所有起 session 的 FSM 单测全灭。
+        // 返回私有 io_context 的 executor：post 进队但测试不 run() →
+        // watchdog 定时器永不创建/不触发，对单测惰性无害。
+        return boost::asio::any_io_executor{exec_ctx_.get_executor()};
     }
 
     void async_write(boost::asio::const_buffer buf, WriteHandler h) override {
@@ -184,13 +190,19 @@ public:
     }
 
     void close() override {
-        std::lock_guard<std::mutex> lk(mu_);
-        closed_ = true;
-        // 还原 asio 语义：关闭连接释放挂起的读/写 handler。
-        // 否则 pending_read_ 里捕获 shared_from_this 的 handler 与 session 形成
-        // 引用环，session 永不析构 → LSan 泄漏（如 IMAP IDLE 的 deferred read）。
-        pending_read_ = PendingRead{};
-        pending_write_handler_ = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            closed_ = true;
+            // 还原 asio 语义：关闭连接释放挂起的读/写 handler。
+            // 否则 pending_read_ 里捕获 shared_from_this 的 handler 与 session 形成
+            // 引用环，session 永不析构 → LSan 泄漏（如 IMAP IDLE 的 deferred read）。
+            pending_read_ = PendingRead{};
+            pending_write_handler_ = nullptr;
+        }
+        // 驱动 watchdog executor 队列：rearm 的 post 捕获 session shared_ptr，
+        // 若不排空，session 关闭后仍被队列钉住 → weak 永不过期/泄漏。
+        // closed_ 已置位，排空只是让 rearm lambda 进去短路返回，不会武装定时器。
+        exec_ctx_.poll();
     }
     bool is_open() const override {
         std::lock_guard<std::mutex> lk(mu_);
@@ -209,6 +221,8 @@ private:
 
     mutable std::mutex mu_;
     test::MockIoContext ctx_;
+    // 仅由 get_executor() 暴露给框架（watchdog post 落这里，测试不驱动它）
+    boost::asio::io_context exec_ctx_;
     std::string read_buf_;
     size_t read_pos_ = 0;
     std::string write_buf_;

@@ -1,9 +1,22 @@
 # ProtoRelay 测试文档
 
+## 全套单测一键跑（提交前必跑）
+
+```bash
+bash test/run_all_tests.sh            # 增量构建 Release + 全套 23 个单测
+bash test/run_all_tests.sh --no-build # 只跑不构建
+```
+
+**规则：改动框架层（framework/）或任何被多处复用的契约接口后，提交前必须跑完全套并确认无回归。**
+只跑自己改动的 target 检测不到间接破坏——mock/测试夹具往往还停留在旧契约上
+（实例见 `docs/bugfixes/2026-09-04-mock-empty-executor-fsm-tests.md`：
+框架开始 post 到连接 executor 后，mock 返回的空 executor 让 4 个 FSM 套件静默挂了一个多星期）。
+
 ## 测试架构
 
 ```
 test/
+├── run_all_tests.sh             # ★ 一键全套单测（构建 + 运行 + 汇总，提交前必跑）
 ├── unit/                        # C++ 单元测试（零 I/O，MockConnection）
 │   ├── smtps_fsm_test.cpp       # SMTP FSM 状态机测试（串行）
 │   ├── smtps_fsm_concurrency_test.cpp  # SMTP 入站异步并发测试（MockIoContext + TSan）
@@ -80,6 +93,11 @@ test/
   - 线程模式（`start()` 后）：任务由独立线程 FIFO 执行 → 真实异步投递。
 - **`mock_connection.h`** — 异步读写包装为任务投递到 MockIoContext，工作线程把
   数据跨线程拷进 session 的 `read_buffer_`；`written()` 返回加锁副本。
+  `get_executor()` 返回私有 `io_context` 的真实 executor（框架 watchdog `rearm`
+  会 post 过来）：post 入队但测试不驱动 → watchdog 在单测中惰性；`close()` 时
+  `poll()` 排空队列，让捕获 `shared_from_this` 的 rearm lambda 短路释放，
+  session 才能干净析构。**绝不可返回空 `any_io_executor{}`**——post 直抛
+  bad_executor，全部起 session 的 FSM 测试灭门（2026-09-04 修复）。
 - **`mock_dns_resolver.h`** — 三模式：
   - `Sync`（默认）：立即回调，兼容 `SyncDnsWrapper`（`test_inbound_verifier` 依赖）。
   - `Manual`：存回调（按 domain 入 deque，支持多会话同域），测试线程 `fire_*()` 手动触发。
