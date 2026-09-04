@@ -443,7 +443,10 @@ std::shared_ptr<IDBResult> MySQLConnection::query(const std::string& sql, const 
         }
 
         if (fetch_rc != MYSQL_NO_DATA) {
-            LOG_DB_QUERY_ERROR("MySQL stmt fetch error: {}", mysql_stmt_error(stmt));
+            // mysql_stmt_error 对部分状态（如 DATA_TRUNCATED）返回空串，
+            // 必须带上 rc 数值才有诊断价值（101=DATA_TRUNCATED）
+            LOG_DB_QUERY_ERROR("MySQL stmt fetch error: rc={} msg='{}'",
+                               fetch_rc, mysql_stmt_error(stmt));
             mysql_free_result(meta);
             return nullptr;
         }

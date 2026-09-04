@@ -467,7 +467,9 @@ std::shared_ptr<IDBResult> MariaDBConnection::query(
         }
 
         if (fetch_rc != MYSQL_NO_DATA) {
-            LOG_DB_QUERY_ERROR("MariaDB stmt fetch error: {}", D.mysql_stmt_error(stmt));
+            // mysql_stmt_error 对部分状态返回空串，带上 rc 数值才有诊断价值
+            LOG_DB_QUERY_ERROR("MariaDB stmt fetch error: rc={} msg='{}'",
+                               fetch_rc, D.mysql_stmt_error(stmt));
             D.mysql_free_result(meta);
             return nullptr;
         }
@@ -788,7 +790,9 @@ static std::shared_ptr<IDBResult> read_stmt_rows(MYSQL_STMT* stmt, MariaDbDriver
     }
 
     if (fetch_rc != MYSQL_NO_DATA) {
-        LOG_DB_QUERY_ERROR("MariaDB async: stmt fetch error: {}", D.mysql_stmt_error(stmt));
+        // mysql_stmt_error 对部分状态返回空串，带上 rc 数值才有诊断价值
+        LOG_DB_QUERY_ERROR("MariaDB async: stmt fetch error: rc={} msg='{}'",
+                           fetch_rc, D.mysql_stmt_error(stmt));
         D.mysql_free_result(meta);
         return nullptr;
     }
