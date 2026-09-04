@@ -35,7 +35,9 @@ docs/
 │   └── quick-log-config.md            # 快速日志配置
 ├── bugfixes/                          # 框架级 bug（编译器 / DB 连接池）
 │   ├── arm-apple-clang-make-shared-sigbus.md
-│   └── prepared-statement-connection-pool-issue.md
+│   ├── prepared-statement-connection-pool-issue.md
+│   ├── 2026-09-04-mock-empty-executor-fsm-tests.md
+│   └── 2026-09-05-stmt-fetch-data-truncated.md
 ├── reports/                           # 测试覆盖率报告（量化成果）
 │   └── coverage-YYYY-MM-DD.md         # 由 test/scripts/coverage.sh 生成
 └── style/                             # 规范与总结

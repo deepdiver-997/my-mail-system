@@ -3,7 +3,7 @@
 ## 全套单测一键跑（提交前必跑）
 
 ```bash
-bash test/run_all_tests.sh            # 增量构建 Release + 全套 23 个单测
+bash test/run_all_tests.sh            # 增量构建 Release + 全套 24 个单测
 bash test/run_all_tests.sh --no-build # 只跑不构建
 ```
 
@@ -24,6 +24,7 @@ test/
 │   ├── pop3_fsm_test.cpp        # POP3 FSM 状态机测试（11 命令 + 锁心跳/sweeper）
 │   ├── test_inbound_verifier.cpp# InboundVerifier 组件测试 (86 tests)
 │   ├── sql_queries_test.cpp     # SQL 查询生成器测试
+│   ├── line_folder_test.cpp     # 入站正文超长行折叠测试（LineFolder）
 │   ├── outbound_smoke.cpp       # 出站类型/FSM 烟雾测试
 │   ├── mime_parser_test.cpp     # MIME 解析器测试
 │   ├── buffered_upload_stream_test.cpp # 远程后端整对象缓冲上传流测试
